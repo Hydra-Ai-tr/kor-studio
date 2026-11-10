@@ -80,7 +80,10 @@ bool PythonSkill::open(TrainControl& ctl, std::string* err) {
         .field("lora_rank", m.spec.lora_rank);
     if (text) {
         w.field("vocab_size", m.spec.vocab).field("context", m.spec.ctx).field("width", m.spec.dim)
-            .field("layers", m.spec.nlayer).field("heads", m.spec.heads);
+            .field("layers", m.spec.nlayer).field("heads", m.spec.heads)
+            .field("media", m.spec.media == MEDIA_IMAGE ? "image" : m.spec.media == MEDIA_AUDIO ? "sound" : "text");
+        if (m.spec.media == MEDIA_IMAGE) w.field("image_size", m.spec.img_size);
+        if (m.spec.media == MEDIA_AUDIO) w.field("sample_rate", m.spec.rate);
     } else {
         w.field("inputs", m.spec.in_dim).field("outputs", m.spec.out_dim).field("regression", m.spec.regression);
         w.key("classes").begin_array();
@@ -107,6 +110,8 @@ bool PythonSkill::open(TrainControl& ctl, std::string* err) {
         .field("eval_every", c.eval_every).field("test_every", c.probe_every)
         .field("optimizer", c.optimizer == OPT_SGD ? "sgd" : "adamw")
         .field("keep_best", c.keep_best).field("patience", c.patience)
+        .field("align", (double)c.align).field("question_weight", (double)c.prompt_weight)
+        .field("dropout", (double)c.dropout).field("ema", (double)c.ema)
         .end_object();
     w.key("tests").begin_array();
     for (auto& p : c.probes) w.begin_object().field("question", p.question).field("expected", p.expected).end_object();
@@ -228,6 +233,10 @@ bool PythonSkill::converse(TrainControl& ctl, int timeout_ms, bool opening, std:
             ctl.clear_added();
         } else if (op == "mix") {
             ctl.set_mix((float)msg["value"].num(-1));
+        } else if (op == "sampling") {
+            ctl.set_sampling((float)msg["align"].num(-1), (float)msg["question_weight"].num(-1));
+        } else if (op == "dropout") {
+            ctl.set_dropout((float)msg["value"].num(0));
         } else if (op == "generate") {
             std::string out = ctl.generate(msg["prompt"].str(), (int)msg["length"].num(200),
                                            (float)msg["temperature"].num(0.8), msg["line"].flag());

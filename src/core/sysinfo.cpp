@@ -163,7 +163,28 @@ AutoPlan autotune(const SysInfo& s, const Dataset& d) {
         int by_power = power < 4 ? 0 : power < 8 ? 1 : power < 16 ? 2 : power < 32 ? 3 : 4;
         size_t n = d.ids.size();
         int by_data = n < 50000 ? 0 : n < 300000 ? 1 : n < 2000000 ? 2 : n < 20000000 ? 3 : 4;
+        std::string q_tag, a_tag;
+        bool dialogue = d.media == MEDIA_TEXT && d.dialogue_tags(q_tag, a_tag);
+        // Exact answers need more model than the amount of text suggests: on
+        // small dialogue sets the nano model stays at a few correct answers.
+        if (dialogue) by_data = std::max(by_data, 1);
+        // Images: a few hundred pictures are memorized by a 1M-parameter model.
+        if (d.media == MEDIA_IMAGE) by_data = d.items < 1000 ? 1 : d.items < 10000 ? 2 : 3;
+        if (d.media == MEDIA_AUDIO) by_data = std::max(by_data, 1);
         int tier = std::min(by_power, by_data);
+        // Context: a whole image, a stretch of sound, or (dialogue) most
+        // question-answer pairs in one window.
+        int want_ctx = 0;
+        if (d.media == MEDIA_IMAGE) want_ctx = d.img_size * d.img_size + 1;
+        else if (d.media == MEDIA_AUDIO) want_ctx = tier <= 1 ? 256 : 512;
+        else if (dialogue && d.layout.starts.size() > 2) {
+            std::vector<int> len;
+            for (size_t i = 0; i + 1 < d.layout.starts.size(); ++i)
+                len.push_back((int)(d.layout.starts[i + 1] - d.layout.starts[i]));
+            std::nth_element(len.begin(), len.begin() + len.size() * 9 / 10, len.end());
+            int p90 = len[len.size() * 9 / 10];
+            want_ctx = std::min(256, (p90 * 5 / 4 + 15) / 16 * 16);
+        }
         int batch = 32;
         ModelSpec spec;
         for (;;) {
@@ -172,7 +193,11 @@ AutoPlan autotune(const SysInfo& s, const Dataset& d) {
             spec.kind = MODEL_GPT;
             spec.vocab = (int)d.vocab.size();
             spec.dim = pr.dim; spec.heads = pr.heads; spec.nlayer = pr.layers;
-            spec.ctx = std::max(8, std::min(pr.ctx, (int)d.n_train / 4));
+            spec.media = d.media;
+            spec.img_size = d.img_size;
+            spec.rate = d.rate;
+            if (d.media == MEDIA_IMAGE) spec.ctx = want_ctx;
+            else spec.ctx = std::max(8, std::min(std::max(pr.ctx, want_ctx), (int)d.n_train / 4));
             double mb = (double)estimate_train_bytes(spec, batch) / (1024.0 * 1024.0);
             if (mb <= budget) break;
             if (batch > 4) batch /= 2;
@@ -187,12 +212,23 @@ AutoPlan autotune(const SysInfo& s, const Dataset& d) {
         double per_step = (double)batch * p.cfg.accum * spec.ctx;
         // Dialogue has to be learned answer by answer, which takes far more
         // passes than picking up the style of ordinary text. Question tests
-        // can stop such a run early once the answers are right.
-        std::string q_tag, a_tag;
-        bool dialogue = d.dialogue_tags(q_tag, a_tag);
-        double epochs = dialogue ? 250.0 : 4.0;
-        p.cfg.steps = (int)std::max(dialogue ? 1000.0 : 300.0, std::min(dialogue ? 8000.0 : 3000.0, (double)d.n_train * epochs / per_step));
+        // can stop such a run early once the answers are right. Images and
+        // sound are learned from their own pixels and samples, many passes.
+        double epochs = dialogue ? 250.0 : d.media == MEDIA_IMAGE ? 60.0 : d.media == MEDIA_AUDIO ? 20.0 : 4.0;
+        bool long_run = dialogue || d.media != MEDIA_TEXT;
+        p.cfg.steps = (int)std::max(long_run ? 1000.0 : 300.0, std::min(long_run ? 8000.0 : 3000.0, (double)d.n_train * epochs / per_step));
         p.cfg.warmup = std::min(100, p.cfg.steps / 10);
+        if (dialogue) {
+            // Windows that start at a question and a lower weight on the
+            // question text: the loss goes where the answers are.
+            p.cfg.align = 0.75f;
+            p.cfg.prompt_weight = 0.2f;
+        } else if (d.media == MEDIA_IMAGE) {
+            p.cfg.align = 1.0f;  // a window is exactly one image
+            if (d.items < 3000) p.cfg.dropout = 0.1f;
+        } else if (d.media == MEDIA_AUDIO) {
+            p.cfg.align = 0.25f;
+        }
     } else if (d.kind == DATA_TABLE) {
         int n = (int)d.train_idx.size();
         int width = std::max(16, std::min(256, pow2_at_least(d.n_feat * 4)));

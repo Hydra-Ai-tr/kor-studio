@@ -5,6 +5,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <functional>
 
 namespace kor {
 
@@ -323,6 +324,32 @@ void Attention::forward(const Tensor& x, Tensor& y, int B_, int T_) {
     proj.forward(ho, y, true);
 }
 
+void Attention::step(const Tensor& x, Tensor& y, Tensor& kv, int pos) {
+    qkv.forward(x, q3, false);
+    const float* q = q3.row(0);
+    std::memcpy(kv.row(pos), q + C, sizeof(float) * 2 * C);
+    ho.resize(1, C);
+    att.resize((size_t)pos + 1);
+    const Kernels& k = K();
+    float scale = 1.f / std::sqrt((float)hd);
+    for (int h = 0; h < H; ++h) {
+        const float* qh = q + h * hd;
+        float mx = -1e30f;
+        for (int j = 0; j <= pos; ++j) {
+            att[j] = k.dot(qh, kv.row(j) + h * hd, hd) * scale;
+            mx = std::max(mx, att[j]);
+        }
+        float sum = 0;
+        for (int j = 0; j <= pos; ++j) {
+            att[j] = std::exp(att[j] - mx);
+            sum += att[j];
+        }
+        float* o = ho.row(0) + h * hd;
+        for (int j = 0; j <= pos; ++j) k.axpy(att[j] / sum, kv.row(j) + C + h * hd, o, hd);
+    }
+    proj.forward(ho, y, false);
+}
+
 void Attention::backward(const Tensor& dy, Tensor& dx) {
     proj.backward(dy, dho);
     dq3.resize(B * T, 3 * C);
@@ -363,29 +390,50 @@ Block::Block(int dim, int heads, const std::string& name, Rng& rng, float resid_
       attn(dim, heads, name + ".attn", rng, resid_std),
       fc1(dim, 4 * dim, name + ".fc1", rng, 0.02f),
       fc2(4 * dim, dim, name + ".fc2", rng, resid_std),
-      act(ACT_GELU) {}
+      act(ACT_GELU),
+      drop1(0.f, std::hash<std::string>()(name + ".drop1")),
+      drop2(0.f, std::hash<std::string>()(name + ".drop2")) {}
 
-void Block::forward(const Tensor& x, Tensor& y, int B, int T) {
+void Block::set_dropout(float p) { drop1.p = drop2.p = p; }
+
+void Block::forward(const Tensor& x, Tensor& y, int B, int T, bool train) {
     ln1.forward(x, a1, true);
     attn.forward(a1, a2, B, T);
+    drop1.forward(a2, r1, train);
     h.resize_noinit(x.rows, x.cols);
-    for (size_t i = 0; i < x.size(); ++i) h.v[i] = x.v[i] + a2.v[i];
+    for (size_t i = 0; i < x.size(); ++i) h.v[i] = x.v[i] + r1.v[i];
     ln2.forward(h, a3, true);
     fc1.forward(a3, a4, true);
     act.forward(a4, a5, true);
     fc2.forward(a5, a6, true);
+    drop2.forward(a6, r2, train);
     y.resize_noinit(x.rows, x.cols);
-    for (size_t i = 0; i < x.size(); ++i) y.v[i] = h.v[i] + a6.v[i];
+    for (size_t i = 0; i < x.size(); ++i) y.v[i] = h.v[i] + r2.v[i];
+}
+
+void Block::step(const Tensor& x, Tensor& y, Tensor& kv, int pos) {
+    ln1.forward(x, a1, false);
+    attn.step(a1, a2, kv, pos);
+    h.resize_noinit(1, x.cols);
+    for (int i = 0; i < x.cols; ++i) h.v[i] = x.v[i] + a2.v[i];
+    ln2.forward(h, a3, false);
+    fc1.forward(a3, a4, false);
+    act.forward(a4, a5, false);
+    fc2.forward(a5, a6, false);
+    y.resize_noinit(1, x.cols);
+    for (int i = 0; i < x.cols; ++i) y.v[i] = h.v[i] + a6.v[i];
 }
 
 void Block::backward(const Tensor& dy, Tensor& dx) {
-    fc2.backward(dy, t1);
+    drop2.backward(dy, t2);
+    fc2.backward(t2, t1);
     act.backward(t1, t2);
     fc1.backward(t2, t1);
     ln2.backward(t1, t2);
     dh.resize_noinit(dy.rows, dy.cols);
     for (size_t i = 0; i < dy.size(); ++i) dh.v[i] = dy.v[i] + t2.v[i];
-    attn.backward(dh, t1);
+    drop1.backward(dh, t2);
+    attn.backward(t2, t1);
     ln1.backward(t1, t2);
     dx.resize_noinit(dy.rows, dy.cols);
     for (size_t i = 0; i < dy.size(); ++i) dx.v[i] = dh.v[i] + t2.v[i];
@@ -409,13 +457,20 @@ void Block::linears(std::vector<Linear*>& ls) {
 
 // ---------------------------------------------------------------- Losses
 
-float cross_entropy(const Tensor& logits, const int* target, Tensor* d, float scale, int* correct) {
+float cross_entropy(const Tensor& logits, const int* target, Tensor* d, float scale, int* correct, const float* weight) {
     int n = logits.rows, c = logits.cols;
     if (d) d->resize_noinit(n, c);
-    double total = 0;
+    double total = 0, wsum = n;
     int ok = 0;
-    float gs = scale / (float)n;
+    if (weight) {
+        wsum = 0;
+        for (int r = 0; r < n; ++r) wsum += weight[r];
+        if (wsum <= 0) wsum = 1;
+    }
+    float base = scale / (float)wsum;
     for (int r = 0; r < n; ++r) {
+        float w = weight ? weight[r] : 1.f;
+        float gs = base * w;
         const float* z = logits.row(r);
         float mx = z[0];
         int arg = 0;
@@ -424,7 +479,7 @@ float cross_entropy(const Tensor& logits, const int* target, Tensor* d, float sc
         double sum = 0;
         for (int j = 0; j < c; ++j) sum += std::exp((double)(z[j] - mx));
         int t = target[r];
-        total += std::log(sum) - (double)(z[t] - mx);
+        total += w * (std::log(sum) - (double)(z[t] - mx));
         if (arg == t) ++ok;
         if (d) {
             float* o = d->row(r);
@@ -434,7 +489,7 @@ float cross_entropy(const Tensor& logits, const int* target, Tensor* d, float sc
         }
     }
     if (correct) *correct = ok;
-    return (float)(total / n);
+    return (float)(total / wsum);
 }
 
 float mse_loss(const Tensor& pred, const Tensor& y, Tensor* d, float scale) {

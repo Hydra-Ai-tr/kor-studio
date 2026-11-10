@@ -1,8 +1,12 @@
 #include "data.h"
 
+#include "media.h"
+
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <set>
@@ -24,11 +28,7 @@ static bool read_file(const std::string& path, std::string& out, std::string* er
 
 // ------------------------------------------------------------------ text
 
-void Dataset::split_text() {
-    n_train = ids.size() - ids.size() / 10;
-}
-
-bool Dataset::load_text(const std::string& p, std::string* err) {
+bool Dataset::load_text(const std::string& p, std::string* err, int subword) {
     std::string text;
     if (!read_file(p, text, err)) return false;
     auto chars = utf8_chars(text);
@@ -38,24 +38,314 @@ bool Dataset::load_text(const std::string& p, std::string* err) {
     kind = DATA_TEXT;
     path = p;
     raw = std::move(text);
-    vocab.assign(uniq.begin(), uniq.end());
-    std::unordered_map<std::string, int> map;
-    for (size_t i = 0; i < vocab.size(); ++i) map[vocab[i]] = (int)i;
-    ids.reserve(chars.size());
-    for (auto& c : chars) ids.push_back(map[c]);
+    if (subword > (int)uniq.size()) {
+        vocab = learn_subwords(chars, subword);
+        ids = tokenize(raw, vocab);
+    } else {
+        vocab.assign(uniq.begin(), uniq.end());
+        std::unordered_map<std::string, int> map;
+        for (size_t i = 0; i < vocab.size(); ++i) map[vocab[i]] = (int)i;
+        ids.reserve(chars.size());
+        for (auto& c : chars) ids.push_back(map[c]);
+    }
     split_text();
     return true;
 }
 
-static std::vector<int> encode(const std::string& text, const std::vector<std::string>& vocab) {
-    std::unordered_map<std::string, int> map;
-    for (size_t i = 0; i < vocab.size(); ++i) map[vocab[i]] = (int)i;
-    std::vector<int> ids;
-    for (auto& c : utf8_chars(text)) {
-        auto it = map.find(c);
-        if (it != map.end()) ids.push_back(it->second);
+// ---------------------------------------------------------- images, sound
+
+static std::vector<std::string> media_files(const std::string& path, bool (*want)(const std::string&)) {
+    namespace fs = std::filesystem;
+    std::vector<std::string> files;
+    std::error_code ec;
+    fs::path root = upath(path);
+    if (fs::is_regular_file(root, ec)) {
+        if (want(root.u8string())) files.push_back(root.u8string());
+        return files;
     }
-    return ids;
+    for (fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec), end; !ec && it != end; it.increment(ec))
+        if (it->is_regular_file(ec) && want(it->path().u8string())) files.push_back(it->path().u8string());
+    std::sort(files.begin(), files.end());
+    return files;
+}
+
+static std::string hex_color(const float* c) {
+    char b[8];
+    std::snprintf(b, sizeof b, "#%02x%02x%02x", (int)std::lround(c[0]), (int)std::lround(c[1]), (int)std::lround(c[2]));
+    return b;
+}
+
+bool Dataset::load_images(const std::string& p, int size, int colors, bool mirror, std::string* err,
+                          const std::vector<std::string>* palette) {
+    auto fail = [&](const std::string& m) { if (err) *err = m; return false; };
+    std::vector<float> fixed;
+    if (palette) {
+        for (size_t i = 1; i < palette->size(); ++i) {
+            unsigned r = 0, g = 0, b = 0;
+            if (std::sscanf((*palette)[i].c_str(), "#%02x%02x%02x", &r, &g, &b) != 3) return fail("not an image palette");
+            fixed.insert(fixed.end(), {(float)r, (float)g, (float)b});
+        }
+        if (fixed.empty()) return fail("not an image palette");
+        colors = (int)fixed.size() / 3;
+    }
+    size = std::max(4, std::min(64, size));
+    colors = std::max(2, std::min(256, colors));
+    std::vector<std::string> files = media_files(p, is_image_file);
+    std::vector<Image> imgs;
+    int bad = 0;
+    for (auto& f : files) {
+        Image img;
+        if (load_image(f, img, nullptr)) imgs.push_back(square_thumbnail(img, size));
+        else ++bad;
+    }
+    if (imgs.size() < 2) return fail(files.empty() ? "no PNG, BMP, PPM or PGM images found" : "fewer than 2 images could be read");
+    // A fixed shuffle, so the validation images are a random sample.
+    Rng rng(42);
+    for (int i = (int)imgs.size() - 1; i > 0; --i) std::swap(imgs[i], imgs[rng.below(i + 1)]);
+
+    // Palette: k-means over a sample of the pixels.
+    size_t npx = (size_t)size * size;
+    std::vector<float> px;
+    for (size_t k = 0; k < imgs.size() * npx; k += std::max<size_t>(1, imgs.size() * npx / 60000))
+        for (int c = 0; c < 3; ++c) px.push_back(imgs[k / npx].rgb[(k % npx) * 3 + c]);
+    size_t n = px.size() / 3;
+    int K = (int)std::min<size_t>(colors, n);
+    std::vector<float> cent((size_t)K * 3);
+    for (int k = 0; k < K; ++k) {
+        size_t s = (size_t)k * n / K;
+        for (int c = 0; c < 3; ++c) cent[k * 3 + c] = px[s * 3 + c];
+    }
+    auto nearest = [&](const float* q) {
+        int best = 0;
+        float bd = 1e30f;
+        for (int k = 0; k < K; ++k) {
+            float d = 0;
+            for (int c = 0; c < 3; ++c) { float e = q[c] - cent[k * 3 + c]; d += e * e; }
+            if (d < bd) { bd = d; best = k; }
+        }
+        return best;
+    };
+    if (palette) {
+        K = colors;
+        cent = fixed;
+    }
+    std::vector<double> sum((size_t)K * 3);
+    std::vector<int> cnt(K);
+    for (int it = 0; it < (palette ? 0 : 12); ++it) {
+        std::fill(sum.begin(), sum.end(), 0.0);
+        std::fill(cnt.begin(), cnt.end(), 0);
+        for (size_t i = 0; i < n; ++i) {
+            int k = nearest(&px[i * 3]);
+            ++cnt[k];
+            for (int c = 0; c < 3; ++c) sum[k * 3 + c] += px[i * 3 + c];
+        }
+        for (int k = 0; k < K; ++k)
+            if (cnt[k])
+                for (int c = 0; c < 3; ++c) cent[k * 3 + c] = (float)(sum[k * 3 + c] / cnt[k]);
+            else {  // an unused colour takes a random pixel
+                size_t s = rng.next() % n;
+                for (int c = 0; c < 3; ++c) cent[k * 3 + c] = px[s * 3 + c];
+            }
+    }
+
+    *this = Dataset();
+    kind = DATA_TEXT;
+    media = MEDIA_IMAGE;
+    path = p;
+    img_size = size;
+    sep = 0;
+    vocab.push_back("<img>");
+    if (palette) vocab = *palette;
+    else
+        for (int k = 0; k < K; ++k) vocab.push_back(hex_color(&cent[k * 3]));
+    items = (int)imgs.size();
+    skipped = bad;
+    auto add = [&](const Image& img, bool flip) {
+        ids.push_back(sep);
+        for (int y = 0; y < size; ++y)
+            for (int x = 0; x < size; ++x) {
+                int sx = flip ? size - 1 - x : x;
+                float q[3];
+                for (int c = 0; c < 3; ++c) q[c] = img.rgb[((size_t)y * size + sx) * 3 + c];
+                ids.push_back(1 + nearest(q));
+            }
+    };
+    // Training images first (mirrored copies too), then the validation images.
+    size_t n_val = std::max<size_t>(1, imgs.size() / 10);
+    for (size_t i = 0; i + n_val < imgs.size(); ++i) {
+        add(imgs[i], false);
+        if (mirror) add(imgs[i], true);
+    }
+    size_t train_end = ids.size();
+    for (size_t i = imgs.size() - n_val; i < imgs.size(); ++i) add(imgs[i], false);
+    ids.push_back(sep);
+    split_text();
+    n_train = train_end + 1;
+    return true;
+}
+
+bool Dataset::load_audio(const std::string& p, int sample_rate, std::string* err) {
+    auto fail = [&](const std::string& m) { if (err) *err = m; return false; };
+    sample_rate = std::max(2000, std::min(48000, sample_rate));
+    std::vector<std::string> files = media_files(p, is_wav_file);
+    std::vector<std::vector<float>> clips;
+    int bad = 0;
+    for (auto& f : files) {
+        Sound s;
+        if (!load_wav(f, s, nullptr)) { ++bad; continue; }
+        std::vector<float> x = resample(s.samples, s.rate, sample_rate);
+        float peak = 0;
+        for (float v : x) peak = std::max(peak, std::fabs(v));
+        if (peak > 1e-4f)
+            for (float& v : x) v *= 0.9f / peak;  // even loudness
+        if (x.size() > 64) clips.push_back(std::move(x));
+    }
+    if (clips.empty()) return fail(files.empty() ? "no WAV files found" : "no WAV file could be read");
+    *this = Dataset();
+    kind = DATA_TEXT;
+    media = MEDIA_AUDIO;
+    path = p;
+    rate = sample_rate;
+    sep = 0;
+    vocab.push_back("<snd>");
+    for (int k = 0; k < 256; ++k) {
+        char b[8];
+        std::snprintf(b, sizeof b, "~%03d", k);
+        vocab.push_back(b);
+    }
+    items = (int)clips.size();
+    skipped = bad;
+    for (auto& c : clips) {
+        ids.push_back(sep);
+        for (float v : c) ids.push_back(1 + mulaw_encode(v));
+    }
+    ids.push_back(sep);
+    split_text();
+    return true;
+}
+
+static std::vector<int> encode(const std::string& text, const std::vector<std::string>& vocab) { return tokenize(text, vocab); }
+
+void Dataset::split_text() {
+    n_train = ids.size() - ids.size() / 10;
+    layout = TextLayout();
+    if (media != MEDIA_TEXT) {
+        // Images and sounds: examples start after each separator token.
+        for (size_t i = 0; i + 1 < ids.size(); ++i)
+            if (ids[i] == sep) layout.starts.push_back(i);
+        return;
+    }
+    std::vector<int> q, a;
+    int newline = -1;
+    if (tag_ids(q, a, newline)) layout = layout_dialogue(ids, q, a, newline);
+}
+
+std::vector<std::string> learn_subwords(const std::vector<std::string>& chars, int vocab_size) {
+    std::vector<std::string> vocab;
+    std::unordered_map<std::string, int> index;
+    for (auto& c : chars)
+        if (index.emplace(c, (int)vocab.size()).second) vocab.push_back(c);
+    std::sort(vocab.begin(), vocab.end());
+    index.clear();
+    for (size_t i = 0; i < vocab.size(); ++i) index[vocab[i]] = (int)i;
+    // Merges are learned on the first 300k characters; pieces never cross a line break.
+    size_t n = std::min<size_t>(chars.size(), 300000);
+    std::vector<int> seq(n);
+    for (size_t i = 0; i < n; ++i) seq[i] = index[chars[i]];
+    auto has_newline = [&](int id) { return vocab[id].find('\n') != std::string::npos; };
+    std::vector<char> nl(vocab.size());
+    for (size_t i = 0; i < vocab.size(); ++i) nl[i] = has_newline((int)i);
+    std::unordered_map<uint64_t, int> count;
+    std::vector<std::pair<int, uint64_t>> ranked;
+    while ((int)vocab.size() < vocab_size) {
+        count.clear();
+        for (size_t i = 0; i + 1 < seq.size(); ++i)
+            if (!nl[seq[i]] && !nl[seq[i + 1]]) ++count[(uint64_t)seq[i] << 32 | (uint32_t)seq[i + 1]];
+        ranked.clear();
+        for (auto& kv : count)
+            if (kv.second >= 2) ranked.push_back({-kv.second, kv.first});
+        if (ranked.empty()) break;
+        std::sort(ranked.begin(), ranked.end());
+        // Several merges per pass: the most frequent pairs that share no token
+        // with each other, so one scan applies them all unambiguously.
+        int room = vocab_size - (int)vocab.size();
+        int want = std::max(1, std::min(64, room / 8));
+        std::unordered_map<uint64_t, int> merge;
+        std::vector<char> used(vocab.size() + want, 0);
+        for (auto& r : ranked) {
+            if ((int)merge.size() >= want) break;
+            int a = (int)(r.second >> 32), b = (int)(r.second & 0xffffffffu);
+            if (used[a] || used[b]) continue;
+            used[a] = used[b] = 1;
+            merge[r.second] = (int)vocab.size();
+            vocab.push_back(vocab[a] + vocab[b]);
+            nl.push_back(0);
+        }
+        size_t w = 0;
+        for (size_t r = 0; r < seq.size(); ++r) {
+            if (r + 1 < seq.size()) {
+                auto it = merge.find((uint64_t)seq[r] << 32 | (uint32_t)seq[r + 1]);
+                if (it != merge.end()) { seq[w++] = it->second; ++r; continue; }
+            }
+            seq[w++] = seq[r];
+        }
+        seq.resize(w);
+    }
+    return vocab;
+}
+
+bool Dataset::tag_ids(std::vector<int>& q, std::vector<int>& a, int& newline) const {
+    std::string qt, at;
+    if (!dialogue_tags(qt, at)) return false;
+    q = encode(qt, vocab);
+    a = encode(at, vocab);
+    newline = -1;
+    for (size_t i = 0; i < vocab.size(); ++i)
+        if (vocab[i] == "\n") newline = (int)i;
+    return !q.empty() && !a.empty() && newline >= 0;
+}
+
+TextLayout layout_dialogue(const std::vector<int>& ids, const std::vector<int>& q, const std::vector<int>& a, int newline) {
+    TextLayout lay;
+    if (q.empty() || a.empty() || newline < 0) return lay;
+    lay.answer.assign(ids.size(), 0);
+    auto starts_with = [&](size_t pos, const std::vector<int>& tag) {
+        return pos + tag.size() <= ids.size() && std::equal(tag.begin(), tag.end(), ids.begin() + (std::ptrdiff_t)pos);
+    };
+    for (size_t pos = 0; pos < ids.size();) {
+        size_t end = pos;
+        while (end < ids.size() && ids[end] != newline) ++end;
+        if (starts_with(pos, q)) {
+            lay.starts.push_back(pos);
+        } else if (starts_with(pos, a)) {
+            for (size_t i = pos + a.size(); i <= end && i < ids.size(); ++i) lay.answer[i] = 1;
+        }
+        pos = end + 1;
+    }
+    if (lay.starts.empty()) lay.answer.clear();
+    return lay;
+}
+
+size_t pick_window(const TextLayout& lay, size_t lo, size_t hi, int T, float align, Rng& rng) {
+    size_t last = hi - (size_t)T - 1;  // the caller guarantees hi - lo >= T + 1
+    if (align > 0 && !lay.starts.empty() && rng.uniform() < align) {
+        auto a = std::lower_bound(lay.starts.begin(), lay.starts.end(), lo);
+        auto b = std::upper_bound(lay.starts.begin(), lay.starts.end(), last);
+        if (a < b) return *(a + (std::ptrdiff_t)(rng.next() % (uint64_t)(b - a)));
+    }
+    return lo + (size_t)(rng.next() % (last - lo + 1));
+}
+
+void fill_window(Batch& b, int row, const std::vector<int>& ids, size_t s, const TextLayout& lay, float prompt_weight) {
+    int T = b.T;
+    size_t o = (size_t)row * T;
+    for (int t = 0; t < T; ++t) {
+        b.ids[o + t] = ids[s + t];
+        b.tgt[o + t] = ids[s + t + 1];
+    }
+    if (b.w.empty()) return;
+    bool known = lay.answer.size() == ids.size();
+    for (int t = 0; t < T; ++t) b.w[o + t] = !known || lay.answer[s + t + 1] ? 1.f : prompt_weight;
 }
 
 void Dataset::encode_with(const std::vector<std::string>& fixed) {
@@ -340,22 +630,21 @@ size_t Dataset::val_items() const {
     return kind == DATA_TEXT ? ids.size() - n_train : kind == DATA_TABLE ? val_idx.size() : 0;
 }
 
-void Dataset::sample(Batch& b, int B, int T, Rng& rng, bool val) const {
+void Dataset::sample(Batch& b, int B, int T, Rng& rng, bool val, const SampleOpts& opts) const {
     if (kind == DATA_TEXT) {
-        size_t lo = val ? n_train : 0, hi = val ? ids.size() : n_train;
-        if (hi - lo < (size_t)T + 2) { lo = 0; hi = ids.size(); }  // tiny corpus: reuse everything
-        size_t span = hi - lo - (size_t)T - 1;
+        // Image training ends one token into the validation part, on the
+        // separator that starts the first validation image.
+        size_t lo = val ? n_train - (media == MEDIA_IMAGE ? 1 : 0) : 0, hi = val ? ids.size() : n_train;
+        if (hi - lo < (size_t)T + 1) { lo = 0; hi = ids.size(); }  // tiny corpus: reuse everything
         b.B = B; b.T = T;
         b.ids.resize((size_t)B * T);
         b.tgt.resize((size_t)B * T);
-        for (int i = 0; i < B; ++i) {
-            size_t s = lo + (size_t)(rng.next() % (span + 1));
-            for (int t = 0; t < T; ++t) {
-                b.ids[(size_t)i * T + t] = ids[s + t];
-                b.tgt[(size_t)i * T + t] = ids[s + t + 1];
-            }
-        }
+        bool weighted = opts.prompt_weight != 1.f && !layout.empty();
+        if (weighted) b.w.resize((size_t)B * T);
+        else b.w.clear();
+        for (int i = 0; i < B; ++i) fill_window(b, i, ids, pick_window(layout, lo, hi, T, opts.align, rng), layout, opts.prompt_weight);
     } else if (kind == DATA_TABLE) {
+        b.w.clear();
         const std::vector<int>& idx = val ? val_idx : train_idx;
         b.B = B; b.T = 1;
         b.x.resize_noinit(B, n_feat);

@@ -54,11 +54,12 @@ int main(int argc, char** argv) {
     //   --record <folder> --every <seconds>   saves frame_0000.bmp, ... until --delay
     //   --size <width>x<height>  --skill <plugin file> (repeatable; only for this session)
     //   --bottom (scroll to the end of the page)  --community (load the community plugin list)
+    //   --model <file.kor>  --generate (start the playground's picture or sound generation)
     // Screenshot runs leave the settings file unchanged.
-    std::string shot, data, record;
+    std::string shot, data, record, model;
     std::vector<const char*> skills;
     int page = -1, lang = -1, tab = -1, width = 1320, height = 820;
-    bool train = false, use_skills = false, bottom = false, community = false;
+    bool train = false, use_skills = false, bottom = false, community = false, generate = false;
     double delay = 1.0, every = 0.5;
     for (int i = 1; i < argc; ++i) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
@@ -74,6 +75,8 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--skill")) { skills.push_back(next()); use_skills = true; }
         else if (!std::strcmp(argv[i], "--bottom")) bottom = true;
         else if (!std::strcmp(argv[i], "--community")) community = true;
+        else if (!std::strcmp(argv[i], "--model")) model = next();
+        else if (!std::strcmp(argv[i], "--generate")) generate = true;
         else if (!std::strcmp(argv[i], "--lang")) {
             std::string l = next();
             lang = l == "tr" ? LANG_TR : l == "ru" ? LANG_RU : LANG_EN;
@@ -116,6 +119,8 @@ int main(int argc, char** argv) {
     if (community) app::load_community_list();
     if (lang >= 0) set_language(lang);
     if (!data.empty()) app::load_data(data.c_str());
+    if (!model.empty()) app::load_model(model.c_str());
+    if (generate) app::generate_media();
     if (train) app::start_training();
     if (page >= 0) app::set_page(page);
     if (tab >= 0) app::set_train_tab(tab);

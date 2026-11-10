@@ -6,14 +6,18 @@
 #include "plugins.h"
 
 #include "../core/kernels.h"
+#include "../core/media.h"
 #include "../core/sysinfo.h"
 #include "../skills/json.h"
 #include "../skills/skill.h"
 
 #include "imgui.h"
 
+#include <GLFW/glfw3.h>
+
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cfloat>
 #include <chrono>
 #include <cmath>
@@ -55,12 +59,37 @@ struct State {
     bool has_plan = false;
 
     char data_path[2048] = "";
-    int data_kind = 0;  // 0 text, 1 table
+    int data_kind = 0;  // 0 text, 1 table, 2 images, 3 sound
     std::string data_msg;
     bool data_ok = true;
+    bool subword = false;
+    int subword_size = 1000;
+    int img_size = 16, img_colors = 32;
+    bool img_mirror = true;
+    int snd_rate = 8000;
+    std::vector<ImTextureID> data_tex;  // preview of the loaded images
+
+    // pictures and sound made in the playground (on a worker thread)
+    struct MediaGen {
+        std::thread th;
+        std::atomic<bool> running{false}, cancel{false};
+        std::atomic<float> progress{0.f};
+        std::mutex mu;  // guards images and sound
+        std::vector<Image> images;
+        Sound sound;
+    } mg;
+    int gen_count = 9;
+    float gen_seconds = 3.f;
+    std::vector<ImTextureID> gen_tex;
+    std::string media_msg;
+    bool media_ok = true;
 
     int add_type = L_DENSE;
     int lora_rank = 8;
+    // Fine-tuning: the model came from a file; characters added to it / left
+    // out of the data because LoRA is on.
+    bool from_file = false;
+    int ft_added = 0, ft_dropped = 0;
 
     char prompt[4096] = "";
     float temperature = 0.8f;
@@ -253,7 +282,8 @@ void start_log() {
     const ModelSpec& s = A.model->spec;
     log_fmt(State::T_ACCENT, S::LogHeader, KOR_VERSION, timestamp(false).c_str());
     log_fmt(State::T_MUTED, S::LogData, A.data.path.c_str());
-    log_fmt(State::T_MUTED, S::LogModel, tr(s.kind == MODEL_GPT ? S::TextModel : S::TableModel),
+    log_fmt(State::T_MUTED, S::LogModel,
+            tr(s.kind != MODEL_GPT ? S::TableModel : s.media == MEDIA_IMAGE ? S::ImageModel : s.media == MEDIA_AUDIO ? S::SoundModel : S::TextModel),
             fmt_count((double)A.model->param_count(false)).c_str(), fmt_count((double)A.model->param_count(true)).c_str());
     log_fmt(State::T_MUTED, S::LogCfg, A.cfg.steps, A.cfg.batch, A.cfg.accum, (double)A.cfg.lr,
             A.cfg.optimizer == OPT_SGD ? "SGD" : "AdamW", A.cfg.threads);
@@ -336,6 +366,14 @@ void pump_events() {
                 else std::snprintf(b, sizeof b, tr(S::LogHookRestored), e.n2);
                 log_line(t + "[" + e.source + "] " + b, State::T_ACCENT);
                 break;
+            case EV_HOOK_SAMPLING:
+                std::snprintf(b, sizeof b, tr(S::LogHookSampling), (double)e.loss * 100, (double)e.val_loss);
+                log_line(t + "[" + e.source + "] " + b, State::T_ACCENT);
+                break;
+            case EV_HOOK_DROPOUT:
+                std::snprintf(b, sizeof b, tr(S::LogHookDropout), (double)e.loss);
+                log_line(t + "[" + e.source + "] " + b, State::T_ACCENT);
+                break;
         }
         if (e.kind == EV_DONE || e.kind == EV_STOPPED || e.kind == EV_ERROR) A.log_file.close();
     }
@@ -352,7 +390,7 @@ void tests_from_data() {
     A.results.clear();
 }
 
-bool can_run_tests() { return A.model && A.model->spec.kind == MODEL_GPT && !busy(); }
+bool can_run_tests() { return A.model && A.model->spec.kind == MODEL_GPT && A.model->spec.media == MEDIA_TEXT && !busy(); }
 
 void run_tests_now() {
     if (!can_run_tests()) return;
@@ -376,7 +414,11 @@ void finalize_spec() {
     if (A.data.kind == DATA_TEXT) {
         A.spec.kind = MODEL_GPT;
         A.spec.vocab = (int)A.data.vocab.size();
-        A.spec.ctx = std::max(8, std::min(A.spec.ctx, (int)A.data.n_train - 2));
+        A.spec.media = A.data.media;
+        A.spec.img_size = A.data.img_size;
+        A.spec.rate = A.data.rate;
+        if (A.data.media == MEDIA_IMAGE) A.spec.ctx = A.data.img_size * A.data.img_size + 1;
+        else A.spec.ctx = std::max(8, std::min(A.spec.ctx, (int)A.data.n_train - 2));
     } else if (A.data.kind == DATA_TABLE) {
         A.spec.kind = MODEL_MLP;
         A.spec.in_dim = A.data.n_feat;
@@ -399,17 +441,80 @@ void auto_configure() {
     A.has_plan = true;
 }
 
+ImTextureID make_texture(const Image& img) {
+    GLuint t = 0;
+    glGenTextures(1, &t);
+    glBindTexture(GL_TEXTURE_2D, t);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, img.w, img.h, 0, GL_RGB, GL_UNSIGNED_BYTE, img.rgb.data());
+    return (ImTextureID)t;
+}
+
+void free_textures(std::vector<ImTextureID>& v) {
+    for (ImTextureID t : v) {
+        GLuint id = (GLuint)t;
+        glDeleteTextures(1, &id);
+    }
+    v.clear();
+}
+
+// Pictures in rows that fill the available width.
+void image_grid(const std::vector<ImTextureID>& tex, float cell) {
+    float g = px(8), aw = ImGui::GetContentRegionAvail().x;
+    int cols = std::max(1, (int)((aw + g) / (cell + g)));
+    for (size_t i = 0; i < tex.size(); ++i) {
+        if (i % cols) ImGui::SameLine(0, g);
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        ImGui::Image(tex[i], ImVec2(cell, cell));
+        ImGui::GetWindowDrawList()->AddRect(p, ImVec2(p.x + cell, p.y + cell), col(C::border), px(2));
+    }
+}
+
+// Sound as a min/max envelope per pixel column.
+void waveform(const std::vector<float>& x, ImVec2 size) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::Dummy(size);
+    dl->AddRectFilled(p, ImVec2(p.x + size.x, p.y + size.y), col(C::surface3), px(6));
+    float mid = p.y + size.y * 0.5f, half = size.y * 0.45f;
+    dl->AddLine(ImVec2(p.x, mid), ImVec2(p.x + size.x, mid), col(C::border));
+    int w = std::max(1, (int)size.x);
+    if (x.empty()) return;
+    for (int c = 0; c < w; ++c) {
+        size_t a = x.size() * c / w, b = std::max(a + 1, x.size() * (c + 1) / w);
+        float lo = 0, hi = 0;
+        for (size_t i = a; i < b && i < x.size(); ++i) { lo = std::min(lo, x[i]); hi = std::max(hi, x[i]); }
+        dl->AddLine(ImVec2(p.x + c, mid - hi * half), ImVec2(p.x + c, mid - lo * half + 1), col(C::accent));
+    }
+}
+
+// Stops the picture/sound worker and waits for it.
+void stop_media_gen() {
+    A.mg.cancel = true;
+    if (A.mg.th.joinable()) A.mg.th.join();
+    A.mg.running = false;
+}
+
 void reset_generation() {
     A.gen_left = 0;
     A.gen_ids.clear();
     A.gen_out.clear();
     A.pred.clear();
+    stop_media_gen();
+    free_textures(A.gen_tex);
+    A.mg.images.clear();
+    A.mg.sound = Sound();
+    A.media_msg.clear();
 }
 
 void build_model() {
     if (A.data.kind == DATA_NONE) return;
     finalize_spec();
     A.model = std::make_shared<Model>(A.spec, (uint64_t)std::chrono::steady_clock::now().time_since_epoch().count());
+    A.from_file = false;
+    A.ft_added = A.ft_dropped = 0;
     if (A.data.kind == DATA_TEXT) {
         A.model->vocab = A.data.vocab;
     } else {
@@ -426,18 +531,52 @@ void build_model() {
 bool model_matches_data() {
     if (!A.model || A.data.kind == DATA_NONE) return false;
     const ModelSpec& s = A.model->spec;
-    if (s.kind == MODEL_GPT) return A.data.kind == DATA_TEXT;
+    if (s.kind == MODEL_GPT)
+        return A.data.kind == DATA_TEXT && A.data.media == s.media &&
+               (s.media != MEDIA_IMAGE || (A.data.img_size == s.img_size && A.data.vocab == A.model->vocab)) &&
+               (s.media != MEDIA_AUDIO || A.data.rate == s.rate);
     return A.data.kind == DATA_TABLE && s.in_dim == A.data.n_feat && s.regression == A.data.regression &&
            (s.regression || s.out_dim == (int)A.data.labels.size());
+}
+
+// Fine-tuning a text model: characters of the data the model does not know
+// yet are added to it (unless LoRA is on), then the text is encoded with the
+// model's vocabulary.
+void fit_data_to_model() {
+    A.ft_added = 0;
+    A.ft_dropped = 0;
+    if (!model_matches_data() || A.data.kind != DATA_TEXT || A.data.media != MEDIA_TEXT) return;
+    std::lock_guard<std::mutex> lk(A.trainer.model_mu);
+    A.ft_added = A.model->extend_vocab(A.data.vocab);
+    for (auto& c : A.data.vocab)
+        if (std::find(A.model->vocab.begin(), A.model->vocab.end(), c) == A.model->vocab.end()) ++A.ft_dropped;
+    A.data.encode_with(A.model->vocab);
+}
+
+// Reads `path` as data of `kind` (0 text, 1 table, 2 images, 3 sound) with
+// the settings of the data page. Images and sound for a model loaded from a
+// file are read in that model's format, so it can be fine-tuned.
+bool read_data(Dataset& d, const std::string& path, int kind, int target_col, std::string& err) {
+    if (kind == 1) return d.load_table(path, target_col, &err);
+    const ModelSpec* ft = A.model && A.from_file && A.model->spec.kind == MODEL_GPT ? &A.model->spec : nullptr;
+    if (kind == 2) {
+        std::error_code ec;
+        std::string dir = std::filesystem::is_regular_file(upath(path), ec) ? upath(path).parent_path().u8string() : path;
+        if (ft && ft->media == MEDIA_IMAGE) return d.load_images(dir, ft->img_size, 0, A.img_mirror, &err, &A.model->vocab);
+        return d.load_images(dir, A.img_size, A.img_colors, A.img_mirror, &err);
+    }
+    if (kind == 3) return d.load_audio(path, ft && ft->media == MEDIA_AUDIO ? ft->rate : A.snd_rate, &err);
+    return d.load_text(path, &err, A.subword ? A.subword_size : 0);
 }
 
 bool load_data_impl(const std::string& path, int kind, int target_col) {
     if (busy()) return false;
     std::string err;
     Dataset d;
-    bool ok = kind == 1 ? d.load_table(path, target_col, &err) : d.load_text(path, &err);
+    bool ok = read_data(d, path, kind, target_col, err);
     A.data_ok = ok;
     if (!ok) { A.data_msg = err; return false; }
+    free_textures(A.data_tex);
     A.data = std::move(d);
     A.data_kind = kind;
     A.data_msg.clear();
@@ -450,12 +589,14 @@ bool load_data_impl(const std::string& path, int kind, int target_col) {
     A.stop_on_pass = !A.q_tag.empty();
     if (model_matches_data()) {
         // Keep the model (fine-tuning): text is re-encoded with its vocabulary.
-        if (A.data.kind == DATA_TEXT) A.data.encode_with(A.model->vocab);
+        fit_data_to_model();
         TrainConfig keep = A.cfg;
         A.plan = autotune(A.sys, A.data);
         A.cfg = keep;
     } else {
         A.model.reset();
+        A.from_file = false;
+        A.ft_added = A.ft_dropped = 0;
         reset_generation();
         auto_configure();
     }
@@ -463,6 +604,18 @@ bool load_data_impl(const std::string& path, int kind, int target_col) {
 }
 
 void load_example(int kind) {
+    if (kind >= 2) {
+        // Pictures and melodies are drawn on first use into the settings folder.
+        std::string dir = (upath(config_dir()) / "examples" / (kind == 2 ? "pictures" : "melodies")).u8string();
+        std::error_code ec;
+        std::string err;
+        bool ok = std::filesystem::is_directory(upath(dir), ec) && !std::filesystem::is_empty(upath(dir), ec);
+        if (!ok) ok = kind == 2 ? write_demo_images(dir, 1000, &err) : write_demo_sounds(dir, 60, &err);
+        if (!ok) { A.data_ok = false; A.data_msg = err; return; }
+        A.data_kind = kind;
+        load_data_impl(dir, kind, -1);
+        return;
+    }
     std::string p = find_example(kind ? "spiral.csv" : "tiny_text.txt");
     if (p.empty()) { A.data_ok = false; A.data_msg = tr(S::ExampleMissing); }
     else load_data_impl(p, kind, -1);
@@ -471,10 +624,17 @@ void load_example(int kind) {
 void reset_model() {
     if (busy()) return;
     A.model.reset();
+    A.from_file = false;
+    A.ft_added = A.ft_dropped = 0;
     reset_generation();
-    if (A.data.kind == DATA_TEXT) {
-        std::string err;
-        A.data.load_text(A.data.path, &err);  // restore the dataset's own vocabulary
+    if (A.data.kind == DATA_TEXT && A.data.media != MEDIA_AUDIO) {
+        // Restore the dataset's own vocabulary (or palette).
+        std::string err, path = A.data.path;
+        Dataset d;
+        if (read_data(d, path, A.data.media == MEDIA_IMAGE ? 2 : 0, -1, err)) {
+            free_textures(A.data_tex);
+            A.data = std::move(d);
+        }
     }
     auto_configure();
 }
@@ -527,7 +687,7 @@ void begin_training() {
     if (!A.model || !model_matches_data()) build_model();
     A.gen_left = 0;
     A.cfg.seed = (uint64_t)std::chrono::steady_clock::now().time_since_epoch().count();
-    A.cfg.probes = A.data.kind == DATA_TEXT ? current_tests() : std::vector<Probe>();
+    A.cfg.probes = A.data.kind == DATA_TEXT && A.data.media == MEDIA_TEXT ? current_tests() : std::vector<Probe>();
     A.cfg.probe_target = A.stop_on_pass ? 1.f : 0.f;
     A.run_tests = A.cfg.probes;
     A.results.clear();
@@ -699,8 +859,8 @@ void page_data() {
 
     begin_card("source", tr(S::Source));
     ImGui::BeginDisabled(busy());
-    const char* kinds[] = {tr(S::KindText), tr(S::KindTable)};
-    segmented("kind", &A.data_kind, kinds, 2);
+    const char* kinds[] = {tr(S::KindText), tr(S::KindTable), tr(S::KindImages), tr(S::KindSound)};
+    segmented("kind", &A.data_kind, kinds, 4);
     float sp = ImGui::GetStyle().ItemSpacing.x;
     float bw_browse = has_native_dialogs() ? button_width(tr(S::Browse), IC_FOLDER) + sp : 0;
     float bw_load = button_width(tr(S::Load), IC_UPLOAD);
@@ -715,19 +875,64 @@ void page_data() {
                 std::string ext = p.size() > 4 ? p.substr(p.size() - 4) : "";
                 if (ext == ".csv" || ext == ".tsv") A.data_kind = 1;
                 else if (ext == ".txt") A.data_kind = 0;
+                else if (is_image_file(p)) A.data_kind = 2;
+                else if (is_wav_file(p)) A.data_kind = 3;
+                if (A.data_kind == 2) p = upath(p).parent_path().u8string();
+                std::snprintf(A.data_path, sizeof A.data_path, "%s", p.c_str());
                 enter = true;
             }
         }
     }
     ImGui::SameLine();
     if (button(tr(S::Load), BTN_PRIMARY, IC_UPLOAD) || enter) load_data_impl(A.data_path, A.data_kind, -1);
+    // Options of the chosen kind; they apply on the next load.
+    float lw = std::min(px(200), ImGui::GetContentRegionAvail().x * 0.3f);
+    float sw = std::min(px(260), ImGui::GetContentRegionAvail().x - lw - px(20));
+    if (A.data_kind == 0) {
+        checkbox(tr(S::Subword), &A.subword);
+        tooltip(tr(S::SubwordHelp));
+        if (A.subword) {
+            ImGui::SameLine(0, px(28));
+            ImGui::AlignTextToFramePadding();
+            text(tr(S::SubwordSize), C::muted);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(sw);
+            slider_int("##subword", &A.subword_size, 256, 4000);
+            A.subword_size = std::max(256, std::min(4000, A.subword_size));
+        }
+    } else if (A.data_kind == 2) {
+        field_label(tr(S::ImgSize), lw);
+        ImGui::SetNextItemWidth(sw);
+        slider_int("##isize", &A.img_size, 8, 32, "%d px");
+        field_label(tr(S::ImgColors), lw);
+        ImGui::SetNextItemWidth(sw);
+        slider_int("##icol", &A.img_colors, 4, 64);
+        checkbox(tr(S::Mirror), &A.img_mirror);
+        tooltip(tr(S::MirrorHelp));
+        A.img_size = std::max(8, std::min(32, A.img_size));
+        A.img_colors = std::max(4, std::min(64, A.img_colors));
+    } else if (A.data_kind == 3) {
+        static const int rates[] = {4000, 8000, 11025, 16000};
+        const char* names[] = {"4000 Hz", "8000 Hz", "11025 Hz", "16000 Hz"};
+        int cur = 1;
+        for (int i = 0; i < 4; ++i)
+            if (rates[i] == A.snd_rate) cur = i;
+        field_label(tr(S::SampleRate), lw);
+        if (segmented("rate", &cur, names, 4)) A.snd_rate = rates[cur];
+    }
+    if (A.data_kind >= 2) text_wrapped(tr(S::FolderNote), C::muted, F.small);
     ImGui::AlignTextToFramePadding();
     text(tr(S::OrExample), C::muted);
     ImGui::SameLine();
     if (button(tr(S::ExampleText), BTN_GHOST, IC_DOC)) load_example(0);
     ImGui::SameLine(0, px(4));
     if (button(tr(S::ExampleTable), BTN_GHOST, IC_TABLE)) load_example(1);
+    ImGui::SameLine(0, px(4));
+    if (button(tr(S::ExampleImages), BTN_GHOST, IC_SPARK)) load_example(2);
+    ImGui::SameLine(0, px(4));
+    if (button(tr(S::ExampleSounds), BTN_GHOST, IC_SPARK)) load_example(3);
     ImGui::EndDisabled();
+    if (A.data.items > 0 && A.data.skipped > 0) banner(strf(tr(S::Skipped), A.data.skipped).c_str(), C::warn, IC_WARN);
     if (busy()) banner(tr(S::Busy), C::warn, IC_INFO);
     if (!A.data_ok && !A.data_msg.empty()) banner(strf(tr(S::Failed), A.data_msg.c_str()).c_str(), C::bad, IC_WARN);
     end_card();
@@ -735,8 +940,19 @@ void page_data() {
 
     gap();
     std::vector<Stat> st;
-    if (A.data.kind == DATA_TEXT) {
-        st.push_back({tr(S::Characters), fmt_count((double)A.data.ids.size()), "", C::text, IC_DOC});
+    if (A.data.media == MEDIA_IMAGE) {
+        st.push_back({tr(S::ImagesLbl), std::to_string(A.data.items), "", C::text, IC_DOC});
+        st.push_back({tr(S::ImgSize), strf("%d x %d", A.data.img_size, A.data.img_size), "", C::text, IC_LAYERS});
+        st.push_back({tr(S::ColorsLbl), std::to_string(A.data.vocab.size() - 1), "", C::text, IC_SPARK});
+        st.push_back({tr(S::Tokens), fmt_count((double)A.data.ids.size()), "", C::blue, IC_PERCENT});
+    } else if (A.data.media == MEDIA_AUDIO) {
+        st.push_back({tr(S::SoundFiles), std::to_string(A.data.items), "", C::text, IC_DOC});
+        st.push_back({tr(S::Seconds), strf("%.1f", (double)A.data.ids.size() / std::max(1, A.data.rate)), "", C::text, IC_CLOCK});
+        st.push_back({tr(S::SampleRate), strf("%d Hz", A.data.rate), "", C::text, IC_LAYERS});
+        st.push_back({tr(S::Tokens), fmt_count((double)A.data.ids.size()), "", C::blue, IC_PERCENT});
+    } else if (A.data.kind == DATA_TEXT) {
+        bool sub = A.data.vocab.size() > 0 && std::any_of(A.data.vocab.begin(), A.data.vocab.end(), [](const std::string& v) { return utf8_chars(v).size() > 1; });
+        st.push_back({tr(sub ? S::Tokens : S::Characters), fmt_count((double)A.data.ids.size()), "", C::text, IC_DOC});
         st.push_back({tr(S::VocabSize), std::to_string(A.data.vocab.size()), "", C::text, IC_LAYERS});
         st.push_back({tr(S::TrainVal), fmt_count((double)A.data.train_items()) + " / " + fmt_count((double)A.data.val_items()), "", C::text, IC_PERCENT});
         st.push_back({tr(S::Format), tr(A.q_tag.empty() ? S::FmtPlain : S::FmtDialogue),
@@ -776,7 +992,25 @@ void page_data() {
     std::string file_name = std::filesystem::u8path(A.data.path).filename().u8string();
     begin_card("preview", tr(S::Preview), 0, 0, file_name.c_str());
     float inner = std::max(px(220), rest - ImGui::GetCursorPosY() - card_padding_y() - px(2));
-    if (A.data.kind == DATA_TEXT) {
+    if (A.data.media == MEDIA_IMAGE) {
+        if (A.data_tex.empty()) {
+            size_t n = (size_t)A.data.img_size * A.data.img_size;
+            for (size_t s : A.data.layout.starts) {
+                if (A.data_tex.size() >= 60 || s + 1 + n > A.data.ids.size()) break;
+                A.data_tex.push_back(make_texture(image_from_tokens(A.data.vocab, &A.data.ids[s + 1], n, A.data.img_size)));
+            }
+        }
+        if (begin_inset("##pimg", inner)) image_grid(A.data_tex, px(72));
+        ImGui::EndChild();
+    } else if (A.data.media == MEDIA_AUDIO) {
+        if (begin_inset("##psnd", inner)) {
+            size_t n = std::min<size_t>(A.data.ids.size(), (size_t)A.data.rate * 10);
+            std::vector<float> wave(n);
+            for (size_t i = 0; i < n; ++i) wave[i] = A.data.ids[i] > 0 ? mulaw_decode(A.data.ids[i] - 1) : 0.f;
+            waveform(wave, ImVec2(ImGui::GetContentRegionAvail().x, std::min(px(180), inner - px(20))));
+        }
+        ImGui::EndChild();
+    } else if (A.data.kind == DATA_TEXT) {
         size_t n = std::min<size_t>(A.data.raw.size(), 4000);
         while (n < A.data.raw.size() && ((unsigned char)A.data.raw[n] & 0xC0) == 0x80) ++n;  // do not cut a UTF-8 sequence
         if (begin_inset("##ptext", inner)) {
@@ -876,12 +1110,17 @@ void arch_controls(ModelSpec& s) {
         field_label(tr(S::Layers), lw);
         slider_int("##layers", &s.nlayer, 1, 12);
         field_label(tr(S::Context), lw);
-        slider_int("##ctx", &s.ctx, 8, max_ctx);
+        bool image = A.data.media == MEDIA_IMAGE;
+        ImGui::BeginDisabled(image);
+        slider_int("##ctx", &s.ctx, 8, image ? s.ctx : max_ctx);
+        ImGui::EndDisabled();
         s.heads = std::max(1, std::min(12, s.heads));
         s.nlayer = std::max(1, std::min(12, s.nlayer));
         s.dim = s.heads * std::max(4, std::min(64, per));
-        s.ctx = std::max(8, std::min(max_ctx, s.ctx));
+        if (image) s.ctx = A.data.img_size * A.data.img_size + 1;
+        else s.ctx = std::max(8, std::min(max_ctx, s.ctx));
         text_wrapped(strf(tr(S::Width), s.dim).c_str(), C::muted, F.small);
+        if (image) text_wrapped(tr(S::MediaCtxNote), C::muted, F.small);
         return;
     }
     float fh = ImGui::GetFrameHeight(), sp = ImGui::GetStyle().ItemSpacing.x;
@@ -987,11 +1226,23 @@ void page_model() {
             train = A.model->param_count(true);
         }
         std::vector<Stat> st;
-        st.push_back({tr(S::ModelType), tr(A.model->spec.kind == MODEL_GPT ? S::TextModel : S::TableModel), "", C::text, IC_MODEL});
+        const ModelSpec& ms = A.model->spec;
+        std::string sub = ms.kind != MODEL_GPT ? ""
+                        : ms.media == MEDIA_IMAGE ? strf("%dx%d, %d %s", ms.img_size, ms.img_size, ms.vocab - 1, tr(S::ColorsLbl))
+                        : ms.media == MEDIA_AUDIO ? strf("%d Hz", ms.rate) : "";
+        S type = ms.kind != MODEL_GPT ? S::TableModel : ms.media == MEDIA_IMAGE ? S::ImageModel : ms.media == MEDIA_AUDIO ? S::SoundModel : S::TextModel;
+        st.push_back({tr(S::ModelType), tr(type), sub, C::text, IC_MODEL});
         st.push_back({tr(S::Params), fmt_count((double)total), "", C::text, IC_LAYERS});
         st.push_back({tr(S::Trainable), fmt_count((double)train), "", A.model->spec.lora_rank ? C::accent_hi : C::text, IC_TARGET});
         stat_grid(st, px(200), false);
         gap();
+        if (A.from_file && model_matches_data()) {
+            std::string ft = tr(S::FineTuneHelp);
+            if (A.ft_added) ft += "  " + strf(tr(S::FineTuneAdded), A.ft_added);
+            if (A.ft_dropped) ft += "  " + strf(tr(S::FineTuneDropped), A.ft_dropped);
+            banner(ft.c_str(), C::blue, IC_SPARK);
+            gap();
+        }
         begin_card("built", tr(S::Network), 0, 0, tr(S::ResetHint));
         draw_diagram(A.model->spec);
         end_card();
@@ -1498,8 +1749,16 @@ void train_settings(bool run) {
         field_label(tr(S::Optimizer), lw);
         combo("##opt", &A.cfg.optimizer, opts, 2);
         if (A.data.kind == DATA_TEXT) {
-            field_label(tr(S::TestEvery), lw, tr(S::TestEveryHelp));
-            ImGui::InputInt("##probe", &A.cfg.probe_every, 0, 0);
+            if (A.data.media == MEDIA_TEXT) {
+                field_label(tr(S::TestEvery), lw, tr(S::TestEveryHelp));
+                ImGui::InputInt("##probe", &A.cfg.probe_every, 0, 0);
+            }
+            field_label(tr(S::DropoutLbl), lw, tr(S::DropoutHelp));
+            slider_float("##dropout", &A.cfg.dropout, 0.f, 0.5f);
+            if (!A.q_tag.empty()) {
+                field_label(tr(S::QuestionWeight), lw, tr(S::QuestionWeightHelp));
+                slider_float("##qweight", &A.cfg.prompt_weight, 0.f, 1.f);
+            }
         }
         ImGui::EndTable();
     }
@@ -1507,9 +1766,18 @@ void train_settings(bool run) {
     gap(2);
     checkbox(tr(S::KeepBest), &A.cfg.keep_best);
     tooltip(tr(S::KeepBestHelp));
-    if (A.data.kind == DATA_TEXT) {
+    if (A.data.kind == DATA_TEXT && A.data.media == MEDIA_TEXT) {
         ImGui::SameLine(0, px(28));
         checkbox(tr(S::StopOnPass), &A.stop_on_pass);
+    }
+    bool ema = A.cfg.ema > 0;
+    if (checkbox(tr(S::EmaLbl), &ema)) A.cfg.ema = ema ? 0.999f : 0.f;
+    tooltip(tr(S::EmaHelp));
+    if (A.data.kind == DATA_TEXT && !A.q_tag.empty()) {
+        bool align = A.cfg.align > 0;
+        ImGui::SameLine(0, px(28));
+        if (checkbox(tr(S::AlignRows), &align)) A.cfg.align = align ? 0.75f : 0.f;
+        tooltip(tr(S::AlignHelp));
     }
     A.cfg.patience = std::max(0, std::min(1000, A.cfg.patience));
     A.cfg.probe_every = std::max(0, A.cfg.probe_every);
@@ -1519,6 +1787,8 @@ void train_settings(bool run) {
     A.cfg.eval_every = std::max(1, A.cfg.eval_every);
     A.cfg.lr = std::max(1e-7f, std::min(1.f, A.cfg.lr));
     A.cfg.weight_decay = std::max(0.f, std::min(1.f, A.cfg.weight_decay));
+    A.cfg.dropout = std::max(0.f, std::min(0.5f, A.cfg.dropout));
+    A.cfg.prompt_weight = std::max(0.f, std::min(1.f, A.cfg.prompt_weight));
     A.cfg.threads = std::max(1, std::min(std::max(1, A.sys.logical), A.cfg.threads));
     A.cfg.warmup = std::min(100, A.cfg.steps / 10);
     ImGui::EndDisabled();
@@ -1593,7 +1863,7 @@ void page_train() {
     gap();
 
     // ---- chart / log / tests / skills
-    bool text_data = A.data.kind == DATA_TEXT;
+    bool text_data = A.data.kind == DATA_TEXT && A.data.media == MEDIA_TEXT;
     bool skills_tab = !st.metrics.empty() || !A.active_skills.empty();
     std::vector<const char*> labels = {tr(S::TabChart), tr(S::TabLog)};
     std::vector<int> ids = {0, 1};
@@ -1629,6 +1899,192 @@ void pump_generation() {
     }
 }
 
+bool load_model_file(const std::string& path) {
+    std::string err;
+    auto m = Model::load(path, &err);
+    A.file_ok = (bool)m;
+    A.file_msg = m ? tr(S::LoadedModel) : err;
+    if (!m) return false;
+    A.model = m;
+    A.spec = m->spec;
+    reset_generation();
+    A.feat_in.clear();
+    A.from_file = true;
+    if (A.data.kind == DATA_TEXT && A.data.media != MEDIA_TEXT && A.data.media == m->spec.media && !model_matches_data()) {
+        // Read the images or sound again in the format of this model.
+        std::string e, dp = A.data.path;
+        Dataset d;
+        if (read_data(d, dp, A.data.media == MEDIA_IMAGE ? 2 : 3, -1, e)) {
+            free_textures(A.data_tex);
+            A.data = std::move(d);
+        }
+    }
+    fit_data_to_model();
+    if (A.data.kind != DATA_NONE && model_matches_data()) A.cfg.lr = A.plan.cfg.lr / 3;
+    return true;
+}
+
+// Pictures or sound from a snapshot of the model, on a worker thread, so
+// neither training nor the interface waits for it.
+void start_media_gen() {
+    if (A.mg.running || !A.model) return;
+    stop_media_gen();
+    free_textures(A.gen_tex);
+    {
+        std::lock_guard<std::mutex> lk(A.mg.mu);
+        A.mg.images.clear();
+        A.mg.sound = Sound();
+    }
+    A.media_msg.clear();
+    std::string snap = (upath(config_dir()) / "playground-model.tmp").u8string(), err;
+    bool saved;
+    {
+        std::lock_guard<std::mutex> lk(A.trainer.model_mu);
+        saved = A.model->save(snap, false, &err);
+    }
+    if (!saved) { A.media_ok = false; A.media_msg = err; return; }
+    A.mg.cancel = false;
+    A.mg.progress = 0.f;
+    A.mg.running = true;
+    int count = A.gen_count;
+    float secs = A.gen_seconds, temp = A.temperature;
+    uint64_t seed = (uint64_t)std::chrono::steady_clock::now().time_since_epoch().count();
+    A.mg.th = std::thread([snap, count, secs, temp, seed] {
+        std::string e;
+        auto m = Model::load(snap, &e);
+        std::error_code ec;
+        std::filesystem::remove(upath(snap), ec);
+        Rng rng(seed);
+        if (m && m->spec.media == MEDIA_IMAGE) {
+            for (int k = 0; k < count && !A.mg.cancel; ++k) {
+                Image img = sample_image(*m, temp, rng);
+                std::lock_guard<std::mutex> lk(A.mg.mu);
+                A.mg.images.push_back(std::move(img));
+                A.mg.progress = (float)(k + 1) / count;
+            }
+        } else if (m && m->spec.media == MEDIA_AUDIO) {
+            Sound snd = sample_sound(*m, secs, temp, rng, [](float done) {
+                A.mg.progress = done;
+                return !A.mg.cancel.load();
+            });
+            std::lock_guard<std::mutex> lk(A.mg.mu);
+            A.mg.sound = std::move(snd);
+        }
+        A.mg.running = false;
+    });
+}
+
+// Saves the generated pictures (one PNG sheet) or sound (WAV) under
+// <config>/outputs and returns the path, or "" on failure.
+std::string save_media(bool images) {
+    std::filesystem::path dir = upath(config_dir()) / "outputs";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    std::string path = (dir / ((images ? "images-" : "sound-") + timestamp(true) + (images ? ".png" : ".wav"))).u8string(), err;
+    std::lock_guard<std::mutex> lk(A.mg.mu);
+    bool ok;
+    if (images) {
+        if (A.mg.images.empty()) return "";
+        int s = A.mg.images[0].w, scale = std::max(1, 64 / std::max(1, s)), cell = s * scale + 2;
+        int n = (int)A.mg.images.size(), cols = (int)std::ceil(std::sqrt((double)n)), rows = (n + cols - 1) / cols;
+        Image sheet;
+        sheet.w = cols * cell;
+        sheet.h = rows * cell;
+        sheet.rgb.assign((size_t)sheet.w * sheet.h * 3, 255);
+        for (int k = 0; k < n; ++k)
+            for (int y = 0; y < s * scale; ++y)
+                for (int x = 0; x < s * scale; ++x)
+                    for (int c = 0; c < 3; ++c)
+                        sheet.rgb[((size_t)(k / cols * cell + 1 + y) * sheet.w + k % cols * cell + 1 + x) * 3 + c] =
+                            A.mg.images[k].rgb[((size_t)(y / scale) * s + x / scale) * 3 + c];
+        ok = save_png(path, sheet, &err);
+    } else {
+        ok = !A.mg.sound.samples.empty() && save_wav(path, A.mg.sound, &err);
+    }
+    return ok ? path : "";
+}
+
+void media_playground() {
+    bool image = A.model->spec.media == MEDIA_IMAGE;
+    begin_card("mgen", tr(image ? S::GenImages : S::GenSound), 0, 0,
+               image ? strf(tr(S::ImageModelFmt), A.model->spec.img_size, A.model->spec.img_size, A.model->spec.vocab - 1).c_str()
+                     : strf(tr(S::SoundModelFmt), A.model->spec.rate).c_str());
+    float lw = std::min(px(200), ImGui::GetContentRegionAvail().x * 0.3f);
+    float sw = std::min(px(320), ImGui::GetContentRegionAvail().x - lw - px(20));
+    field_label(tr(S::Temperature), lw);
+    ImGui::SetNextItemWidth(sw);
+    slider_float("##mtemp", &A.temperature, 0.1f, 1.5f, "%.2f");
+    if (image) {
+        field_label(tr(S::HowMany), lw);
+        ImGui::SetNextItemWidth(sw);
+        slider_int("##mcount", &A.gen_count, 1, 36);
+        A.gen_count = std::max(1, std::min(36, A.gen_count));
+    } else {
+        field_label(tr(S::Seconds), lw);
+        ImGui::SetNextItemWidth(sw);
+        slider_float("##msecs", &A.gen_seconds, 0.5f, 10.f, "%.1f s");
+        A.gen_seconds = std::max(0.5f, std::min(10.f, A.gen_seconds));
+    }
+    gap(2);
+    if (A.mg.running) {
+        if (button(tr(S::Stop), BTN_DANGER, IC_STOP)) A.mg.cancel = true;
+        ImGui::SameLine(0, px(16));
+        ImGui::AlignTextToFramePadding();
+        text(strf(tr(S::Generating), A.mg.progress.load() * 100).c_str(), C::muted);
+    } else {
+        if (button(tr(image ? S::GenImages : S::GenSound), BTN_PRIMARY, IC_SPARK)) start_media_gen();
+        bool have;
+        {
+            std::lock_guard<std::mutex> lk(A.mg.mu);
+            have = image ? !A.mg.images.empty() : !A.mg.sound.samples.empty();
+        }
+        if (have) {
+            if (!image) {
+                ImGui::SameLine();
+                if (button(tr(S::Play), BTN_SECONDARY, IC_PLAY)) {
+                    std::string p = (upath(config_dir()) / "playground.wav").u8string(), err;
+                    std::lock_guard<std::mutex> lk(A.mg.mu);
+                    if (save_wav(p, A.mg.sound, &err)) play_wav(p);
+                }
+            }
+            ImGui::SameLine();
+            if (button(tr(S::Save), BTN_SECONDARY, IC_SAVE)) {
+                std::string p = save_media(image);
+                A.media_ok = !p.empty();
+                A.media_msg = p;
+            }
+            if (!A.media_msg.empty() && A.media_ok) {
+                ImGui::SameLine();
+                if (button(tr(S::OpenFolder), BTN_GHOST, IC_FOLDER)) open_folder(upath(A.media_msg).parent_path().u8string());
+            }
+        }
+    }
+    if (!A.media_msg.empty()) {
+        if (A.media_ok) text_wrapped(strf(tr(S::SavedTo), A.media_msg.c_str()).c_str(), C::good, F.small);
+        else text_wrapped(strf(tr(S::Failed), A.media_msg.c_str()).c_str(), C::bad, F.small);
+    }
+    end_card();
+    gap();
+    float rest = ImGui::GetContentRegionAvail().y;
+    begin_card("mout", tr(S::Result));
+    float inner = std::max(px(200), rest - ImGui::GetCursorPosY() - card_padding_y() - px(2));
+    if (begin_inset("##mres", inner)) {
+        std::lock_guard<std::mutex> lk(A.mg.mu);
+        if (image) {
+            while (A.gen_tex.size() < A.mg.images.size()) A.gen_tex.push_back(make_texture(A.mg.images[A.gen_tex.size()]));
+            if (A.gen_tex.empty()) text(tr(S::GenImgEmpty), C::subtle);
+            else image_grid(A.gen_tex, std::max(px(96), std::min(px(160), (ImGui::GetContentRegionAvail().x - px(40)) / 6)));
+        } else if (A.mg.sound.samples.empty()) {
+            text(tr(S::GenSndEmpty), C::subtle);
+        } else {
+            waveform(A.mg.sound.samples, ImVec2(ImGui::GetContentRegionAvail().x, std::min(px(200), inner - px(20))));
+            text(strf("%.1f s, %d Hz", (double)A.mg.sound.samples.size() / A.mg.sound.rate, A.mg.sound.rate).c_str(), C::muted);
+        }
+    }
+    ImGui::EndChild();
+    end_card();
+}
+
 void page_test() {
     header(tr(S::NavTest), tr(S::TestHelp));
     header_end();
@@ -1636,6 +2092,10 @@ void page_test() {
         int r = empty_state(IC_CHAT, nullptr, tr(S::NoModel), tr(S::NavTrain), tr(S::LoadModel));
         if (r == 1) A.page = PAGE_TRAIN;
         if (r == 2) A.page = PAGE_FILES;
+        return;
+    }
+    if (A.model->spec.kind == MODEL_GPT && A.model->spec.media != MEDIA_TEXT) {
+        media_playground();
         return;
     }
     if (A.model->spec.kind == MODEL_GPT) {
@@ -1811,19 +2271,7 @@ void page_files() {
             if (!p.empty()) { std::snprintf(A.model_path, sizeof A.model_path, "%s", p.c_str()); load = true; }
         }
     }
-    if (load && A.model_path[0] && !busy()) {
-        std::string err;
-        auto m = Model::load(A.model_path, &err);
-        A.file_ok = (bool)m;
-        A.file_msg = m ? tr(S::LoadedModel) : err;
-        if (m) {
-            A.model = m;
-            A.spec = m->spec;
-            reset_generation();
-            A.feat_in.clear();
-            if (model_matches_data() && A.data.kind == DATA_TEXT) A.data.encode_with(m->vocab);
-        }
-    }
+    if (load && A.model_path[0] && !busy()) load_model_file(A.model_path);
     ImGui::EndDisabled();
     end_card();
     row.next();
@@ -2456,6 +2904,8 @@ void init(float ui_scale) {
 void shutdown() {
     A.runner.cancel();
     A.trainer.stop();
+    stop_media_gen();
+    stop_sound();
     if (!A.save_settings) return;
     for (size_t i = 0; i < A.plugins.size() && i < A.plugin_args.size(); ++i)
         A.saved_args[A.plugins[i].file] = A.plugin_args[i].data();
@@ -2476,7 +2926,24 @@ void set_page(int page) {
 bool load_data(const char* path) {
     std::string p = path;
     std::string ext = p.size() > 4 ? p.substr(p.size() - 4) : "";
-    return load_data_impl(p, ext == ".csv" || ext == ".tsv" ? 1 : 0, -1);
+    std::error_code ec;
+    int kind = ext == ".csv" || ext == ".tsv" ? 1 : 0;
+    if (std::filesystem::is_directory(upath(p), ec)) {
+        kind = 3;
+        for (std::filesystem::recursive_directory_iterator it(upath(p), ec), end; !ec && it != end; it.increment(ec))
+            if (is_image_file(it->path().u8string())) { kind = 2; break; }
+    } else if (is_wav_file(p)) {
+        kind = 3;
+    }
+    A.data_kind = kind;
+    std::snprintf(A.data_path, sizeof A.data_path, "%s", p.c_str());
+    return load_data_impl(p, kind, -1);
+}
+
+bool load_model(const char* path) { return load_model_file(path); }
+
+void generate_media() {
+    if (A.model && A.model->spec.kind == MODEL_GPT && A.model->spec.media != MEDIA_TEXT) start_media_gen();
 }
 
 void start_training() { begin_training(); }

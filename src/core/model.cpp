@@ -1,6 +1,11 @@
 #include "model.h"
 
+#include "media.h"
+
+#include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <sstream>
@@ -17,7 +22,8 @@ std::string ModelSpec::to_text() const {
     o << "kind=" << kind << "\nin_dim=" << in_dim << "\nout_dim=" << out_dim
       << "\nregression=" << (regression ? 1 : 0) << "\nvocab=" << vocab << "\nctx=" << ctx
       << "\ndim=" << dim << "\nheads=" << heads << "\nnlayer=" << nlayer
-      << "\nlora_rank=" << lora_rank << "\nlayers=";
+      << "\nlora_rank=" << lora_rank << "\nmedia=" << media << "\nimg_size=" << img_size
+      << "\nrate=" << rate << "\nlayers=";
     for (size_t i = 0; i < layers.size(); ++i)
         o << (i ? "," : "") << layers[i].type << ":" << layers[i].units << ":" << layers[i].p;
     o << "\n";
@@ -54,6 +60,9 @@ bool ModelSpec::from_text(const std::string& s) {
         else if (k == "heads") heads = iv;
         else if (k == "nlayer") nlayer = iv;
         else if (k == "lora_rank") lora_rank = iv;
+        else if (k == "media") media = iv;
+        else if (k == "img_size") img_size = iv;
+        else if (k == "rate") rate = iv;
     }
     if (kind == MODEL_GPT) return vocab > 0 && ctx > 0 && dim > 0 && heads > 0 && dim % heads == 0 && nlayer > 0;
     return in_dim > 0 && out_dim > 0;
@@ -235,6 +244,45 @@ void Model::enable_lora(int rank) {
     spec.lora_rank = rank;
 }
 
+int Model::extend_vocab(const std::vector<std::string>& tokens) {
+    if (spec.kind != MODEL_GPT || spec.lora_rank > 0) return 0;
+    std::vector<std::string> add;
+    for (auto& t : tokens)
+        if (std::find(vocab.begin(), vocab.end(), t) == vocab.end() && std::find(add.begin(), add.end(), t) == add.end())
+            add.push_back(t);
+    if (add.empty()) return 0;
+    int C = spec.dim, V0 = spec.vocab, V1 = V0 + (int)add.size();
+    Param& tok = emb->tok;
+    tok.w.v.resize((size_t)V1 * C);
+    tok.w.rows = V1;
+    for (size_t i = (size_t)V0 * C; i < tok.w.v.size(); ++i) tok.w.v[i] = rng.normal() * 0.02f;
+    Tensor W(C, V1);
+    for (int r = 0; r < C; ++r) {
+        std::copy(head->W.w.row(r), head->W.w.row(r) + V0, W.row(r));
+        for (int j = V0; j < V1; ++j) W.row(r)[j] = rng.normal() * 0.02f;
+    }
+    head->W.w = std::move(W);
+    // New tokens start a little less likely than the least likely known one.
+    float low = *std::min_element(head->b.w.v.begin(), head->b.w.v.end());
+    head->b.w.v.resize(V1, low - 1.f);
+    head->b.w.cols = V1;
+    for (Param* p : {&tok, &head->W, &head->b}) {
+        p->g.resize(p->w.rows, p->w.cols);
+        p->m = Tensor();
+        p->s = Tensor();
+    }
+    head->out = V1;
+    emb->vocab = V1;
+    spec.vocab = V1;
+    vocab.insert(vocab.end(), add.begin(), add.end());
+    return (int)add.size();
+}
+
+void Model::set_dropout(float p) {
+    p = std::max(0.f, std::min(0.9f, p));
+    for (auto& b : blocks) b->set_dropout(p);
+}
+
 void Model::merge_lora() {
     if (spec.lora_rank <= 0) return;
     for (Linear* l : all_linears) l->merge_lora();
@@ -248,7 +296,7 @@ void Model::merge_lora() {
 void Model::forward(const Batch& b, bool train) {
     if (spec.kind == MODEL_GPT) {
         emb->forward(b.ids, b.B, b.T, xs[0]);
-        for (int l = 0; l < spec.nlayer; ++l) blocks[l]->forward(xs[l], xs[l + 1], b.B, b.T);
+        for (int l = 0; l < spec.nlayer; ++l) blocks[l]->forward(xs[l], xs[l + 1], b.B, b.T, train);
         lnf->forward(xs[spec.nlayer], xf, train);
         head->forward(xf, logits, train);
     } else {
@@ -270,7 +318,8 @@ float Model::step(const Batch& b, bool train, float scale, int* correct) {
         loss = mse_loss(out, b.y, train ? &dout : nullptr, scale);
         if (correct) *correct = 0;
     } else {
-        loss = cross_entropy(out, b.tgt.data(), train ? &dout : nullptr, scale, correct);
+        const float* w = b.w.size() == b.tgt.size() && !b.w.empty() ? b.w.data() : nullptr;
+        loss = cross_entropy(out, b.tgt.data(), train ? &dout : nullptr, scale, correct, w);
     }
     if (!train) return loss;
     if (spec.kind == MODEL_GPT) {
@@ -326,7 +375,10 @@ int Model::next_token(const std::vector<int>& ids, float temperature, Rng& r) {
     else infer.ids.assign(ids.end() - n, ids.end());
     infer.B = 1; infer.T = n;
     forward(infer, false);
-    const float* z = logits.row(n - 1);
+    return sample(logits.row(n - 1), temperature, r);
+}
+
+int Model::sample(const float* z, float temperature, Rng& r) const {
     int V = spec.vocab, arg = 0;
     for (int j = 1; j < V; ++j)
         if (z[j] > z[arg]) arg = j;
@@ -339,13 +391,79 @@ int Model::next_token(const std::vector<int>& ids, float temperature, Rng& r) {
     return arg;
 }
 
-std::vector<int> Model::encode(const std::string& text) const {
+const float* Model::gen_feed(int token) {
+    int C = spec.dim;
+    if ((int)kv_.size() != spec.nlayer) kv_.resize(spec.nlayer);
+    for (auto& t : kv_)
+        if (t.rows != spec.ctx || t.cols != 2 * C) t.resize(spec.ctx, 2 * C);
+    gx_.resize_noinit(1, C);
+    const float* a = emb->tok.w.row(token);
+    const float* p = emb->pos.w.row(gen_pos_);
+    for (int j = 0; j < C; ++j) gx_.v[j] = a[j] + p[j];
+    for (int l = 0; l < spec.nlayer; ++l) {
+        blocks[l]->step(gx_, gy_, kv_[l], gen_pos_);
+        std::swap(gx_, gy_);
+    }
+    lnf->forward(gx_, gf_, false);
+    head->forward(gf_, glog_, false);
+    ++gen_pos_;
+    return glog_.row(0);
+}
+
+std::vector<int> Model::generate(const std::vector<int>& prompt, int n, float temperature, Rng& rng, int stop,
+                                 const std::function<bool(int)>& on_token) {
+    std::vector<int> out;
+    if (spec.kind != MODEL_GPT || n <= 0) return out;
+    std::vector<int> hist = prompt;
+    if (hist.empty()) hist.push_back(0);
+    int ctx = spec.ctx;
+    // Starts a fresh window holding the last `keep` tokens of the history.
+    auto prime = [&](size_t keep) {
+        gen_pos_ = 0;
+        keep = std::min(keep, hist.size());
+        const float* z = nullptr;
+        for (size_t i = hist.size() - keep; i < hist.size(); ++i) z = gen_feed(hist[i]);
+        return z;
+    };
+    const float* z = prime((size_t)ctx);
+    for (int i = 0; i < n; ++i) {
+        int t = sample(z, temperature, rng);
+        out.push_back(t);
+        hist.push_back(t);
+        if (t == stop || (on_token && !on_token(t))) break;
+        if (gen_pos_ >= ctx) {
+            z = prime((size_t)std::max(1, ctx / 2));
+            if (hist.size() > (size_t)ctx * 4) hist.erase(hist.begin(), hist.end() - ctx);
+        } else {
+            z = gen_feed(t);
+        }
+    }
+    return out;
+}
+
+std::vector<int> Model::encode(const std::string& text) const { return tokenize(text, vocab); }
+
+std::vector<int> tokenize(const std::string& text, const std::vector<std::string>& vocab) {
     std::unordered_map<std::string, int> map;
-    for (size_t i = 0; i < vocab.size(); ++i) map[vocab[i]] = (int)i;
+    size_t longest = 1;
+    for (size_t i = 0; i < vocab.size(); ++i) {
+        map.emplace(vocab[i], (int)i);
+        longest = std::max(longest, utf8_chars(vocab[i]).size());
+    }
+    std::vector<std::string> chars = utf8_chars(text);
     std::vector<int> ids;
-    for (auto& ch : utf8_chars(text)) {
-        auto it = map.find(ch);
-        if (it != map.end()) ids.push_back(it->second);  // unknown characters are skipped
+    ids.reserve(chars.size());
+    for (size_t i = 0; i < chars.size();) {
+        int best = -1;
+        size_t best_len = 1;
+        std::string piece;
+        for (size_t l = 1; l <= longest && i + l <= chars.size(); ++l) {
+            piece += chars[i + l - 1];
+            auto it = map.find(piece);
+            if (it != map.end()) { best = it->second; best_len = l; }
+        }
+        if (best >= 0) ids.push_back(best);  // unknown characters are skipped
+        i += best_len;
     }
     return ids;
 }
@@ -365,15 +483,61 @@ ProbeResult run_probe(Model& m, const Probe& p) {
         if (m.vocab[i] == "\n") newline = (int)i;
     int max_len = std::min(160, (int)utf8_chars(p.expected).size() * 2 + 16);
     Rng rng(1);
-    for (int i = 0; i < max_len; ++i) {
-        int t = m.next_token(ids, 0.f, rng);  // temperature 0: always the most likely character
+    // temperature 0: always the most likely token
+    for (int t : m.generate(ids, max_len, 0.f, rng, newline)) {
         if (t == newline) break;
-        ids.push_back(t);
         res.answer += m.vocab[t];
     }
     res.answer = trim_ws(res.answer);
     res.pass = !res.answer.empty() && res.answer == trim_ws(p.expected);
     return res;
+}
+
+// ------------------------------------------------------- images and sound
+
+Image image_from_tokens(const std::vector<std::string>& vocab, const int* toks, size_t n, int size) {
+    std::vector<std::array<uint8_t, 3>> pal(vocab.size(), {{0, 0, 0}});
+    for (size_t i = 0; i < vocab.size(); ++i) {
+        unsigned r = 0, g = 0, b = 0;
+        if (std::sscanf(vocab[i].c_str(), "#%02x%02x%02x", &r, &g, &b) == 3) pal[i] = {{(uint8_t)r, (uint8_t)g, (uint8_t)b}};
+    }
+    Image img;
+    img.w = img.h = size;
+    img.rgb.assign((size_t)size * size * 3, 0);
+    std::array<uint8_t, 3> last = {{0, 0, 0}};
+    for (size_t i = 0; i < (size_t)size * size; ++i) {
+        // A separator in the middle of an image keeps the previous colour.
+        if (i < n && toks[i] > 0 && toks[i] < (int)pal.size()) last = pal[toks[i]];
+        std::copy(last.begin(), last.end(), img.rgb.begin() + i * 3);
+    }
+    return img;
+}
+
+Image sample_image(Model& m, float temperature, Rng& rng) {
+    int size = m.spec.img_size;
+    if (m.spec.kind != MODEL_GPT || m.spec.media != MEDIA_IMAGE || size <= 0) return Image();
+    std::vector<int> toks = m.generate({0}, size * size, temperature, rng);
+    return image_from_tokens(m.vocab, toks.data(), toks.size(), size);
+}
+
+Sound sample_sound(Model& m, float seconds, float temperature, Rng& rng, const std::function<bool(float)>& progress) {
+    Sound snd;
+    if (m.spec.kind != MODEL_GPT || m.spec.media != MEDIA_AUDIO || m.spec.rate <= 0) return snd;
+    snd.rate = m.spec.rate;
+    int n = std::max(1, (int)(seconds * snd.rate));
+    int every = std::max(1, snd.rate / 20);
+    snd.samples.reserve(n);
+    m.generate({0}, n, temperature, rng, -1, [&](int t) {
+        if (t == 0) {
+            if ((int)snd.samples.size() > snd.rate / 2) return false;  // the model ended the clip
+            snd.samples.push_back(0.f);
+        } else {
+            snd.samples.push_back(mulaw_decode(t - 1));
+        }
+        if (progress && snd.samples.size() % every == 0 && !progress((float)snd.samples.size() / n)) return false;
+        return true;
+    });
+    return snd;
 }
 
 // ----------------------------------------------------------- checkpoints

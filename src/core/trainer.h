@@ -29,6 +29,16 @@ struct TrainConfig {
     int eval_batches = 8;
     int optimizer = OPT_ADAMW;
     uint64_t seed = 1;
+    // Text batches (see SampleOpts): share of rows that start at an example,
+    // and the loss weight of question text in dialogue data.
+    float align = 0;
+    float prompt_weight = 1;
+    // Dropout of the transformer blocks (text models), against overfitting.
+    float dropout = 0;
+    // Exponential moving average of the weights (e.g. 0.999; 0 = off). When on,
+    // evaluation, question tests, the best-weights snapshot and the final
+    // model use the averaged weights, which are usually smoother.
+    float ema = 0;
     // Keep a copy of the best weights and return to them when training ends
     // (protects against overfitting). "Best" means the most question tests
     // passed when tests run during training, else the lowest validation loss.
@@ -49,7 +59,8 @@ struct TrainConfig {
 
 enum TrainEventKind {
     EV_START = 0, EV_EVAL, EV_PROBES, EV_EARLY_STOP, EV_TARGET, EV_RESTORED, EV_DONE, EV_STOPPED, EV_ERROR,
-    EV_HOOK_LOG, EV_HOOK_METRIC, EV_HOOK_STOP, EV_HOOK_LR, EV_HOOK_DATA, EV_HOOK_BEST
+    EV_HOOK_LOG, EV_HOOK_METRIC, EV_HOOK_STOP, EV_HOOK_LR, EV_HOOK_DATA, EV_HOOK_BEST,
+    EV_HOOK_SAMPLING, EV_HOOK_DROPOUT
 };
 enum HookTone { TONE_INFO = 0, TONE_GOOD, TONE_WARN, TONE_BAD, TONE_MUTED };
 
@@ -69,6 +80,8 @@ enum HookTone { TONE_INFO = 0, TONE_GOOD, TONE_WARN, TONE_BAD, TONE_MUTED };
 //     LR          loss = new learning-rate factor (or fixed rate when n1 = 1)
 //     DATA        n1 = characters added, n2 = all added characters
 //     BEST        n1 = 1 saved the current weights as the best, 0 restored the best ones
+//     SAMPLING    loss = share of aligned rows, val_loss = question weight
+//     DROPOUT     loss = dropout rate
 struct TrainEvent {
     int kind = 0;
     int step = 0;
@@ -124,6 +137,10 @@ public:
     virtual void clear_added() = 0;
     // Share of training rows taken from the added text (< 0 = automatic).
     virtual void set_mix(float share) = 0;
+    // Text batches: share of rows that start at an example and the loss weight
+    // of question text (see SampleOpts). Negative values keep the current one.
+    virtual void set_sampling(float align, float question_weight) = 0;
+    virtual void set_dropout(float p) = 0;
     virtual void log(const std::string& text, int tone) = 0;
     virtual void metric(const std::string& name, float value) = 0;
     // Text models: continues `prompt` with the current weights.

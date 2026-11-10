@@ -31,3 +31,6 @@ int run_process(const std::vector<std::string>& args, std::string& output);
 std::vector<std::string> find_python(std::string& version);
 void set_env(const char* name, const char* value);
 void open_folder(const std::string& path);  // shows a folder in the file manager
+// Plays a WAV file in the background; a new sound replaces the one playing.
+bool play_wav(const std::string& path);
+void stop_sound();

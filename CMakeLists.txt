@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(KorStudio VERSION 0.4.0 LANGUAGES C CXX)
+project(KorStudio VERSION 0.5.0 LANGUAGES C CXX)
 
 option(KOR_BUILD_GUI "Build the Kor Studio desktop application" ON)
 
@@ -24,6 +24,7 @@ add_library(korcore STATIC
   src/core/layers.cpp
   src/core/model.cpp
   src/core/data.cpp
+  src/core/media.cpp
   src/core/trainer.cpp
   src/core/sysinfo.cpp)
 target_include_directories(korcore PUBLIC src)
@@ -122,7 +123,7 @@ if(KOR_BUILD_GUI)
   add_executable(kor-studio WIN32 ${KOR_APP_SOURCES})
   target_link_libraries(kor-studio PRIVATE korskills imgui)
   if(WIN32)
-    target_link_libraries(kor-studio PRIVATE comdlg32)
+    target_link_libraries(kor-studio PRIVATE comdlg32 winmm)
   endif()
   if(MSVC)
     target_link_options(kor-studio PRIVATE /ENTRY:mainCRTStartup)

@@ -336,6 +336,21 @@ class Run:
         """Share of each batch taken from the added text, 0..1 (None = automatic)."""
         self._send("mix", value=-1.0 if share is None else min(1.0, max(0.0, _finite(share, "share"))))
 
+    def set_sampling(self, align=None, question_weight=None):
+        """Text models: how training rows are drawn from now on.
+
+        align: share of rows that start at the beginning of an example (a
+        question of dialogue data), 0..1. question_weight: how much the question
+        text counts in the loss compared with the answers, 0..1. None keeps the
+        current value."""
+        a = -1.0 if align is None else min(1.0, max(0.0, _finite(align, "align")))
+        q = -1.0 if question_weight is None else min(1.0, max(0.0, _finite(question_weight, "question_weight")))
+        self._send("sampling", align=a, question_weight=q)
+
+    def set_dropout(self, p):
+        """Text models: dropout of the transformer blocks from now on (0 = off)."""
+        self._send("dropout", value=min(0.9, max(0.0, _finite(p, "p"))))
+
     def generate(self, prompt="", length=200, temperature=0.8, line=False):
         """Text models: continues `prompt` with the current weights. With line=True
         stops at the end of the line."""

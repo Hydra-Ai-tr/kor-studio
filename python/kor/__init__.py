@@ -26,7 +26,7 @@ Sharing: ``python -m kor install <link>``, ``python -m kor search``,
 ``python -m kor new "My skill"``. See docs/plugins.md.
 """
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 from .skill import Answer, Event, Run, Skill, SkillError, TestCase  # noqa: F401
 from .tool import (  # noqa: F401

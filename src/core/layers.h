@@ -103,6 +103,10 @@ struct Attention {
     Attention(int dim, int heads, const std::string& name, Rng& rng, float proj_std);
     void forward(const Tensor& x, Tensor& y, int B, int T);
     void backward(const Tensor& dy, Tensor& dx);
+    // Inference for one new position: x and y are [1 x C]. The keys and values
+    // of positions 0..pos-1 are read from (and this one appended to) kv, which
+    // holds [ctx x 2C] rows.
+    void step(const Tensor& x, Tensor& y, Tensor& kv, int pos);
 
 private:
     int B = 0, T = 0;
@@ -111,24 +115,30 @@ private:
 };
 
 // Pre-norm transformer block: x + attn(ln(x)), then h + mlp(ln(h)).
+// While training, both residual branches can use dropout.
 struct Block {
     LayerNorm ln1, ln2;
     Attention attn;
     Linear fc1, fc2;
     Activation act;
+    Dropout drop1, drop2;
     Block(int dim, int heads, const std::string& name, Rng& rng, float resid_std);
-    void forward(const Tensor& x, Tensor& y, int B, int T);
+    void set_dropout(float p);
+    void forward(const Tensor& x, Tensor& y, int B, int T, bool train);
     void backward(const Tensor& dy, Tensor& dx);
+    // Inference for one new position with cached keys and values (see Attention::step).
+    void step(const Tensor& x, Tensor& y, Tensor& kv, int pos);
     void collect(std::vector<Param*>& ps);
     void linears(std::vector<Linear*>& ls);
 
 private:
-    Tensor a1, a2, h, a3, a4, a5, a6, t1, t2, dh;
+    Tensor a1, a2, r1, h, a3, a4, a5, a6, r2, t1, t2, dh;
 };
 
 // Losses. They return the mean loss; when d is non-null they write the
-// gradient w.r.t. the input multiplied by `scale`.
-float cross_entropy(const Tensor& logits, const int* target, Tensor* d, float scale, int* correct);
+// gradient w.r.t. the input multiplied by `scale`. With `weight` (one per
+// row) the cross entropy is a weighted mean.
+float cross_entropy(const Tensor& logits, const int* target, Tensor* d, float scale, int* correct, const float* weight = nullptr);
 float mse_loss(const Tensor& pred, const Tensor& y, Tensor* d, float scale);
 
 }  // namespace kor

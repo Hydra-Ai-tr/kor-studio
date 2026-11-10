@@ -1,6 +1,7 @@
 // kor-cli: headless companion to Kor Studio (system info, training, self-test,
 // generation and question tests). Also used by Python plugins.
 #include "../core/kernels.h"
+#include "../core/media.h"
 #include "../core/parallel.h"
 #include "../core/sysinfo.h"
 #include "../skills/skill.h"
@@ -15,6 +16,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 #if defined(_WIN32)
@@ -235,6 +237,71 @@ static int selftest() {
         bool pass = std::fabs(before - after) < 1e-3;
         std::printf("lora merge: loss %.5f vs %.5f %s\n", before, after, pass ? "OK" : "FAIL");
         if (!pass) ++fails;
+
+        // Cached generation must match recomputing the whole window, also past the context length.
+        m.vocab.resize(11, "x");
+        Rng r1(5), r2(5);
+        std::vector<int> ids = {1, 2, 3}, slow;
+        std::vector<int> fast = m.generate(ids, 3, 0.f, r1);  // 3 + 3 tokens fill the context of 6
+        for (int i = 0; i < 3; ++i) { int t = m.next_token(ids, 0.f, r2); slow.push_back(t); ids.push_back(t); }
+        pass = fast == slow;
+        std::printf("cached generation %s\n", pass ? "OK" : "FAIL");
+        if (!pass) ++fails;
+        fast = m.generate({1}, 40, 1.f, r1);
+        pass = fast.size() == 40;
+        std::printf("cached generation past the context %s\n", pass ? "OK" : "FAIL");
+        if (!pass) ++fails;
+
+        // Fine-tuning with new characters keeps the known ones unchanged.
+        m.vocab = {"a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"};
+        double l2 = m.step(b, false, 1.f);
+        int added = m.extend_vocab({"a", "z", "y"});
+        double l3 = m.step(b, false, 1.f);
+        pass = added == 2 && m.spec.vocab == 13 && std::fabs(l3 - l2) < 0.05;
+        std::printf("vocabulary extension: +%d, loss %.5f vs %.5f %s\n", added, l2, l3, pass ? "OK" : "FAIL");
+        if (!pass) ++fails;
+    }
+    {   // media files
+        Image img;
+        img.w = 7; img.h = 5;
+        for (int i = 0; i < 7 * 5 * 3; ++i) img.rgb.push_back((uint8_t)(i * 37));
+        std::string err, path = "kor_selftest.png";
+        Image back;
+        bool pass = save_png(path, img, &err) && load_image(path, back, &err) && back.w == 7 && back.h == 5 && back.rgb == img.rgb;
+        std::remove(path.c_str());
+        std::printf("png round trip %s %s\n", pass ? "OK" : "FAIL", err.c_str());
+        if (!pass) ++fails;
+        Sound snd;
+        snd.rate = 8000;
+        for (int i = 0; i < 800; ++i) snd.samples.push_back(0.5f * std::sin(i * 0.1f));
+        Sound sb;
+        path = "kor_selftest.wav";
+        pass = save_wav(path, snd, &err) && load_wav(path, sb, &err) && sb.rate == 8000 && sb.samples.size() == 800 &&
+               std::fabs(sb.samples[17] - snd.samples[17]) < 1e-3f;
+        std::remove(path.c_str());
+        std::printf("wav round trip %s %s\n", pass ? "OK" : "FAIL", err.c_str());
+        if (!pass) ++fails;
+        float worst = 0;
+        for (int i = 0; i <= 100; ++i) {
+            float x = -1.f + i * 0.02f;
+            worst = std::max(worst, std::fabs(mulaw_decode(mulaw_encode(x)) - x));
+        }
+        pass = worst < 0.04f;
+        std::printf("mu-law round trip: worst error %.4f %s\n", worst, pass ? "OK" : "FAIL");
+        if (!pass) ++fails;
+    }
+    {   // subword tokens: learned pieces shorten the text and decode back to it
+        std::string text = "merhaba dünya\nmerhaba kor\nmerhaba dünya, merhaba kor\n";
+        auto chars = utf8_chars(text);
+        auto v = learn_subwords(chars, 40);
+        std::vector<int> ids = tokenize(text, v);
+        std::string back;
+        for (int t : ids) back += v[t];
+        bool no_nl_merge = true;
+        for (auto& p : v) no_nl_merge &= p == "\n" || p.find('\n') == std::string::npos;
+        bool pass = back == text && ids.size() < chars.size() / 2 && no_nl_merge;
+        std::printf("subword tokens: %zu pieces, %zu chars -> %zu tokens %s\n", v.size(), chars.size(), ids.size(), pass ? "OK" : "FAIL");
+        if (!pass) ++fails;
     }
     {   // half-float conversion
         float vals[] = {0.f, 1.f, -2.5f, 0.1f, 65504.f, 1e-5f, 3.14159f};
@@ -264,24 +331,116 @@ static int train(const std::vector<std::string>& a) {
     int steps = std::atoi(flag(a, "--steps", "0").c_str()), patience = std::atoi(flag(a, "--patience", "0").c_str());
     float target = (float)std::atof(flag(a, "--target", "0").c_str());
     int kind = has_flag(a, "--table") ? DATA_TABLE : has_flag(a, "--text") ? DATA_TEXT : 0;
+    int media = has_flag(a, "--images") ? MEDIA_IMAGE : has_flag(a, "--audio") ? MEDIA_AUDIO : MEDIA_TEXT;
+    std::error_code ec;
+    if (!kind && media == MEDIA_TEXT) {
+        if (std::filesystem::is_directory(upath(path), ec)) {
+            // A folder: images if it has any, otherwise sound.
+            for (std::filesystem::recursive_directory_iterator it(upath(path), ec), end; !ec && it != end; it.increment(ec)) {
+                std::string f = it->path().u8string();
+                if (is_image_file(f)) { media = MEDIA_IMAGE; break; }
+                if (is_wav_file(f)) media = MEDIA_AUDIO;
+            }
+        } else if (is_wav_file(path)) {
+            media = MEDIA_AUDIO;
+        }
+    }
+    if (media != MEDIA_TEXT) kind = DATA_TEXT;
     if (!kind) {
         std::string ext = path.size() > 4 ? path.substr(path.size() - 4) : "";
         kind = (ext == ".csv" || ext == ".tsv") ? DATA_TABLE : DATA_TEXT;
     }
-    Dataset data;
     std::string err;
-    bool ok = kind == DATA_TABLE ? data.load_table(path, -1, &err) : data.load_text(path, &err);
+    // Fine-tuning: start from a saved model instead of a new one. Images and
+    // sound are read in the format of that model.
+    std::shared_ptr<Model> base;
+    std::string from = flag(a, "--from");
+    if (!from.empty()) {
+        base = Model::load(from, &err);
+        if (!base) { std::printf("error: %s: %s\n", from.c_str(), err.c_str()); return 1; }
+        if (base->spec.lora_rank > 0) base->merge_lora();
+        if (base->spec.kind == MODEL_GPT && base->spec.media != MEDIA_TEXT && kind == DATA_TEXT) media = base->spec.media;
+    }
+    Dataset data;
+    bool ok;
+    if (kind == DATA_TABLE) ok = data.load_table(path, -1, &err);
+    else if (media == MEDIA_IMAGE) {
+        int size = std::atoi(flag(a, "--size", "16").c_str()), colors = std::atoi(flag(a, "--colors", "32").c_str());
+        bool fixed = base && base->spec.media == MEDIA_IMAGE;
+        ok = data.load_images(path, fixed ? base->spec.img_size : size, colors, !has_flag(a, "--no-mirror"), &err,
+                              fixed ? &base->vocab : nullptr);
+    } else if (media == MEDIA_AUDIO) {
+        int rate = std::atoi(flag(a, "--rate", "8000").c_str());
+        ok = data.load_audio(path, base && base->spec.media == MEDIA_AUDIO ? base->spec.rate : rate, &err);
+    } else {
+        ok = data.load_text(path, &err, std::atoi(flag(a, "--subword", "0").c_str()));
+    }
     if (!ok) { std::printf("error: %s\n", err.c_str()); return 1; }
+    if (media == MEDIA_IMAGE)
+        std::printf("images: %d read (%d skipped), %dx%d pixels, %zu colours, %zu tokens\n", data.items, data.skipped,
+                    data.img_size, data.img_size, data.vocab.size() - 1, data.ids.size());
+    else if (media == MEDIA_AUDIO)
+        std::printf("sound: %d WAV files read (%d skipped), %d Hz, %.1f seconds\n", data.items, data.skipped, data.rate,
+                    (double)data.ids.size() / data.rate);
+    else if (kind == DATA_TEXT)
+        std::printf("text: %zu tokens, vocabulary %zu\n", data.ids.size(), data.vocab.size());
     SysInfo sys = detect_system();
     AutoPlan plan = autotune(sys, data);
     if (steps > 0) { plan.cfg.steps = steps; plan.cfg.eval_every = std::max(10, steps / 10); }
     else plan.cfg.eval_every = std::max(10, plan.cfg.steps / 10);
+    auto num = [&](const char* name, auto& v) {
+        std::string s = flag(a, name);
+        if (!s.empty()) v = (std::remove_reference_t<decltype(v)>)std::atof(s.c_str());
+    };
+    if (kind == DATA_TEXT) {
+        num("--dim", plan.spec.dim);
+        num("--layers", plan.spec.nlayer);
+        num("--heads", plan.spec.heads);
+        num("--ctx", plan.spec.ctx);
+        if (media == MEDIA_IMAGE) plan.spec.ctx = data.img_size * data.img_size + 1;  // one whole image
+        if (plan.spec.dim % plan.spec.heads != 0) { std::printf("error: --dim must be a multiple of --heads\n"); return 1; }
+        plan.params = estimate_params(plan.spec);
+    }
+    if (base) {
+        bool fits = base->spec.kind == MODEL_GPT ? kind == DATA_TEXT && base->spec.media == media
+                  : kind == DATA_TABLE && base->spec.in_dim == data.n_feat && base->spec.regression == data.regression &&
+                    (data.regression || base->vocab == data.labels);
+        if (!fits) { std::printf("error: %s does not fit this dataset\n", from.c_str()); return 1; }
+        if (kind == DATA_TEXT && media == MEDIA_TEXT) {
+            int added = base->extend_vocab(data.vocab);
+            data.encode_with(base->vocab);
+            if (added) std::printf("fine-tuning: %d new characters added to the model\n", added);
+        }
+        plan.spec = base->spec;
+        plan.params = estimate_params(plan.spec);
+        plan.cfg.lr /= 3;  // a trained model needs smaller steps
+        int lora = std::atoi(flag(a, "--lora", "0").c_str());
+        if (lora > 0) base->enable_lora(lora);
+        std::printf("fine-tuning %s%s\n", from.c_str(), lora > 0 ? (" with LoRA rank " + std::to_string(lora)).c_str() : "");
+    }
+    num("--lr", plan.cfg.lr);
+    num("--batch", plan.cfg.batch);
+    num("--threads", plan.cfg.threads);
+    num("--seed", plan.cfg.seed);
+    num("--align", plan.cfg.align);
+    num("--prompt-weight", plan.cfg.prompt_weight);
+    num("--dropout", plan.cfg.dropout);
+    num("--wd", plan.cfg.weight_decay);
+    num("--ema", plan.cfg.ema);
     std::printf("auto plan: %zu parameters, ~%.0f MB RAM, batch %d x%d, %d steps, %d threads, kernels %s\n",
                 plan.params, plan.est_ram_mb, plan.cfg.batch, plan.cfg.accum, plan.cfg.steps, plan.cfg.threads, K().name);
-    auto model = std::make_shared<Model>(plan.spec);
-    if (kind == DATA_TEXT) model->vocab = data.vocab;
-    else { model->vocab = data.labels; model->norm_mean = data.mean; model->norm_std = data.stdv; }
-    if (kind == DATA_TEXT) {
+    if (kind == DATA_TEXT)
+        std::printf("model: dim %d, %d layers, %d heads, context %d; lr %g; aligned rows %.0f%%, question weight %g, dropout %g, weight decay %g, ema %g\n",
+                    plan.spec.dim, plan.spec.nlayer, plan.spec.heads, plan.spec.ctx, plan.cfg.lr, plan.cfg.align * 100,
+                    plan.cfg.prompt_weight, plan.cfg.dropout, plan.cfg.weight_decay, plan.cfg.ema);
+    if (media == MEDIA_IMAGE) std::printf("image model: %dx%d pixels, %zu colours\n", data.img_size, data.img_size, data.vocab.size() - 1);
+    if (media == MEDIA_AUDIO) std::printf("sound model: %d Hz, 256 levels (mu-law)\n", data.rate);
+    auto model = base ? base : std::make_shared<Model>(plan.spec);
+    if (!base) {
+        if (kind == DATA_TEXT) model->vocab = data.vocab;
+        else { model->vocab = data.labels; model->norm_mean = data.mean; model->norm_std = data.stdv; }
+    }
+    if (kind == DATA_TEXT && media == MEDIA_TEXT) {
         if (!tests.empty()) {
             if (!load_tests(tests, &data, plan.cfg.probes)) { std::printf("error: cannot read %s\n", tests.c_str()); return 1; }
             std::printf("%zu question tests from %s\n", plan.cfg.probes.size(), tests.c_str());
@@ -353,6 +512,10 @@ static int train(const std::vector<std::string>& a) {
             } else if (e.kind == EV_HOOK_BEST) {
                 if (e.n1) say("[%s] step %d  kept these weights as the best\n", e.source.c_str(), e.step);
                 else say("[%s] step %d  went back to the best weights (step %lld)\n", e.source.c_str(), e.step, e.n2);
+            } else if (e.kind == EV_HOOK_SAMPLING) {
+                say("[%s] step %d  aligned rows %.0f%%, question weight %.2f\n", e.source.c_str(), e.step, e.loss * 100, e.val_loss);
+            } else if (e.kind == EV_HOOK_DROPOUT) {
+                say("[%s] step %d  dropout %.2f\n", e.source.c_str(), e.step, e.loss);
             }
         }
         std::fflush(stdout);
@@ -367,8 +530,7 @@ static int train(const std::vector<std::string>& a) {
     if (st.state == TS_ERROR) { std::printf("error: %s\n", st.error.c_str()); return 1; }
     std::printf("done in %.1fs: train loss %.4f, val loss %.4f", st.elapsed, st.loss, st.val_loss);
     if (st.val_acc >= 0) std::printf(", val accuracy %.1f%%", st.val_acc * 100);
-    std::printf(", %.0f %s/s\n", st.items_per_sec, kind == DATA_TEXT ? "tokens" : "samples");
-    if (kind == DATA_TEXT) {
+    std::printf(", %.0f %s/s\n", st.items_per_sec, kind == DATA_TEXT ? "tokens" : "samples");    if (kind == DATA_TEXT && media == MEDIA_TEXT) {
         Rng rng(11);
         std::vector<int> ids = {data.ids[0]};
         std::string text;
@@ -400,16 +562,52 @@ static int generate(const std::vector<std::string>& a) {
     if (!m) return 1;
     std::string prompt = a.size() > 3 && a[3].compare(0, 2, "--") != 0 ? a[3] : "";
     int len = std::max(1, std::atoi(flag(a, "--len", "200").c_str()));
-    float temp = (float)std::atof(flag(a, "--temp", "0.8").c_str());
+    float temp = (float)std::atof(flag(a, "--temp", m->spec.media == MEDIA_TEXT ? "0.8" : "1").c_str());
     bool line = has_flag(a, "--line");
-    Rng rng((uint64_t)std::chrono::steady_clock::now().time_since_epoch().count());
+    std::string seed = flag(a, "--seed");
+    Rng rng(seed.empty() ? (uint64_t)std::chrono::steady_clock::now().time_since_epoch().count() : std::strtoull(seed.c_str(), nullptr, 10));
+    if (m->spec.media == MEDIA_IMAGE) {
+        std::string out = flag(a, "--out", "generated.png");
+        int count = std::max(1, std::min(64, std::atoi(flag(a, "--count", "16").c_str())));
+        int cols = (int)std::ceil(std::sqrt((double)count)), rows = (count + cols - 1) / cols;
+        int s = m->spec.img_size, scale = std::max(1, 64 / s), cell = s * scale + 2;
+        Image grid;
+        grid.w = cols * cell;
+        grid.h = rows * cell;
+        grid.rgb.assign((size_t)grid.w * grid.h * 3, 255);
+        for (int k = 0; k < count; ++k) {
+            Image img = sample_image(*m, temp, rng);
+            for (int y = 0; y < s * scale; ++y)
+                for (int x = 0; x < s * scale; ++x)
+                    for (int c = 0; c < 3; ++c)
+                        grid.rgb[((size_t)(k / cols * cell + 1 + y) * grid.w + k % cols * cell + 1 + x) * 3 + c] =
+                            img.rgb[((size_t)(y / scale) * s + x / scale) * 3 + c];
+            std::printf("\rimage %d/%d", k + 1, count);
+            std::fflush(stdout);
+        }
+        std::string err;
+        if (!save_png(out, grid, &err)) { std::printf("\nerror: %s\n", err.c_str()); return 1; }
+        std::printf("\nsaved %s\n", out.c_str());
+        return 0;
+    }
+    if (m->spec.media == MEDIA_AUDIO) {
+        std::string out = flag(a, "--out", "generated.wav");
+        float seconds = std::max(0.1f, (float)std::atof(flag(a, "--seconds", "3").c_str()));
+        Sound snd = sample_sound(*m, seconds, temp, rng, [](float done) {
+            std::printf("\r%3.0f%%", done * 100);
+            std::fflush(stdout);
+            return true;
+        });
+        std::string err;
+        if (!save_wav(out, snd, &err)) { std::printf("\nerror: %s\n", err.c_str()); return 1; }
+        std::printf("\rsaved %s (%.1f s)\n", out.c_str(), (double)snd.samples.size() / snd.rate);
+        return 0;
+    }
     std::vector<int> ids = m->encode(prompt);
     if (ids.empty()) ids.push_back(rng.below(std::max(1, m->spec.vocab)));
     std::string out;
-    for (int i = 0; i < len; ++i) {
-        int t = m->next_token(ids, temp, rng);
+    for (int t : m->generate(ids, len, temp, rng, -1, [&](int t) { return !(line && m->vocab[t] == "\n"); })) {
         if (line && m->vocab[t] == "\n") break;
-        ids.push_back(t);
         out += m->vocab[t];
     }
     std::printf("%s%s\n", line ? "" : prompt.c_str(), out.c_str());
@@ -450,6 +648,13 @@ int main(int argc, char** argv) {
         std::printf(ok ? "wrote %s\n" : "cannot write %s\n", a[2].c_str());
         return ok ? 0 : 1;
     }
+    if ((cmd == "demo-images" || cmd == "demo-sounds") && a.size() > 2) {
+        std::string err;
+        bool ok = cmd == "demo-images" ? write_demo_images(a[2], 1000, &err) : write_demo_sounds(a[2], 60, &err);
+        if (ok) std::printf("wrote %s\n", a[2].c_str());
+        else std::printf("error: %s: %s\n", a[2].c_str(), err.c_str());
+        return ok ? 0 : 1;
+    }
     if (cmd == "train" && a.size() > 2) return train(a);
     if (cmd == "generate" && a.size() > 2) return generate(a);
     if (cmd == "test" && a.size() > 3) return test(a);
@@ -457,10 +662,21 @@ int main(int argc, char** argv) {
                 "  kor-cli sysinfo                      show detected hardware\n"
                 "  kor-cli selftest                     verify the training engine\n"
                 "  kor-cli demo-data <out.csv>          write a demo classification dataset\n"
+                "  kor-cli demo-images <folder>         write demo pictures (for an image model)\n"
+                "  kor-cli demo-sounds <folder>         write demo melodies (for a sound model)\n"
                 "  kor-cli train <data> [--steps N] [--patience N] [--tests tests.txt] [--target 0..1]\n"
-                "                [--log train.log] [--out model.kor] [--text|--table]\n"
+                "                [--log train.log] [--out model.kor] [--text|--table|--images|--audio]\n"
+                "                [--subword N]                        text: N subword tokens instead of characters\n"
+                "                [--size 16] [--colors 32] [--no-mirror]   images (a folder of PNG/BMP/PPM)\n"
+                "                [--rate 8000]                        sound (a WAV file or a folder of them)\n"
                 "                [--skill \"skill.py [args]\"]... [--python <command>] [--lang en|tr|ru]\n"
-                "  kor-cli generate <model.kor> [prompt] [--len N] [--temp T] [--line]\n"
+                "                [--from model.kor [--lora R]]        fine-tune a saved model\n"
+                "                [--dim N] [--layers N] [--heads N] [--ctx N]   text model size\n"
+                "                [--lr X] [--batch N] [--threads N] [--seed N] [--wd X]\n"
+                "                [--align 0..1] [--prompt-weight 0..1] [--dropout X] [--ema 0.999]\n"
+                "  kor-cli generate <model.kor> [prompt] [--len N] [--temp T] [--line] [--seed N]\n"
+                "                image model: [--count 16] [--out generated.png]\n"
+                "                sound model: [--seconds 3] [--out generated.wav]\n"
                 "  kor-cli test <model.kor> <tests.txt> [--data <text>] [--tsv]\n"
                 "\n"
                 "Question tests are written one per line as: question => expected answer\n");

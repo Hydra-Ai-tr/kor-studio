@@ -11,7 +11,9 @@ void shutdown();   // stops training and saves settings
 
 // Scripting hooks used by command-line options.
 void set_page(int page);
-bool load_data(const char* utf8_path);
+bool load_data(const char* utf8_path);  // text, table, image folder or WAV, by the path
+bool load_model(const char* utf8_path);
+void generate_media();                   // playground: new pictures or sound from the model
 void start_training();
 void set_train_tab(int tab);  // 0 chart, 1 log, 2 question tests, 3 skills
 // Scripted runs: use exactly these skills (plugin file names) and leave the settings file alone.

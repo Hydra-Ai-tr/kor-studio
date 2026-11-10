@@ -75,7 +75,9 @@ bool Trainer::start(std::shared_ptr<Model> model, const Dataset* data, const Tra
     std::string err;
     if (!model || !data || data->kind == DATA_NONE) err = "no model or data";
     else if (model->spec.kind == MODEL_GPT && (data->kind != DATA_TEXT || data->ids.size() < 16)) err = "text model needs a text dataset";
+    else if (model->spec.kind == MODEL_GPT && data->media != model->spec.media) err = "the model and the data are of different kinds (text, images, sound)";
     else if (model->spec.kind == MODEL_GPT && data->vocab != model->vocab) err = "dataset vocabulary does not match the model";
+    else if (model->spec.kind == MODEL_GPT && data->ids.size() < (size_t)model->spec.ctx + 2) err = "too little data for the context length";
     else if (model->spec.kind == MODEL_MLP && (data->kind != DATA_TABLE || data->n_feat != model->spec.in_dim)) err = "table columns do not match the model";
     else if (model->spec.kind == MODEL_MLP && !model->spec.regression && (int)data->labels.size() != model->spec.out_dim) err = "class count does not match the model";
     else if (model->param_count(true) == 0) err = "model has no trainable parameters";
@@ -148,6 +150,7 @@ public:
         if (ids.empty()) return 0;
         if (!added.empty() && newline >= 0 && added.back() != newline) added.push_back(newline);
         added.insert(added.end(), ids.begin(), ids.end());
+        added_layout = layout_dialogue(added, q_tag, a_tag, newline);
         TrainEvent e = event(EV_HOOK_DATA);
         e.n1 = (long long)ids.size();
         e.n2 = (long long)added.size();
@@ -156,10 +159,28 @@ public:
     }
     void clear_added() override {
         added.clear();
+        added_layout = TextLayout();
         TrainEvent e = event(EV_HOOK_DATA);
         tr_.emit(e);
     }
     void set_mix(float share) override { mix = std::isfinite(share) ? std::min(0.95f, share) : -1.f; }
+    void set_sampling(float align, float question_weight) override {
+        if (m_.spec.kind != MODEL_GPT) return;
+        if (std::isfinite(align) && align >= 0) opts.align = std::min(1.f, align);
+        if (std::isfinite(question_weight) && question_weight >= 0) opts.prompt_weight = std::min(1.f, question_weight);
+        TrainEvent e = event(EV_HOOK_SAMPLING);
+        e.loss = opts.align;
+        e.val_loss = opts.prompt_weight;
+        tr_.emit(e);
+    }
+    void set_dropout(float p) override {
+        if (m_.spec.kind != MODEL_GPT || !std::isfinite(p)) return;
+        dropout = std::max(0.f, std::min(0.9f, p));
+        m_.set_dropout(dropout);
+        TrainEvent e = event(EV_HOOK_DROPOUT);
+        e.loss = dropout;
+        tr_.emit(e);
+    }
     void log(const std::string& text, int tone) override {
         TrainEvent e = event(EV_HOOK_LOG);
         e.text = text;
@@ -190,10 +211,8 @@ public:
         if (ids.empty()) ids.push_back(rng.below(std::max(1, m_.spec.vocab)));
         std::string out;
         length = std::max(1, std::min(length, 4000));
-        for (int i = 0; i < length; ++i) {
-            int t = m_.next_token(ids, std::max(0.f, temperature), rng);
+        for (int t : m_.generate(ids, length, std::max(0.f, temperature), rng, one_line ? newline : -1)) {
             if (one_line && t == newline) break;
-            ids.push_back(t);
             out += m_.vocab[t];
         }
         return out;
@@ -204,18 +223,14 @@ public:
     }
 
     // Mixes rows of the added text into a batch drawn from the dataset.
-    void mix_into(Batch& b, Rng& r) const {
+    void mix_into(Batch& b, Rng& r, const SampleOpts& opts) const {
         int T = b.T;
         if (added.size() < (size_t)T + 2) return;
         float share = mix >= 0 ? mix : std::min(0.5f, (float)added.size() / (float)(added.size() + d_.n_train));
-        size_t span = added.size() - (size_t)T - 1;
         for (int i = 0; i < b.B; ++i) {
             if (r.uniform() >= share) continue;
-            size_t s = (size_t)(r.next() % (span + 1));
-            for (int t = 0; t < T; ++t) {
-                b.ids[(size_t)i * T + t] = added[s + t];
-                b.tgt[(size_t)i * T + t] = added[s + t + 1];
-            }
+            size_t s = pick_window(added_layout, 0, added.size(), T, opts.align, r);
+            fill_window(b, i, added, s, added_layout, opts.prompt_weight);
         }
     }
 
@@ -235,6 +250,10 @@ public:
     bool stop_requested = false, has_best = false;
     int best_request = -1;  // 1 = save the current weights, 0 = restore the best ones
     std::vector<int> added;
+    TextLayout added_layout;
+    std::vector<int> q_tag, a_tag;
+    SampleOpts opts;
+    float dropout = 0;
     float mix = -1;
     int newline = -1;
 
@@ -263,6 +282,7 @@ void Trainer::run() {
     {
         std::lock_guard<std::mutex> lk(model_mu);
         ps = model.params();
+        model.set_dropout(text ? cfg.dropout : 0.f);
         TrainEvent e;
         e.kind = EV_START;
         e.n1 = (long long)model.param_count(true);
@@ -293,9 +313,38 @@ void Trainer::run() {
         for (size_t i = 0; i < ps.size(); ++i)
             if (ps[i]->trainable) snap_w[i] = ps[i]->w.v;
     };
+    // Averaged weights. While `ema_in` is set they are swapped into the model
+    // (evaluation, tests, snapshots) and the raw weights wait in ema_w.
+    bool use_ema = cfg.ema > 0 && cfg.ema < 1;
+    bool ema_in = false;
+    std::vector<std::vector<float>> ema_w;
+    if (use_ema) {
+        ema_w.resize(ps.size());
+        for (size_t i = 0; i < ps.size(); ++i)
+            if (ps[i]->trainable) ema_w[i] = ps[i]->w.v;
+    }
+    auto ema_update = [&](int step) {
+        float d = std::min(cfg.ema, (1.f + step) / (10.f + step));
+        for (size_t i = 0; i < ps.size(); ++i) {
+            if (!ps[i]->trainable) continue;
+            float* e = ema_w[i].data();
+            const float* w = ps[i]->w.data();
+            size_t n = ema_w[i].size();
+            for (size_t k = 0; k < n; ++k) e[k] = d * e[k] + (1.f - d) * w[k];
+        }
+    };
+    auto ema_swap = [&] {
+        if (!use_ema) return;
+        for (size_t i = 0; i < ps.size(); ++i)
+            if (ps[i]->trainable) std::swap(ps[i]->w.v, ema_w[i]);
+        ema_in = !ema_in;
+    };
     auto restore = [&] {
         for (size_t i = 0; i < ps.size(); ++i)
-            if (ps[i]->trainable && snap_w[i].size() == ps[i]->w.v.size()) ps[i]->w.v = snap_w[i];
+            if (ps[i]->trainable && snap_w[i].size() == ps[i]->w.v.size()) {
+                ps[i]->w.v = snap_w[i];
+                if (use_ema) ema_w[i] = snap_w[i];
+            }
     };
 
     // Runs the question tests and returns how many passed; the caller must hold model_mu.
@@ -334,6 +383,15 @@ void Trainer::run() {
     RunControl ctl(*this, model, data, cfg);
     for (size_t i = 0; i < model.vocab.size(); ++i)
         if (model.vocab[i] == "\n") ctl.newline = (int)i;
+    int tag_newline = -1;
+    if (text && !data.tag_ids(ctl.q_tag, ctl.a_tag, tag_newline)) {
+        ctl.q_tag.clear();
+        ctl.a_tag.clear();
+    }
+    SampleOpts& sopts = ctl.opts;
+    sopts.align = text ? std::max(0.f, std::min(1.f, cfg.align)) : 0.f;
+    sopts.prompt_weight = text ? std::max(0.f, std::min(1.f, cfg.prompt_weight)) : 1.f;
+    ctl.dropout = text ? cfg.dropout : 0.f;
     std::vector<std::shared_ptr<TrainHook>> hooks;
     for (auto& h : cfg.hooks) {
         if (!h) continue;
@@ -373,7 +431,9 @@ void Trainer::run() {
                 std::lock_guard<std::mutex> lk(model_mu);
                 TrainEvent e = ctl.event(EV_HOOK_BEST);
                 if (ctl.best_request == 1) {
+                    ema_swap();
                     snapshot(in.step);
+                    ema_swap();
                     e.n1 = 1;
                     e.n2 = in.step;
                     emit(e);
@@ -407,8 +467,8 @@ void Trainer::run() {
             std::lock_guard<std::mutex> lk(model_mu);
             model.zero_grad();
             for (int a = 0; a < accum; ++a) {
-                data.sample(batch, B, T, rng, false);
-                if (text) ctl.mix_into(batch, rng);
+                data.sample(batch, B, T, rng, false, sopts);
+                if (text) ctl.mix_into(batch, rng, sopts);
                 loss += model.step(batch, true, 1.f / accum) / accum;
             }
             if (!std::isfinite(loss)) {
@@ -421,7 +481,11 @@ void Trainer::run() {
                                         : cfg.lr * (0.1f + 0.45f * (1.f + std::cos(3.14159265f * progress)));
                 lr = ctl.lr_fixed > 0 ? ctl.lr_fixed : lr * ctl.lr_factor;
                 opt.step(ps, lr);
-                if (cfg.eval_every > 0 && (step % cfg.eval_every == 0 || step == cfg.steps) && data.val_items() > 0) {
+                if (use_ema) ema_update(step);
+                bool eval_now = cfg.eval_every > 0 && (step % cfg.eval_every == 0 || step == cfg.steps) && data.val_items() > 0;
+                bool probe_now = probe_best && step % cfg.probe_every == 0 && step != cfg.steps;
+                if (eval_now || probe_now) ema_swap();
+                if (eval_now) {
                     // The same validation batches every time, so results are comparable.
                     Rng val_rng(999);
                     double vl = 0;
@@ -445,7 +509,7 @@ void Trainer::run() {
                         early = true;
                     }
                 }
-                if (probe_best && step % cfg.probe_every == 0 && step != cfg.steps) {
+                if (probe_now) {
                     probe_pass = run_probes(step);
                     probed = true;
                     target_hit = reached_target(probe_pass);
@@ -454,6 +518,7 @@ void Trainer::run() {
                         snapshot(step);
                     }
                 }
+                if (ema_in) ema_swap();
             }
         }
         if (final_state == TS_ERROR) break;
@@ -518,6 +583,10 @@ void Trainer::run() {
         }
     }
     if (ctl.stop_requested && final_state == TS_DONE) end_state = "hook_stop";
+    if (use_ema && final_state != TS_ERROR) {
+        std::lock_guard<std::mutex> lk(model_mu);
+        ema_swap();  // the averaged weights become the model
+    }
 
     // When the question tests decided to stop, the current weights are the ones that passed them.
     int final_pass = -1;

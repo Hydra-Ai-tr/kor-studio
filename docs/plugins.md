@@ -107,6 +107,8 @@ turned off and training continues without it.
 | `metric(name, value)` | Records a value; the **Skills** tab of the Training page charts it |
 | `scale_lr(mult)`, `set_lr_factor(f)`, `lr_factor` | Learning rate = schedule x factor |
 | `set_lr(rate)` | Fixed learning rate from now on (`0` returns to the schedule) |
+| `set_sampling(align=None, question_weight=None)` | Text models: share of training rows that start at an example (a question), and how much question text counts in the loss next to the answers (both 0..1, `None` keeps the value) |
+| `set_dropout(p)` | Text models: dropout of the transformer blocks from now on (`0` = off) |
 | `add_text(text)`, `add_pairs(pairs)` | Text models: mix extra training text into the batches; returns the characters added |
 | `mix(share)`, `clear_added()` | Share of each batch taken from the added text (`None` = automatic, at most half); forget it |
 | `generate(prompt, length=200, temperature=0.8, line=False)` | Text models: continue a prompt with the current weights |
@@ -119,9 +121,9 @@ And what it can read:
 | `run.` | Contents |
 |---|---|
 | `args`, `opt(name, default)` | Arguments; `opt` reads `--name value`, `--name=value` or `name=value` and converts to the type of `default` |
-| `model` | `kind` (`text`/`table`), `parameters`, `trainable`, `vocab_size`, `context`, `width`, `layers`, `heads`, `classes` ... |
+| `model` | `kind` (`text`/`table`), `media` (`text`/`image`/`sound`), `parameters`, `trainable`, `vocab_size`, `context`, `width`, `layers`, `heads`, `image_size`, `sample_rate`, `classes` ... |
 | `data` | `path`, `kind`, `train`, `validation`, `characters`, `question_tag`, `answer_tag` |
-| `config` | `steps`, `batch`, `lr`, `eval_every`, `test_every`, `optimizer`, `keep_best`, `patience` |
+| `config` | `steps`, `batch`, `lr`, `eval_every`, `test_every`, `optimizer`, `keep_best`, `patience`, `align`, `question_weight`, `dropout`, `ema` |
 | `tests` | The question tests as `(question, expected)` |
 | `q_tag`, `a_tag`, `format_pair(q, a)`, `can_write(text)` | Dialogue format of the data; whether the model knows every character of a text |
 | `lang`, `tr(en, tr, ru)` | Interface language and a helper to pick a message |
@@ -236,7 +238,8 @@ other line becomes a log line. It first sends
 `{"op": "ready", "events": ["eval", "tests"], "every": 0}` (`every` = step
 event period), then for each event any number of commands and finally
 `{"op": "done"}`. Commands: `log {text, tone}`, `metric {name, value}`,
-`lr_factor {value}`, `lr {value}`, `stop {reason}`, `save_best`,
+`lr_factor {value}`, `lr {value}`, `sampling {align, question_weight}`
+(`-1` keeps a value), `dropout {value}`, `stop {reason}`, `save_best`,
 `restore_best`, `add_text {text}`, `clear_added`, `mix {value}`,
 `generate {prompt, length, temperature, line}`, `ask {question, expected}`.
 Commands that return something (`restore_best`, `add_text`, `generate`, `ask`)

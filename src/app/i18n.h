@@ -25,7 +25,7 @@
     X(Gpu, "Graphics", "Ekran kartı", "Видеокарта") \
     X(GpuNote, "Training currently runs on the CPU. A GPU backend is on the roadmap.", "Eğitim şu an işlemcide çalışır. Ekran kartı desteği yol haritasında.", "Сейчас обучение идёт на процессоре. Поддержка видеокарт — в планах.") \
     X(QuickStart, "Quick start", "Hızlı başlangıç", "Быстрый старт") \
-    X(Step1, "Load a text file or a CSV table", "Bir metin dosyası veya CSV tablosu yükle", "Загрузите текстовый файл или таблицу CSV") \
+    X(Step1, "Load text, a CSV table, images or sound", "Metin, CSV tablosu, resim veya ses yükle", "Загрузите текст, таблицу CSV, изображения или звук") \
     X(Step2, "Let Kor pick a model that fits your computer", "Kor bilgisayarına uygun modeli seçsin", "Позвольте Kor подобрать модель под ваш компьютер") \
     X(Step3, "Train and watch the loss fall", "Eğit ve kaybın düşüşünü izle", "Обучайте и следите, как падает ошибка") \
     X(Step4, "Test the model and save it", "Modeli dene ve kaydet", "Проверьте модель и сохраните её") \
@@ -36,9 +36,40 @@
     X(Light3, "LoRA fine-tuning: adapt a model by training only a tiny fraction of its weights", "LoRA ince ayar: ağırlıkların çok küçük bir kısmını eğiterek modeli uyarlama", "Дообучение LoRA: адаптация модели обучением лишь малой доли весов") \
     X(Light4, "Half-precision files: saved models take half the disk space", "Yarı hassasiyetli dosyalar: kayıtlı modeller diskte yarı yer kaplar", "Файлы половинной точности: модели занимают вдвое меньше места") \
     X(Light5, "Multi-core SIMD kernels chosen at runtime for your CPU", "İşlemcine göre çalışma anında seçilen çok çekirdekli SIMD çekirdekleri", "Многоядерные SIMD-ядра, выбираемые под ваш процессор при запуске") \
-    X(DataHelp, "Choose what the model will learn from. Text trains a small language model; a table trains a classifier or a regressor.", "Modelin neyden öğreneceğini seç. Metin küçük bir dil modeli eğitir; tablo bir sınıflandırıcı veya regresyon modeli eğitir.", "Выберите, на чём будет учиться модель. Текст обучает небольшую языковую модель; таблица — классификатор или регрессор.") \
+    X(DataHelp, "Choose what the model will learn from. Text trains a language model, a table a classifier or a regressor, images a picture generator and sound a sound generator - all from scratch.", "Modelin neyden öğreneceğini seç. Metin bir dil modeli, tablo bir sınıflandırıcı veya regresyon modeli, resimler bir resim üretici, ses de bir ses üretici eğitir - hepsi sıfırdan.", "Выберите, на чём будет учиться модель. Текст обучает языковую модель, таблица — классификатор или регрессор, изображения — генератор картинок, звук — генератор звука; всё с нуля.") \
     X(KindText, "Text (.txt)", "Metin (.txt)", "Текст (.txt)") \
     X(KindTable, "Table (.csv)", "Tablo (.csv)", "Таблица (.csv)") \
+    X(KindImages, "Images", "Resimler", "Изображения") \
+    X(KindSound, "Sound (.wav)", "Ses (.wav)", "Звук (.wav)") \
+    X(FolderNote, "Images are read from the folder of the chosen file, subfolders included. For sound you can pick one WAV file or a folder.", "Resimler seçilen dosyanın klasöründen (alt klasörler dahil) okunur. Ses için tek bir WAV dosyası veya bir klasör seçebilirsin.", "Изображения читаются из папки выбранного файла, включая подпапки. Для звука можно выбрать один WAV-файл или папку.") \
+    X(Subword, "Subword tokens", "Alt-kelime parçaları", "Токены-подслова") \
+    X(SubwordHelp, "Off: one token per character. On: frequent pieces of words become single tokens, as in large language models, so the model sees more text at once. Good for larger texts.", "Kapalı: her karakter bir parça. Açık: sık geçen kelime parçaları tek parça olur (büyük dil modellerindeki gibi), model bir bakışta daha çok metin görür. Büyük metinler için iyidir.", "Выкл.: один токен на символ. Вкл.: частые части слов становятся отдельными токенами, как в больших языковых моделях, и модель видит больше текста сразу. Хорошо для больших текстов.") \
+    X(SubwordSize, "Pieces", "Parça sayısı", "Частей") \
+    X(ImgSize, "Image size", "Resim boyutu", "Размер изображения") \
+    X(ImgColors, "Colours", "Renk sayısı", "Цветов") \
+    X(Mirror, "Mirrored copies", "Ayna kopyalar", "Зеркальные копии") \
+    X(MirrorHelp, "Adds a left-right flipped copy of every training image: twice the data for free. Turn off for pictures with text or a fixed direction.", "Her eğitim resminin sağ-sol çevrilmiş kopyasını ekler: bedavaya iki kat veri. Yazı içeren veya yönü önemli resimlerde kapat.", "Добавляет зеркальную копию каждого обучающего изображения: вдвое больше данных бесплатно. Отключите для картинок с текстом или с важным направлением.") \
+    X(SampleRate, "Sample rate", "Örnekleme hızı", "Частота дискретизации") \
+    X(ExampleImages, "Example pictures", "Örnek resimler", "Примеры картинок") \
+    X(ExampleSounds, "Example melodies", "Örnek melodiler", "Примеры мелодий") \
+    X(ImagesLbl, "Images", "Resim", "Изображений") \
+    X(ColorsLbl, "Colours", "Renk", "Цветов") \
+    X(Seconds, "Seconds", "Saniye", "Секунд") \
+    X(SoundFiles, "Files", "Dosya", "Файлов") \
+    X(Tokens, "Tokens", "Parça", "Токенов") \
+    X(Skipped, "%d files could not be read and were skipped.", "%d dosya okunamadı ve atlandı.", "Не удалось прочитать и пропущено файлов: %d.") \
+    X(GenImages, "Generate images", "Resim üret", "Создать изображения") \
+    X(GenSound, "Generate sound", "Ses üret", "Создать звук") \
+    X(HowMany, "How many", "Kaç tane", "Сколько") \
+    X(Play, "Play", "Çal", "Играть") \
+    X(SavedTo, "Saved: %s", "Kaydedildi: %s", "Сохранено: %s") \
+    X(OpenFolder, "Open folder", "Klasörü aç", "Открыть папку") \
+    X(GenImgEmpty, "New pictures drawn by the model will appear here.", "Modelin çizdiği yeni resimler burada görünecek.", "Здесь появятся новые картинки, нарисованные моделью.") \
+    X(GenSndEmpty, "New sound made by the model will appear here.", "Modelin ürettiği yeni ses burada görünecek.", "Здесь появится новый звук, созданный моделью.") \
+    X(Generating, "Generating... %.0f%%", "Üretiliyor... %%%.0f", "Создание... %.0f%%") \
+    X(ImageModelFmt, "Image model: %dx%d pixels, %d colours", "Görüntü modeli: %dx%d piksel, %d renk", "Модель изображений: %dx%d пикселей, %d цветов") \
+    X(SoundModelFmt, "Sound model: %d Hz, 256 levels", "Ses modeli: %d Hz, 256 seviye", "Модель звука: %d Гц, 256 уровней") \
+    X(MediaCtxNote, "An image model always sees one whole image: its context is fixed at size x size + 1.", "Görüntü modeli her zaman bir resmin tamamını görür: bağlamı boyut x boyut + 1 olarak sabittir.", "Модель изображений всегда видит картинку целиком: её контекст фиксирован — размер x размер + 1.") \
     X(PathHint, "File path", "Dosya yolu", "Путь к файлу") \
     X(Browse, "Browse...", "Gözat...", "Обзор...") \
     X(Load, "Load", "Yükle", "Загрузить") \
@@ -101,6 +132,9 @@
     X(Settings, "Settings", "Ayarlar", "Настройки") \
     X(StartTrain, "Start training", "Eğitimi başlat", "Начать обучение") \
     X(ContinueTrain, "Continue training", "Eğitime devam et", "Продолжить обучение") \
+    X(FineTuneHelp, "Fine-tuning: training continues from the weights of the loaded model with a lower learning rate. Turn on LoRA below to change it more gently.", "İnce ayar: eğitim, yüklenen modelin ağırlıklarından daha düşük bir öğrenme hızıyla devam eder. Daha yumuşak değiştirmek için aşağıdan LoRA'yı aç.", "Дообучение: обучение продолжается с весов загруженной модели с меньшей скоростью обучения. Включите LoRA ниже, чтобы менять её мягче.") \
+    X(FineTuneAdded, "%d new characters of the data were added to the model.", "Verideki %d yeni karakter modele eklendi.", "В модель добавлено новых символов из данных: %d.") \
+    X(FineTuneDropped, "%d characters of the data are unknown to the model and are skipped while LoRA is on.", "Verideki %d karakteri model tanımıyor; LoRA açıkken atlanıyor.", "Модель не знает символов из данных: %d; пока включена LoRA, они пропускаются.") \
     X(Pause, "Pause", "Duraklat", "Пауза") \
     X(Resume, "Resume", "Sürdür", "Продолжить") \
     X(Stop, "Stop", "Durdur", "Стоп") \
@@ -137,6 +171,8 @@
     X(FilesHelp, "Models are stored in the open .kor format, documented in the repository.", "Modeller, depoda belgelenen açık .kor biçiminde saklanır.", "Модели хранятся в открытом формате .kor, описанном в репозитории.") \
     X(TextModel, "Text model (transformer)", "Metin modeli (transformer)", "Текстовая модель (трансформер)") \
     X(TableModel, "Table model (MLP)", "Tablo modeli (MLP)", "Табличная модель (MLP)") \
+    X(ImageModel, "Image model (transformer)", "Görüntü modeli (transformer)", "Модель изображений (трансформер)") \
+    X(SoundModel, "Sound model (transformer)", "Ses modeli (transformer)", "Модель звука (трансформер)") \
     X(NavPlugins, "Plugins", "Eklentiler", "Плагины") \
     X(KeepBest, "Keep the best weights", "En iyi ağırlıkları koru", "Сохранять лучшие веса") \
     X(KeepBestHelp, "When training ends, the model returns to the weights that had the lowest validation loss.", "Eğitim bitince model, doğrulama kaybının en düşük olduğu ağırlıklara geri döner.", "По окончании обучения модель возвращается к весам с наименьшей ошибкой проверки.") \
@@ -145,6 +181,14 @@
     X(TestEvery, "Question tests every (steps)", "Soru testi aralığı (adım)", "Вопросы каждые (шагов)") \
     X(TestEveryHelp, "How often the model is quizzed during training. 0 = only at the end.", "Modelin eğitim sırasında ne sıklıkla sınanacağı. 0 = sadece sonda.", "Как часто модель проверяется вопросами во время обучения. 0 = только в конце.") \
     X(StopOnPass, "Stop when all question tests pass", "Tüm soru testleri geçince dur", "Остановить, когда все вопросы пройдены") \
+    X(AlignRows, "Start rows at examples", "Satırları örnek başından başlat", "Начинать строки с примеров") \
+    X(AlignHelp, "Most training rows start at the beginning of a question, so every answer is learned together with its whole question. Dialogue data only.", "Eğitim satırlarının çoğu bir sorunun başından başlar; böylece her cevap sorusunun tamamıyla birlikte öğrenilir. Sadece diyalog verisinde.", "Большинство обучающих строк начинается с начала вопроса, поэтому каждый ответ изучается вместе со всем вопросом. Только для диалогов.") \
+    X(QuestionWeight, "Question weight", "Soru ağırlığı", "Вес вопросов") \
+    X(QuestionWeightHelp, "How much predicting the question text counts compared with the answers (1 = the same). Lower values put the model's capacity into the answers. Dialogue data only.", "Soru metnini tahmin etmenin cevaplara göre ne kadar sayılacağı (1 = aynı). Düşük değerler modelin kapasitesini cevaplara verir. Sadece diyalog verisinde.", "Насколько предсказание текста вопроса важно по сравнению с ответами (1 = одинаково). Меньшие значения отдают ёмкость модели ответам. Только для диалогов.") \
+    X(DropoutLbl, "Dropout", "Dropout", "Dropout") \
+    X(DropoutHelp, "Randomly switches off part of the network while training, against memorizing. Helps larger models on small data; 0 = off.", "Eğitim sırasında ağın bir kısmını rastgele kapatır, ezberlemeye karşı. Küçük veride büyük modellere yardımcı olur; 0 = kapalı.", "Во время обучения случайно отключает часть сети, против запоминания. Помогает большим моделям на малых данных; 0 = выкл.") \
+    X(EmaLbl, "Average the weights (EMA)", "Ağırlıkların ortalamasını al (EMA)", "Усреднять веса (EMA)") \
+    X(EmaHelp, "Keeps a moving average of the weights and uses it for checks, tests and the final model. It is usually smoother and generalizes better.", "Ağırlıkların hareketli ortalamasını tutar; kontroller, testler ve son model için onu kullanır. Genellikle daha kararlıdır ve daha iyi genelleştirir.", "Хранит скользящее среднее весов и использует его для проверок, тестов и итоговой модели. Обычно оно стабильнее и лучше обобщает.") \
     X(TabChart, "Chart", "Grafik", "График") \
     X(TabLog, "Log", "Log", "Журнал") \
     X(TabTests, "Question tests", "Soru testleri", "Проверка вопросами") \
@@ -226,6 +270,8 @@
     X(LogHookCleared, "added training text cleared", "eklenen eğitim metni temizlendi", "добавленный текст очищен") \
     X(LogHookSaved, "kept these weights as the best", "bu ağırlıklar en iyi olarak saklandı", "эти веса сохранены как лучшие") \
     X(LogHookRestored, "went back to the best weights (step %lld)", "en iyi ağırlıklara dönüldü (adım %lld)", "возврат к лучшим весам (шаг %lld)") \
+    X(LogHookSampling, "training rows: %.0f%% start at examples, question weight %.2f", "eğitim satırları: %%%.0f örnek başından, soru ağırlığı %.2f", "обучающие строки: %.0f%% с начала примеров, вес вопросов %.2f") \
+    X(LogHookDropout, "dropout set to %.2f", "dropout %.2f yapıldı", "dropout изменён на %.2f") \
     X(LogHookStop, "stopping training: %s", "eğitim durduruluyor: %s", "обучение останавливается: %s") \
     X(PythonChecking, "Looking for Python...", "Python aranıyor...", "Поиск Python...") \
     X(PythonFound, "%s is ready", "%s hazır", "%s готов") \
@@ -249,7 +295,7 @@
     X(Clear, "Clear", "Temizle", "Очистить") \
     X(Workspace, "WORKSPACE", "ÇALIŞMA ALANI", "РАБОЧАЯ ОБЛАСТЬ") \
     X(TrainHelp, "Train the model, watch it learn and quiz it with questions it has never seen.", "Modeli eğit, öğrenişini izle ve hiç görmediği sorularla sına.", "Обучайте модель, следите за прогрессом и проверяйте её на вопросах, которых она не видела.") \
-    X(TestHelp, "Generate text or run predictions with the current model - even while it trains.", "Mevcut modelle metin üret veya tahmin yap - eğitim sürerken bile.", "Генерируйте текст или получайте предсказания текущей модели - даже во время обучения.") \
+    X(TestHelp, "Generate text, pictures or sound, or run predictions with the current model - even while it trains.", "Mevcut modelle metin, resim veya ses üret ya da tahmin yap - eğitim sürerken bile.", "Генерируйте текст, картинки или звук либо получайте предсказания текущей модели - даже во время обучения.") \
     X(Source, "Source file", "Kaynak dosya", "Исходный файл") \
     X(OrExample, "Or start with an example:", "Ya da bir örnekle başla:", "Или начните с примера:") \
     X(Workflow, "Workflow", "İş akışı", "Порядок работы") \

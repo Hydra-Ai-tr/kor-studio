@@ -9,7 +9,7 @@
 
 <p align="center">
   <a href="https://github.com/Hydra-Ai-tr/kor-studio/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/Hydra-Ai-tr/kor-studio?color=e8711a"></a>
-  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-blue"></a>
+  <a href="LICENSE"><img alt="PolyForm Noncommercial license" src="https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue"></a>
   <img alt="C++17" src="https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus">
   <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-555">
   <img alt="Dependencies" src="https://img.shields.io/badge/ML%20framework-none-success">
@@ -38,8 +38,16 @@ code a readable reference for how training actually works.
 
 ## Highlights
 
-- **Two kinds of models.** Plain text trains a character-level transformer language model; a CSV
-  table trains a classifier or a regressor. The task is detected from the data.
+- **Text, tables, images and sound, all from scratch.** Plain text trains a transformer language
+  model (one token per character, or learned subword tokens for larger texts); a CSV table trains a
+  classifier or a regressor; a folder of pictures trains an image generator; WAV files train a
+  sound generator. The kind is detected from the data.
+- **Fine-tuning.** Load a saved `.kor` model and keep training it on new data, fully or with LoRA.
+  Characters the model does not know yet are added to it; pictures and sound are read in the
+  format of the loaded model.
+- **Strong training defaults.** For dialogue data the auto-planner picks a model and context large
+  enough for whole question-answer pairs, starts most training rows at a question and weights the
+  loss toward the answers. Dropout and weight averaging (EMA) are one switch away.
 - **Auto-configuration.** Model size, batch size and thread count are picked from your free RAM,
   CPU cores and dataset size, with an estimate of the memory needed before you build.
 - **Live training dashboard.** Loss and validation curves, accuracy, throughput, ETA,
@@ -55,7 +63,8 @@ code a readable reference for how training actually works.
   stop early and chart their own metrics. Write one in a few lines with the `kor` library.
 - **Share plugins with a link.** Install skills and tools from a GitHub page, a gist, a `.zip`
   or the community list, in the app or with `python -m kor install`.
-- **Playground.** Generate text or run predictions, even while training continues.
+- **Playground.** Generate text, pictures or sound, or run predictions, even while training
+  continues. Pictures are saved as PNG, sound as WAV and can be played in the app.
 - **Open model format.** Models are saved as [`.kor` files](docs/kor-format.md), optionally in
   half precision.
 - **Command-line tool.** `kor-cli` trains, tests and samples models for scripting and CI.
@@ -95,7 +104,8 @@ only needed for plugins.
 
 ## Quick start
 
-1. **Data:** choose *Use example text* (or load your own `.txt` / `.csv`).
+1. **Data:** choose *Use example text* (or load your own `.txt` / `.csv`, a folder of pictures or
+   WAV files; *Example pictures* and *Example melodies* create demo data).
 2. **Model:** press *Auto-configure for my system*, then *Build model*.
 3. **Training:** press *Start training*. Watch the curves, the log and the question tests.
 4. **Playground:** type a prompt and generate text from the model.
@@ -193,11 +203,31 @@ kor-cli train notes.txt --steps 2000 --out notes.kor
 kor-cli train examples/diyalog_tr.txt --target 1 --log train.log --out chat.kor
 kor-cli test chat.kor tests.txt --data examples/diyalog_tr.txt
 kor-cli generate chat.kor "Kullanıcı: Merhaba" --len 200
+kor-cli train big.txt --subword 2000 --out llm.kor          # subword language model
+kor-cli train chat.txt --from llm.kor --lora 8 --out chat.kor  # fine-tune a saved model
+kor-cli demo-images pictures && kor-cli train pictures --out img.kor
+kor-cli generate img.kor --count 16 --out new.png           # a sheet of new pictures
+kor-cli demo-sounds melodies && kor-cli train melodies --out snd.kor
+kor-cli generate snd.kor --seconds 3 --out new.wav
 ```
 
 Training options: `--steps N`, `--patience N` (early stopping), `--tests file`,
-`--target 0..1` (stop at this pass rate), `--log file`, `--out file`, `--text` / `--table`,
+`--target 0..1` (stop at this pass rate), `--log file`, `--out file`,
+`--text` / `--table` / `--images` / `--audio`, `--subword N`, `--size N` / `--colors N` /
+`--no-mirror` (images), `--rate N` (sound), `--from model.kor [--lora R]` (fine-tuning),
+`--dim/--layers/--heads/--ctx` (model size), `--lr`, `--batch`, `--threads`, `--seed`, `--wd`,
+`--align 0..1`, `--prompt-weight 0..1`, `--dropout X`, `--ema 0.999`,
 `--skill "file.py [args]"` (repeatable), `--python <command>`, `--lang en|tr|ru`.
+
+### How images and sound are learned
+
+Images and sound go through the same transformer as text, as sequences of tokens. A picture is
+cropped to a square, scaled to 16 x 16 (8 to 64 with `--size`), and each pixel becomes one of 32
+palette colours found by k-means (`--colors`); the model then draws pictures pixel by pixel, like
+ImageGPT. Sound is resampled to 8 kHz (`--rate`) and every sample becomes one of 256 mu-law
+levels, as in WaveNet. Both are small, CPU-friendly versions of these ideas: expect simple shapes
+and short melodies rather than photographs or speech. Generation uses a key/value cache, so each
+new pixel or sample costs one step of the model.
 
 ## Building from source
 
@@ -232,8 +262,9 @@ cmake --build build
 ## Scope and limitations
 
 Kor Studio trains on the **CPU** and is designed for small models: tabular networks and
-character-level transformers up to a few million parameters, which train in seconds to minutes on
-a laptop. It is a tool for learning, experimentation and small, focused models. It will not
+transformers up to a few million parameters, which train in seconds to minutes on a laptop.
+Image and sound models are slower: every pixel or sample is a token, so expect tens of minutes
+to hours for good results. It is a tool for learning, experimentation and small, focused models. It will not
 train a large language model. A GPU backend is on the roadmap.
 
 ## Project layout
@@ -254,8 +285,8 @@ assets/      logo and application icon
 ## Roadmap
 
 - GPU backend (Vulkan compute) and int8 quantized export
-- Sub-word (BPE) tokenizer and larger text models
-- Image datasets and convolutional layers
+- Larger image and sound models (patches instead of single pixels and samples)
+- Convolutional layers
 - More dataset tools: splitting, augmentation, format conversion
 - More interface languages: add a column to `src/app/i18n.h`
 
@@ -264,9 +295,21 @@ assets/      logo and application icon
 Bug reports, ideas and pull requests are welcome; please open an
 [issue](https://github.com/Hydra-Ai-tr/kor-studio/issues) to discuss larger changes first. Before
 submitting a change to the engine, run `kor-cli selftest` and make sure it passes. New plugins and
-translations are especially appreciated.
+translations are especially appreciated. Contributions to this repository are accepted under the
+project's license.
 
 ## License
 
-Kor Studio is released under the [MIT License](LICENSE). It uses
-[Dear ImGui](https://github.com/ocornut/imgui) (MIT) and [GLFW](https://www.glfw.org) (zlib).
+Kor Studio is released under the [PolyForm Noncommercial License 1.0.0](LICENSE). The source is
+open: you may use, study, change and share Kor Studio for any noncommercial purpose, including
+personal projects, research, teaching and use by schools and charities. Selling Kor Studio or a
+modified version of it, or using it for any other commercial purpose, is not allowed.
+
+Plugins and skills you write yourself are your own work and can be shared under any license you
+choose. Models you train with Kor Studio belong to you.
+
+Versions up to and including 0.4.0 were released under the MIT License, and copies obtained under
+those terms keep them.
+
+Kor Studio uses [Dear ImGui](https://github.com/ocornut/imgui) (MIT) and
+[GLFW](https://www.glfw.org) (zlib).

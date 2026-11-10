@@ -11,6 +11,7 @@
 #endif
 #include <windows.h>
 #include <commdlg.h>
+#include <mmsystem.h>
 #include <shellapi.h>
 
 #include <algorithm>
@@ -33,7 +34,8 @@ static std::string file_dialog(int kind, bool save) {
     ofn.lpstrFile = buf;
     ofn.nMaxFile = 4096;
     ofn.lpstrFilter = kind == DLG_MODEL ? L"Kor model (*.kor)\0*.kor\0All files\0*.*\0"
-                                        : L"Text and tables (*.txt;*.csv;*.tsv)\0*.txt;*.csv;*.tsv\0All files\0*.*\0";
+                                        : L"Data (*.txt;*.csv;*.tsv;*.png;*.bmp;*.ppm;*.pgm;*.wav)\0*.txt;*.csv;*.tsv;*.png;*.bmp;*.ppm;*.pgm;*.wav\0"
+                                          L"All files\0*.*\0";
     ofn.Flags = OFN_NOCHANGEDIR | (save ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST);
     if (save) ofn.lpstrDefExt = L"kor";
     BOOL ok = save ? GetSaveFileNameW(&ofn) : GetOpenFileNameW(&ofn);
@@ -196,6 +198,12 @@ void open_folder(const std::string& path) {
     ShellExecuteW(nullptr, L"open", widen(path).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
 
+bool play_wav(const std::string& path) {
+    return PlaySoundW(widen(path).c_str(), nullptr, SND_FILENAME | SND_ASYNC | SND_NODEFAULT) != FALSE;
+}
+
+void stop_sound() { PlaySoundW(nullptr, nullptr, 0); }
+
 #else  // POSIX
 
 #include <climits>
@@ -273,6 +281,35 @@ void open_folder(const std::string& path) {
     std::string out;
     run_process({"xdg-open", path}, out);
 #endif
+}
+
+static pid_t g_player = 0;
+
+void stop_sound() {
+    if (g_player > 0) {
+        kill(g_player, SIGTERM);
+        waitpid(g_player, nullptr, 0);
+        g_player = 0;
+    }
+}
+
+bool play_wav(const std::string& path) {
+    stop_sound();
+#if defined(__APPLE__)
+    const char* player = "afplay";
+#else
+    const char* player = "aplay";
+#endif
+    pid_t pid = fork();
+    if (pid < 0) return false;
+    if (pid == 0) {
+        int nul = open("/dev/null", O_WRONLY);
+        if (nul >= 0) { dup2(nul, 1); dup2(nul, 2); }
+        execlp(player, player, path.c_str(), (char*)nullptr);
+        _exit(127);
+    }
+    g_player = pid;
+    return true;
 }
 
 std::string open_file_dialog(int) { return ""; }
