@@ -919,6 +919,27 @@ bool checkbox(const char* label, bool* v) {
     return clicked;
 }
 
+bool toggle(const char* id, bool* v) {
+    float h = ImGui::GetFrameHeight();
+    float tw = px(38), th = px(22);
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton(id, ImVec2(tw, h));
+    bool clicked = ImGui::IsItemClicked();
+    if (clicked) *v = !*v;
+    bool hovered = ImGui::IsItemHovered();
+    float k = anim(ImGui::GetItemID(), *v, 14.f);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 t0(p.x, p.y + (h - th) * 0.5f), t1(t0.x + tw, t0.y + th);
+    dl->AddRectFilled(t0, t1, col(mix(C::surface3, C::accent, k)), th * 0.5f);
+    if (hovered) dl->AddRect(t0, t1, col(C::border_hi), th * 0.5f, 0, px(1));
+    float r = th * 0.5f - px(3);
+    float cx = t0.x + th * 0.5f + (tw - th) * k;
+    dl->AddCircleFilled(ImVec2(cx, t0.y + th * 0.5f), r, col(mix(C::muted, ImVec4(1, 1, 1, 1), k)));
+    return clicked;
+}
+
+float toggle_width() { return px(38); }
+
 void ring(float frac, float radius, float th, const ImVec4& c, const char* center) {
     frac = std::max(0.f, std::min(1.f, frac));
     ImVec2 p = ImGui::GetCursorScreenPos();

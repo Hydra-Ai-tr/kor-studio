@@ -52,10 +52,13 @@ int main(int argc, char** argv) {
     // Optional scripting flags, mainly for producing screenshots:
     //   --lang en|tr|ru  --page N  --tab N  --data <file>  --train  --shot <out.bmp>  --delay <seconds>
     //   --record <folder> --every <seconds>   saves frame_0000.bmp, ... until --delay
-    //   --size <width>x<height>
+    //   --size <width>x<height>  --skill <plugin file> (repeatable; only for this session)
+    //   --bottom (scroll to the end of the page)  --community (load the community plugin list)
+    // Screenshot runs leave the settings file unchanged.
     std::string shot, data, record;
+    std::vector<const char*> skills;
     int page = -1, lang = -1, tab = -1, width = 1320, height = 820;
-    bool train = false;
+    bool train = false, use_skills = false, bottom = false, community = false;
     double delay = 1.0, every = 0.5;
     for (int i = 1; i < argc; ++i) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
@@ -68,6 +71,9 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--every")) every = std::max(0.05, std::atof(next()));
         else if (!std::strcmp(argv[i], "--size")) std::sscanf(next(), "%dx%d", &width, &height);
         else if (!std::strcmp(argv[i], "--train")) train = true;
+        else if (!std::strcmp(argv[i], "--skill")) { skills.push_back(next()); use_skills = true; }
+        else if (!std::strcmp(argv[i], "--bottom")) bottom = true;
+        else if (!std::strcmp(argv[i], "--community")) community = true;
         else if (!std::strcmp(argv[i], "--lang")) {
             std::string l = next();
             lang = l == "tr" ? LANG_TR : l == "ru" ? LANG_RU : LANG_EN;
@@ -104,6 +110,10 @@ int main(int argc, char** argv) {
     ImGui_ImplOpenGL3_Init("#version 130");
 
     app::init(scale);
+    if (!shot.empty() || !record.empty()) app::keep_settings();
+    if (use_skills) app::use_skills_for_session(skills.data(), (int)skills.size());
+    if (bottom) app::scroll_to_end();
+    if (community) app::load_community_list();
     if (lang >= 0) set_language(lang);
     if (!data.empty()) app::load_data(data.c_str());
     if (train) app::start_training();

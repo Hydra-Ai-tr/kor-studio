@@ -50,8 +50,11 @@ code a readable reference for how training actually works.
   training, keeps the checkpoint that answered the most questions, and can stop as soon as every
   answer is correct.
 - **Training log.** Every event is shown in the app and saved to a timestamped log file.
-- **Python plugins.** Drop a script into the plugins folder to clean data, generate datasets,
-  write tests or examine a model. Three plugins are bundled.
+- **Training skills in Python.** Skills run next to the trainer and steer it live: they change
+  the learning rate, add training examples where the model is weak, restore the best weights,
+  stop early and chart their own metrics. Write one in a few lines with the `kor` library.
+- **Share plugins with a link.** Install skills and tools from a GitHub page, a gist, a `.zip`
+  or the community list, in the app or with `python -m kor install`.
 - **Playground.** Generate text or run predictions, even while training continues.
 - **Open model format.** Models are saved as [`.kor` files](docs/kor-format.md), optionally in
   half precision.
@@ -73,7 +76,11 @@ code a readable reference for how training actually works.
   </tr>
   <tr>
     <td><img src="docs/screenshots/log.png" alt="Training log"><br><sub><b>Training log</b>: shown live and saved to a file</sub></td>
-    <td><img src="docs/screenshots/plugins.png" alt="Plugins page"><br><sub><b>Plugins</b>: Python scripts with live output</sub></td>
+    <td><img src="docs/screenshots/plugins.png" alt="Plugins page"><br><sub><b>Plugins</b>: training skills and tools</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/skills.png" alt="Skill metrics during training"><br><sub><b>Skills</b>: what each skill did, charted live</sub></td>
+    <td><img src="docs/screenshots/share.png" alt="Installing plugins from the community list"><br><sub><b>Sharing</b>: install from a link or the community list</sub></td>
   </tr>
 </table>
 
@@ -122,32 +129,59 @@ never seen. On the bundled dialogue example, the 66K-parameter model reaches 92%
 accuracy but passes 0 of 12 held-out questions. It has learned the style of the conversation, not
 arithmetic or facts it was never shown, and the test makes that visible.
 
-## Plugins
+## Skills and plugins
 
-A plugin is a Python 3 script whose first line is `# kor-plugin`:
+Plugins are Python 3 scripts built on the bundled `kor` library. **Skills** run during training
+and can change it; **tools** run once to prepare data or tests. A complete skill:
 
 ```python
 # kor-plugin
-# name: Reverse lines
-# description: Writes the loaded text with its lines in reverse order.
-# args: --keep-empty
+# type: skill
+# name: Plateau breaker
+# description: Halves the learning rate when the validation loss stops improving.
 
 import kor
 
-text = kor.read_data()
-kor.write_data("\n".join(reversed(text.splitlines())))
+skill = kor.Skill()
+
+@skill.on_eval
+def check(run, ev):
+    if not ev.improved:
+        run.scale_lr(0.5)
+        run.log(f"no progress, learning rate x{run.lr_factor:.2f}", "warn")
+
+if __name__ == "__main__":
+    skill.run()
 ```
 
-Plugins receive the current dataset, model and tests through environment variables, and the
-bundled `kor` helper module wraps them (`read_data`, `write_tests`, `generate`, `run_tests`, and
-more). A `data.txt` or `tests.txt` written by the plugin is loaded back into the app
-automatically. The full reference is in [docs/plugins.md](docs/plugins.md).
+Handlers receive the run and the event. Besides the learning rate, a skill can add training text
+(`run.add_pairs`), ask the live model questions (`run.ask`), generate samples, save or restore
+the best weights, stop training and record metrics that the Training page charts. Turn skills on
+in the Plugins page, or pass them to the command line:
 
-| Bundled plugin | What it does |
-|---|---|
-| `clean_text.py` | Normalizes whitespace and quotes and removes duplicate Q/A pairs |
-| `math_dialogs.py` | Generates arithmetic dialogues plus held-out test questions |
-| `quiz.py` | Asks the model every test question and writes a report |
+```bash
+kor-cli train examples/diyalog_tr.txt --skill plugins/pattern_tutor.py --skill plugins/weak_spots.py
+```
+
+Skills make a measurable difference. On the bundled dialogue example (same model, same seed), the
+default run answers 0 of 12 held-out questions; with `pattern_tutor` and `weak_spots` it answers
+3 of 12, and the validation loss falls from 0.299 to 0.233.
+
+| Bundled plugin | Kind | What it does |
+|---|---|---|
+| `pattern_tutor.py` | skill | Learns the number patterns of dialogue data in any language and adds fresh examples of the ones the model fails |
+| `weak_spots.py` | skill | Trains more often on examples similar to the failed questions |
+| `lr_doctor.py` | skill | Lowers the learning rate on plateaus, rolls back when the loss jumps |
+| `sample_watch.py` | skill | Logs samples during training and charts their variety |
+| `clean_text.py` | tool | Normalizes whitespace and quotes and removes duplicate Q/A pairs |
+| `math_dialogs.py` | tool | Generates arithmetic dialogues plus held-out test questions |
+| `quiz.py` | tool | Asks the model every test question and writes a report |
+
+**Sharing.** A plugin is one `.py` file. Put it on GitHub or in a gist and share the link; others
+install it from the Plugins page or with `python -m kor install <link>`. `python -m kor new`
+writes a template, `python -m kor check` validates a plugin, and a pull request to
+[`community/index.json`](community/index.json) adds it to the community list shown in the app.
+The full guide, API and protocol are in [docs/plugins.md](docs/plugins.md).
 
 ## Command line
 
@@ -162,7 +196,8 @@ kor-cli generate chat.kor "Kullanıcı: Merhaba" --len 200
 ```
 
 Training options: `--steps N`, `--patience N` (early stopping), `--tests file`,
-`--target 0..1` (stop at this pass rate), `--log file`, `--out file`, `--text` / `--table`.
+`--target 0..1` (stop at this pass rate), `--log file`, `--out file`, `--text` / `--table`,
+`--skill "file.py [args]"` (repeatable), `--python <command>`, `--lang en|tr|ru`.
 
 ## Building from source
 
@@ -206,8 +241,11 @@ train a large language model. A GPU backend is on the roadmap.
 ```text
 src/core/    training engine: tensors, layers, transformer, optimizers, trainer, auto-tuner
 src/app/     desktop application (Dear ImGui + GLFW), plugin runner, translations (i18n.h)
+src/skills/  bridge between the trainer and Python skills (processes, JSON line protocol)
 src/cli/     kor-cli command-line tool
-plugins/     bundled Python plugins and the kor.py helper module
+python/kor/  the kor Python library: skills, tool helpers, plugin installer
+plugins/     bundled skills and tools
+community/   the community plugin list
 examples/    small demo datasets
 docs/        file format, plugin guide, translated READMEs, screenshots
 assets/      logo and application icon

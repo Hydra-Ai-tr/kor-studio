@@ -14,6 +14,8 @@ namespace kor {
 
 enum OptKind { OPT_ADAMW = 0, OPT_SGD = 1 };
 
+class TrainHook;
+
 struct TrainConfig {
     int steps = 1000;
     int batch = 32;
@@ -41,9 +43,15 @@ struct TrainConfig {
     // Stop as soon as at least this fraction of the question tests pass
     // (0 = off, 1 = all of them). The weights at that moment are kept.
     float probe_target = 0;
+    // Code that watches the run and steers it (Python skills, see TrainHook).
+    std::vector<std::shared_ptr<TrainHook>> hooks;
 };
 
-enum TrainEventKind { EV_START = 0, EV_EVAL, EV_PROBES, EV_EARLY_STOP, EV_TARGET, EV_RESTORED, EV_DONE, EV_STOPPED, EV_ERROR };
+enum TrainEventKind {
+    EV_START = 0, EV_EVAL, EV_PROBES, EV_EARLY_STOP, EV_TARGET, EV_RESTORED, EV_DONE, EV_STOPPED, EV_ERROR,
+    EV_HOOK_LOG, EV_HOOK_METRIC, EV_HOOK_STOP, EV_HOOK_LR, EV_HOOK_DATA, EV_HOOK_BEST
+};
+enum HookTone { TONE_INFO = 0, TONE_GOOD, TONE_WARN, TONE_BAD, TONE_MUTED };
 
 // One entry of the training log. Fields are filled depending on `kind`:
 //   EV_START      n1 = trainable parameters, n2 = threads, text = kernel name
@@ -54,13 +62,87 @@ enum TrainEventKind { EV_START = 0, EV_EVAL, EV_PROBES, EV_EARLY_STOP, EV_TARGET
 //   EV_RESTORED   step = step of the restored weights; n2 > 0: n1/n2 question tests
 //                 passed with them, otherwise val_loss = their validation loss
 //   EV_ERROR      text = message
+//   EV_HOOK_*     source = hook name
+//     LOG         text = message, n1 = HookTone
+//     METRIC      text = metric name, loss = value
+//     STOP        text = reason
+//     LR          loss = new learning-rate factor (or fixed rate when n1 = 1)
+//     DATA        n1 = characters added, n2 = all added characters
+//     BEST        n1 = 1 saved the current weights as the best, 0 restored the best ones
 struct TrainEvent {
     int kind = 0;
     int step = 0;
     double time = 0;  // seconds of training so far
     float loss = 0, val_loss = -1, val_acc = -1;
     long long n1 = 0, n2 = 0;
-    std::string text;
+    std::string text, source;
+};
+
+// ---- hooks
+//
+// A hook (for example a Python skill) is told what happens during training and
+// can change the run: the learning rate, the training text, when to stop and
+// which weights to keep. Hooks run on the training thread between steps; the
+// trainer waits for them, so a hook should return quickly.
+
+enum HookKind { HOOK_START = 0, HOOK_STEP, HOOK_EVAL, HOOK_TESTS, HOOK_END };
+
+struct HookInfo {
+    int kind = HOOK_START;
+    int step = 0, total = 0;
+    double elapsed = 0;
+    float loss = 0, lr = 0;                   // smoothed training loss, current learning rate
+    float val_loss = -1, val_acc = -1;        // HOOK_EVAL (and the latest values otherwise)
+    float best_val = -1;
+    int best_step = 0;
+    bool improved = false;                    // HOOK_EVAL: new best validation loss
+    int passed = 0;                           // HOOK_TESTS
+    const std::vector<Probe>* tests = nullptr;
+    const std::vector<ProbeResult>* results = nullptr;
+    std::string state;                        // HOOK_END: "done", "stopped", "early_stop", "target", "hook_stop", "error"
+};
+
+class Model;
+struct Dataset;
+
+// What a hook may do. Valid only during TrainHook::on_event().
+class TrainControl {
+public:
+    virtual ~TrainControl() = default;
+    virtual const Model& model() const = 0;
+    virtual const Dataset& data() const = 0;
+    virtual const TrainConfig& config() const = 0;
+    // Learning rate = schedule * factor (default 1), or a fixed rate when set (> 0).
+    virtual void set_lr_factor(float factor) = 0;
+    virtual void set_lr(float lr) = 0;
+    virtual void stop(const std::string& reason) = 0;
+    virtual void save_best() = 0;     // keep the current weights as the best ones
+    virtual bool restore_best() = 0;  // go back to the best weights kept so far
+    // Text models: adds training text (characters the model does not know are
+    // dropped). Returns the number of characters added.
+    virtual size_t add_text(const std::string& text) = 0;
+    virtual void clear_added() = 0;
+    // Share of training rows taken from the added text (< 0 = automatic).
+    virtual void set_mix(float share) = 0;
+    virtual void log(const std::string& text, int tone) = 0;
+    virtual void metric(const std::string& name, float value) = 0;
+    // Text models: continues `prompt` with the current weights.
+    virtual std::string generate(const std::string& prompt, int length, float temperature, bool one_line) = 0;
+    virtual ProbeResult ask(const Probe& p) = 0;
+};
+
+class TrainHook {
+public:
+    virtual ~TrainHook() = default;
+    virtual std::string name() const = 0;
+    // Called first on the training thread; false drops the hook (the reason goes to `err`).
+    virtual bool open(TrainControl& ctl, std::string* err) = 0;
+    virtual bool wants(int hook_kind) const = 0;
+    virtual int step_every() const { return 0; }  // HOOK_STEP period, 0 = never
+    virtual void on_event(const HookInfo& info, TrainControl& ctl) = 0;
+    virtual void close() {}
+    // False once the hook has failed; it is not called again.
+    virtual bool alive() const { return true; }
 };
 
 class Optimizer {
@@ -93,6 +175,15 @@ struct TrainStats {
     std::vector<ProbeResult> probe_results;  // latest run, same order as cfg.probes
     std::vector<int> probe_steps, probe_hist;  // passed tests per run
     std::string error;
+    // Values reported by hooks ("source: name"), in the order they first appeared.
+    struct Metric {
+        std::string name;
+        std::vector<int> steps;
+        std::vector<float> values;
+    };
+    std::vector<Metric> metrics;
+    float lr_factor = 1, lr_fixed = 0;
+    size_t added_chars = 0;
 };
 
 class Trainer {
@@ -113,6 +204,7 @@ public:
     std::mutex model_mu;
 
 private:
+    friend class RunControl;
     void run();
     void emit(const TrainEvent& e);
     std::vector<TrainEvent> events_;

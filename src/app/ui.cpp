@@ -7,6 +7,8 @@
 
 #include "../core/kernels.h"
 #include "../core/sysinfo.h"
+#include "../skills/json.h"
+#include "../skills/skill.h"
 
 #include "imgui.h"
 
@@ -20,7 +22,9 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -99,6 +103,21 @@ struct State {
     int plugin_running = -1;
     std::string plugin_out_dir, plugin_msg;
     bool plugin_ok = true;
+
+    // skills and sharing
+    std::set<std::string> skills_on;                // turned-on skills (file names)
+    std::map<std::string, std::string> saved_args;  // plugin arguments kept in the settings file
+    std::vector<std::string> active_skills;         // skills of the current/last run
+    enum RunKind { RUN_TOOL = 0, RUN_INSTALL, RUN_INDEX, RUN_NEW };
+    int run_kind = RUN_TOOL;
+    char install_src[1024] = "";
+    struct CommunityItem {
+        std::string id, type, author, url, name[3], desc[3];
+    };
+    std::vector<CommunityItem> community;
+    int community_state = 0;  // 0 not loaded, 1 loading, 2 loaded, 3 failed
+    bool save_settings = true;
+    bool scroll_end = false, want_community = false;
 };
 State A;
 
@@ -294,6 +313,29 @@ void pump_events() {
                 std::snprintf(b, sizeof b, tr(S::LogError), e.text.c_str());
                 log_line(t + b, State::T_BAD);
                 break;
+            case EV_HOOK_LOG: {
+                static const int tones[] = {State::T_NORMAL, State::T_GOOD, State::T_ACCENT, State::T_BAD, State::T_MUTED};
+                log_line(t + "[" + e.source + "] " + e.text, tones[e.n1 >= 0 && e.n1 < 5 ? e.n1 : 0]);
+                break;
+            }
+            case EV_HOOK_STOP:
+                std::snprintf(b, sizeof b, tr(S::LogHookStop), e.text.empty() ? "-" : e.text.c_str());
+                log_line(t + "[" + e.source + "] " + b, State::T_ACCENT);
+                break;
+            case EV_HOOK_LR:
+                std::snprintf(b, sizeof b, tr(e.n1 ? S::LogHookLrFixed : S::LogHookLr), (double)e.loss);
+                log_line(t + "[" + e.source + "] " + b, State::T_NORMAL);
+                break;
+            case EV_HOOK_DATA:
+                if (e.n1) std::snprintf(b, sizeof b, tr(S::LogHookData), e.n1, e.n2);
+                else std::snprintf(b, sizeof b, "%s", tr(S::LogHookCleared));
+                log_line(t + "[" + e.source + "] " + b, State::T_NORMAL);
+                break;
+            case EV_HOOK_BEST:
+                if (e.n1) std::snprintf(b, sizeof b, "%s", tr(S::LogHookSaved));
+                else std::snprintf(b, sizeof b, tr(S::LogHookRestored), e.n2);
+                log_line(t + "[" + e.source + "] " + b, State::T_ACCENT);
+                break;
         }
         if (e.kind == EV_DONE || e.kind == EV_STOPPED || e.kind == EV_ERROR) A.log_file.close();
     }
@@ -437,6 +479,49 @@ void reset_model() {
     auto_configure();
 }
 
+using EnvVars = std::vector<std::pair<std::string, std::string>>;
+EnvVars plugin_env();
+void scan_all_plugins();
+const char* lang_code() {
+    static const char* const codes[LANG_COUNT] = {"en", "tr", "ru"};
+    return codes[get_language()];
+}
+
+// One hook per turned-on skill; logs why skills were skipped.
+void add_skill_hooks() {
+    A.cfg.hooks.clear();
+    A.active_skills.clear();
+    if (A.skills_on.empty()) return;
+    if (!A.plugins_scanned) scan_all_plugins();
+    std::vector<const Plugin*> on;
+    for (auto& p : A.plugins)
+        if (p.skill && A.skills_on.count(p.file)) on.push_back(&p);
+    if (on.empty()) return;
+    if (!A.python.searching() && !A.python.found()) A.python.start();
+    for (int i = 0; i < 1000 && A.python.searching(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    std::vector<std::string> python = A.python.command();
+    if (python.empty()) {
+        log_line(tr(S::SkillsNoPython), State::T_BAD);
+        return;
+    }
+    EnvVars env = plugin_env();
+    env.push_back({"KOR_DATA", A.data.path});
+    for (const Plugin* p : on) {
+        SkillSpec sp;
+        sp.name = p->title(get_language());
+        sp.script = p->path;
+        size_t i = (size_t)(p - A.plugins.data());
+        sp.args = split_args(i < A.plugin_args.size() ? A.plugin_args[i].data() : p->args.c_str());
+        sp.python = python;
+        sp.env = env;
+        sp.lang = lang_code();
+        sp.q_tag = A.q_tag;
+        sp.a_tag = A.a_tag;
+        A.cfg.hooks.push_back(std::make_shared<PythonSkill>(sp));
+        A.active_skills.push_back(sp.name);
+    }
+}
+
 void begin_training() {
     if (busy() || A.data.kind == DATA_NONE) return;
     if (!A.model || !model_matches_data()) build_model();
@@ -450,6 +535,12 @@ void begin_training() {
     int held = A.train_data.hold_out(A.cfg.probes);
     start_log();
     if (held) log_fmt(State::T_MUTED, S::LogHeldOut, held);
+    add_skill_hooks();
+    if (!A.active_skills.empty()) {
+        std::string names;
+        for (auto& n : A.active_skills) names += (names.empty() ? "" : ", ") + n;
+        log_line(std::string(tr(S::SkillsActive)) + ": " + names, State::T_ACCENT);
+    }
     if (A.train_data.kind == DATA_TEXT && A.train_data.n_train < (size_t)A.model->spec.ctx + 2) {
         log_fmt(State::T_BAD, S::LogError, tr(S::HeldOutTooMuch));
         A.log_file.close();
@@ -1279,6 +1370,106 @@ void tests_view(const TrainStats& st) {
     }
 }
 
+// The skills of this run (or the turned-on ones before training) and what they changed.
+void skills_strip(const TrainStats& st, bool run) {
+    std::vector<std::string> names = A.active_skills;
+    if (names.empty() && !run && st.state == TS_IDLE)
+        for (auto& p : A.plugins)
+            if (p.skill && A.skills_on.count(p.file)) names.push_back(p.title(get_language()));
+    if (names.empty()) return;
+    gap(2);
+    ImFont* sb = F.small_bold ? F.small_bold : ImGui::GetFont();
+    ImFont* sf = F.small ? F.small : ImGui::GetFont();
+    float bh = sb->FontSize + px(8), rowgap = px(6);
+    float x0 = ImGui::GetCursorPosX(), right = x0 + ImGui::GetContentRegionAvail().x, y = ImGui::GetCursorPosY();
+    ImGui::SetCursorPosY(y + (bh - sb->FontSize) * 0.5f);
+    {
+        FontScope f(F.small_bold);
+        text(tr(S::SkillsActive), C::muted);
+    }
+    float x = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x + ImGui::GetScrollX() + px(10);
+    auto place = [&](float w) {
+        if (x + w > right && x > x0 + px(1)) {
+            x = x0;
+            y += bh + rowgap;
+        }
+        ImGui::SetCursorPos(ImVec2(x, y));
+        x += w + px(6);
+    };
+    for (auto& n : names) {
+        place(badge_width(n.c_str()));
+        badge(n.c_str(), C::violet, true, run);
+    }
+    std::string info;
+    if (st.added_chars > 0) info = strf(tr(S::AddedText), fmt_count((double)st.added_chars).c_str());
+    if (st.lr_fixed > 0) info += (info.empty() ? "" : "   \xC2\xB7   ") + strf(tr(S::LrFixed), (double)st.lr_fixed);
+    else if (std::fabs(st.lr_factor - 1.f) > 1e-4f) info += (info.empty() ? "" : "   \xC2\xB7   ") + strf(tr(S::LrFactor), (double)st.lr_factor);
+    if (!info.empty()) {
+        place(text_size(sf, info.c_str()).x + px(4));
+        ImGui::SetCursorPos(ImVec2(ImGui::GetCursorPosX() + px(4), y + (bh - sf->FontSize) * 0.5f));
+        FontScope f(F.small);
+        text(info.c_str(), C::muted);
+    }
+    ImGui::SetCursorPos(ImVec2(x0, y + bh));
+    ImGui::Dummy(ImVec2(0, 0));
+}
+
+// Line chart of one skill metric; the value range is labelled in a gutter on the left.
+void metric_chart(const TrainStats::Metric& m, ImVec2 size, const ImVec4& c) {
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::Dummy(size);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    size_t n = std::min(m.values.size(), m.steps.size());
+    float lo = n ? *std::min_element(m.values.begin(), m.values.begin() + n) : 0.f;
+    float hi = n ? *std::max_element(m.values.begin(), m.values.begin() + n) : 1.f;
+    if (hi - lo < 1e-6f) { lo -= 0.5f; hi += 0.5f; }
+    ImFont* sf = F.small ? F.small : ImGui::GetFont();
+    std::string top = strf("%.4g", (double)hi), bottom = strf("%.4g", (double)lo);
+    float gutter = std::max(text_size(sf, top.c_str()).x, text_size(sf, bottom.c_str()).x) + px(10);
+    float x0 = p.x + gutter, w = std::max(px(10), size.x - gutter), r = px(5);
+    float y0 = p.y + r, h = size.y - 2 * r;
+    for (int g = 0; g <= 2; ++g) {
+        float yy = y0 + h * g / 2.f;
+        dl->AddLine(ImVec2(x0, yy), ImVec2(x0 + w, yy), col(C::border, g == 1 ? 0.4f : 0.8f));
+    }
+    dl->AddText(sf, sf->FontSize, ImVec2(p.x, y0 - sf->FontSize * 0.5f), col(C::subtle), top.c_str());
+    dl->AddText(sf, sf->FontSize, ImVec2(p.x, y0 + h - sf->FontSize * 0.5f), col(C::subtle), bottom.c_str());
+    if (n == 0) return;
+    float s0 = (float)m.steps.front(), s1 = std::max((float)m.steps.back(), s0 + 1.f);
+    std::vector<ImVec2> pts(n);
+    for (size_t i = 0; i < n; ++i)
+        pts[i] = ImVec2(x0 + (m.steps[i] - s0) / (s1 - s0) * (w - r), y0 + h - (m.values[i] - lo) / (hi - lo) * h);
+    if (n == 1) pts[0].x = x0 + w * 0.5f;
+    if (n > 1) dl->AddPolyline(pts.data(), (int)n, col(c), 0, px(2));
+    dl->AddCircleFilled(pts.back(), px(4), col(c));
+}
+
+// Values reported by the skills, one small chart each.
+void skill_metrics(const TrainStats& st) {
+    if (st.metrics.empty()) {
+        banner(tr(S::SkillMetricsEmpty), C::muted, IC_INFO);
+        return;
+    }
+    static const ImVec4 colors[] = {C::violet, C::teal, C::blue, C::accent, C::good};
+    float g = px(16);
+    int cols = fit_columns(px(320), 3, g);
+    float cw = column_width(cols, g);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(g, g));
+    for (int i = 0; i < (int)st.metrics.size(); ++i) {
+        const TrainStats::Metric& m = st.metrics[i];
+        if (i % cols) ImGui::SameLine(0, g);
+        ImGui::PushID(i);
+        std::string sub = m.values.empty() ? "" : strf("%.4g   \xC2\xB7   ", (double)m.values.back()) + strf(tr(S::StepLbl), m.steps.back());
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(px(10), px(10)));
+        begin_card("metric", m.name.c_str(), 0, cw, sub.c_str());
+        metric_chart(m, ImVec2(ImGui::GetContentRegionAvail().x, px(110)), colors[i % 5]);
+        end_card();
+        ImGui::PopStyleVar();
+        ImGui::PopID();
+    }
+    ImGui::PopStyleVar();
+}
+
 void train_settings(bool run) {
     ImGui::BeginDisabled(run);
     int cols = ImGui::GetContentRegionAvail().x > px(720) ? 2 : 1;
@@ -1380,6 +1571,7 @@ void page_train() {
     }
     if (st.state == TS_ERROR) text_wrapped(st.error.c_str(), C::bad);
     progress_bar(st.total > 0 ? (float)st.step / st.total : 0.f, px(8), st.state == TS_DONE ? C::good : C::accent);
+    skills_strip(st, run);
     end_card();
     gap();
 
@@ -1400,15 +1592,23 @@ void page_train() {
     end_card();
     gap();
 
-    // ---- chart / log / tests
+    // ---- chart / log / tests / skills
     bool text_data = A.data.kind == DATA_TEXT;
-    const char* labels[] = {tr(S::TabChart), tr(S::TabLog), tr(S::TabTests)};
-    if (!text_data && A.train_tab == 2) A.train_tab = 0;
-    tabs("traintabs", &A.train_tab, labels, text_data ? 3 : 2);
+    bool skills_tab = !st.metrics.empty() || !A.active_skills.empty();
+    std::vector<const char*> labels = {tr(S::TabChart), tr(S::TabLog)};
+    std::vector<int> ids = {0, 1};
+    if (text_data) { labels.push_back(tr(S::TabTests)); ids.push_back(2); }
+    if (skills_tab) { labels.push_back(tr(S::TabSkills)); ids.push_back(3); }
+    int sel = 0;
+    for (int i = 0; i < (int)ids.size(); ++i)
+        if (ids[i] == A.train_tab) sel = i;
+    tabs("traintabs", &sel, labels.data(), (int)labels.size());
+    A.train_tab = ids[sel];
     float h = std::max(px(300), ImGui::GetContentRegionAvail().y - px(2));
     if (A.train_tab == 0) plot_loss(st, ImVec2(ImGui::GetContentRegionAvail().x, h));
     else if (A.train_tab == 1) log_view(h);
-    else tests_view(st);
+    else if (A.train_tab == 2) tests_view(st);
+    else skill_metrics(st);
 }
 
 // ------------------------------------------------------------- playground
@@ -1656,11 +1856,106 @@ std::vector<std::string> plugin_dirs() {
 }
 
 void scan_all_plugins() {
+    for (size_t i = 0; i < A.plugins.size() && i < A.plugin_args.size(); ++i)
+        A.saved_args[A.plugins[i].file] = A.plugin_args[i].data();
     A.plugins = scan_plugins(plugin_dirs());
     A.plugin_args.assign(A.plugins.size(), {});
-    for (size_t i = 0; i < A.plugins.size(); ++i)
-        std::snprintf(A.plugin_args[i].data(), A.plugin_args[i].size(), "%s", A.plugins[i].args.c_str());
+    for (size_t i = 0; i < A.plugins.size(); ++i) {
+        auto it = A.saved_args.find(A.plugins[i].file);
+        const std::string& a = it != A.saved_args.end() ? it->second : A.plugins[i].args;
+        std::snprintf(A.plugin_args[i].data(), A.plugin_args[i].size(), "%s", a.c_str());
+    }
     A.plugins_scanned = true;
+}
+
+// Folder that holds the `kor` Python package (next to the program, or in the source tree).
+std::string python_lib_dir() {
+    namespace fs = std::filesystem;
+    fs::path exe = upath(exe_dir());
+    for (const fs::path& base : {exe / "python", exe / ".." / "python", exe / ".." / ".." / "python"}) {
+        std::error_code ec;
+        if (fs::exists(base / "kor" / "__init__.py", ec)) return fs::weakly_canonical(base, ec).u8string();
+    }
+    return (exe / "python").u8string();
+}
+
+std::string bundled_index() {
+    namespace fs = std::filesystem;
+    fs::path exe = upath(exe_dir());
+    for (const fs::path& base : {exe / "community", exe / ".." / "community", exe / ".." / ".." / "community"}) {
+        std::error_code ec;
+        if (fs::exists(base / "index.json", ec)) return fs::weakly_canonical(base / "index.json", ec).u8string();
+    }
+    return "";
+}
+
+// Environment shared by tools, skills and the plugin installer.
+EnvVars plugin_env() {
+    namespace fs = std::filesystem;
+#if defined(_WIN32)
+    const char* cli_name = "kor-cli.exe";
+    const char sep = ';';
+#else
+    const char* cli_name = "kor-cli";
+    const char sep = ':';
+#endif
+    std::error_code ec;
+    fs::path cli = upath(exe_dir()) / cli_name;
+    std::string pypath = python_lib_dir();
+    for (auto& d : plugin_dirs()) pypath += std::string(1, sep) + d;
+    return {
+        {"PYTHONPATH", pypath},
+        {"KOR_PYLIB", python_lib_dir()},
+        {"PYTHONIOENCODING", "utf-8"},
+        {"PYTHONUNBUFFERED", "1"},
+        {"KOR_LANG", lang_code()},
+        {"KOR_CLI", fs::exists(cli, ec) ? cli.u8string() : ""},
+        {"KOR_PLUGINS_DIR", user_plugins_dir()},
+        {"KOR_INDEX_FALLBACK", bundled_index()},
+    };
+}
+
+// Runs `python -m kor <args>` (install, search, new) through the plugin runner.
+void run_hub(int kind, const std::vector<std::string>& args) {
+    if (A.runner.running() || !A.python.found()) return;
+    std::vector<std::string> cmd = A.python.command();
+    for (const char* a : {"-X", "utf8", "-m", "kor"}) cmd.push_back(a);
+    cmd.insert(cmd.end(), args.begin(), args.end());
+    if (!A.runner.start(cmd, plugin_env())) return;
+    A.run_kind = kind;
+    A.plugin_running = -1;
+    if (kind == State::RUN_INDEX) {
+        A.community_state = 1;
+    } else {
+        A.runner.clear_output();
+        A.plugin_msg = tr(kind == State::RUN_INSTALL ? S::InstallRunning : S::PluginRunning);
+        if (kind == State::RUN_NEW) A.plugin_msg = strf(tr(S::PluginRunning), tr(S::NewSkill));
+        A.plugin_ok = true;
+    }
+}
+
+void parse_community(const std::string& out) {
+    A.community.clear();
+    A.community_state = 3;
+    size_t at = out.find('[');
+    if (at == std::string::npos) return;
+    json::Value v;
+    if (!json::parse(out.substr(at, out.find_last_of(']') + 1 - at), v) || v.type != json::Value::ARR) return;
+    static const char* const suffix[LANG_COUNT] = {"", ".tr", ".ru"};
+    for (auto& e : v.a) {
+        State::CommunityItem it;
+        it.id = e["id"].str();
+        it.type = e["type"].str();
+        it.author = e["author"].str();
+        it.url = e["url"].str();
+        for (int l = 0; l < LANG_COUNT; ++l) {
+            it.name[l] = e[(std::string("name") + suffix[l]).c_str()].str();
+            it.desc[l] = e[(std::string("description") + suffix[l]).c_str()].str();
+        }
+        if (it.name[0].empty()) it.name[0] = it.id;
+        if (!it.url.empty()) A.community.push_back(it);
+    }
+    A.community_state = 2;
 }
 
 bool read_file_text(const std::filesystem::path& p, std::string& out) {
@@ -1690,34 +1985,15 @@ void run_plugin(int i) {
     }
     std::string tests_file = (out / "input-tests.txt").u8string();
     { std::ofstream t(upath(tests_file), std::ios::binary); t << A.tests; }
-#if defined(_WIN32)
-    const char* cli_name = "kor-cli.exe";
-    const char sep = ';';
-#else
-    const char* cli_name = "kor-cli";
-    const char sep = ':';
-#endif
-    fs::path cli = upath(exe_dir()) / cli_name;
-    std::string pypath;
-    for (auto& d : plugin_dirs()) pypath += (pypath.empty() ? "" : std::string(1, sep)) + d;
-    static const char* const lang_codes[LANG_COUNT] = {"en", "tr", "ru"};
-    std::vector<std::pair<std::string, std::string>> env = {
-        {"KOR_OUT", A.plugin_out_dir},
-        {"KOR_DATA", A.data.kind != DATA_NONE ? A.data.path : ""},
-        {"KOR_MODEL", model_file},
-        {"KOR_TESTS", tests_file},
-        {"KOR_CLI", fs::exists(cli, ec) ? cli.u8string() : ""},
-        {"KOR_LANG", lang_codes[get_language()]},
-        {"PYTHONPATH", pypath},
-        {"PYTHONIOENCODING", "utf-8"},
-        {"PYTHONUNBUFFERED", "1"},
-    };
-    std::vector<std::string> cmd = A.python.command();
-    cmd.push_back("-X");
-    cmd.push_back("utf8");
-    cmd.push_back(p.path);
+    EnvVars env = plugin_env();
+    env.push_back({"KOR_OUT", A.plugin_out_dir});
+    env.push_back({"KOR_DATA", A.data.kind != DATA_NONE ? A.data.path : ""});
+    env.push_back({"KOR_MODEL", model_file});
+    env.push_back({"KOR_TESTS", tests_file});
+    std::vector<std::string> cmd = python_launch(A.python.command(), p.path);
     for (auto& a : split_args(A.plugin_args[i].data())) cmd.push_back(a);
     if (A.runner.start(cmd, env)) {
+        A.run_kind = State::RUN_TOOL;
         A.plugin_running = i;
         A.plugin_msg = strf(tr(S::PluginRunning), p.title(get_language()).c_str());
         A.plugin_ok = true;
@@ -1729,6 +2005,29 @@ void poll_plugin() {
     namespace fs = std::filesystem;
     int code = 0;
     if (!A.runner.take_finished(code)) return;
+    if (A.run_kind == State::RUN_INDEX) {
+        if (code == 0) parse_community(A.runner.output());
+        else A.community_state = 3;
+        if (A.community_state == 2) A.runner.clear_output();
+        return;
+    }
+    if (A.run_kind == State::RUN_INSTALL || A.run_kind == State::RUN_NEW) {
+        A.plugin_ok = code == 0;
+        if (A.run_kind == State::RUN_INSTALL) {
+            A.plugin_msg = tr(code == 0 ? S::InstallDone : S::InstallFailed);
+            if (code == 0) A.install_src[0] = '\0';
+        } else if (code == 0) {
+            std::string out = A.runner.output();
+            while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) out.pop_back();
+            std::string path = out.substr(out.find_last_of('\n') + 1);
+            A.plugin_msg = strf(tr(S::NewSkillDone), path.c_str());
+            open_folder(user_plugins_dir());
+        } else {
+            A.plugin_msg = strf(tr(S::PluginFailed), tr(S::NewSkill), code);
+        }
+        if (code == 0) scan_all_plugins();
+        return;
+    }
     int i = A.plugin_running;
     A.plugin_running = -1;
     std::string name = i >= 0 && i < (int)A.plugins.size() ? A.plugins[i].title(get_language()) : "?";
@@ -1761,13 +2060,182 @@ void poll_plugin() {
     }
 }
 
+// One plugin card. Skills get an on/off switch, tools a Run button.
+void plugin_card(int i, float width, EqualRow& row, bool can_run) {
+    const Plugin& p = A.plugins[i];
+    int lang = get_language();
+    float fh = ImGui::GetFrameHeight();
+    ImGui::PushID(i);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(px(10), px(10)));
+    begin_card("plugin", nullptr, row.prev, width);
+    float x0 = ImGui::GetCursorPosX(), cw = ImGui::GetContentRegionAvail().x, y0 = ImGui::GetCursorPosY();
+    {
+        FontScope f(F.bold);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(p.title(lang).c_str());
+    }
+    float by = y0 + (fh - (F.small_bold ? F.small_bold->FontSize : 13.f) - px(8)) * 0.5f;
+    ImGui::SameLine(0, px(10));
+    ImGui::SetCursorPosY(by);
+    badge(p.file.c_str(), C::muted, false);
+    if (!p.version.empty()) {
+        ImGui::SameLine(0, px(6));
+        ImGui::SetCursorPosY(by);
+        badge(("v" + p.version).c_str(), C::blue, false);
+    }
+    if (p.skill) {
+        bool on = A.skills_on.count(p.file) > 0;
+        ImGui::SameLine(x0 + cw - toggle_width());
+        ImGui::SetCursorPosY(y0);
+        if (toggle("##on", &on)) {
+            if (on) A.skills_on.insert(p.file);
+            else A.skills_on.erase(p.file);
+        }
+        tooltip(tr(on ? S::SkillOn : S::SkillOff));
+    }
+    if (!p.description(lang).empty()) text_wrapped(p.description(lang).c_str(), C::muted);
+    std::string meta;
+    if (!p.author.empty()) meta = p.author;
+    if (!p.packages.empty()) meta += (meta.empty() ? "" : "   \xC2\xB7   ") + strf(tr(S::NeedsPackages), p.packages.c_str());
+    if (!meta.empty()) text_wrapped(meta.c_str(), C::subtle, F.small);
+    row.cur = std::max(row.cur, push_to_bottom(row.prev, fh));
+    if (p.skill) {
+        ImGui::BeginDisabled(busy());
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        ImGui::InputTextWithHint("##args", tr(S::Arguments), A.plugin_args[i].data(), A.plugin_args[i].size());
+        ImGui::EndDisabled();
+    } else {
+        float bw = std::max(button_width(tr(S::Run), IC_PLAY), button_width(tr(S::Stop), IC_STOP));
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - bw - px(10));
+        ImGui::InputTextWithHint("##args", tr(S::Arguments), A.plugin_args[i].data(), A.plugin_args[i].size());
+        ImGui::SameLine();
+        if (A.run_kind == State::RUN_TOOL && A.plugin_running == i && A.runner.running()) {
+            if (button(tr(S::Stop), BTN_DANGER, IC_STOP, bw)) A.runner.cancel();
+        } else {
+            ImGui::BeginDisabled(!can_run);
+            if (button(tr(S::Run), BTN_PRIMARY, IC_PLAY, bw)) run_plugin(i);
+            ImGui::EndDisabled();
+        }
+    }
+    end_card();
+    ImGui::PopStyleVar();
+    ImGui::PopID();
+}
+
+void plugin_section(const char* title, const char* help) {
+    gap(4);
+    {
+        FontScope f(F.h2);
+        ImGui::TextUnformatted(title);
+    }
+    text_wrapped(help, C::muted, F.small);
+    gap(2);
+}
+
+void plugin_grid(const std::vector<int>& items, std::vector<EqualRow>& rows, bool can_run) {
+    float g = px(16);
+    int cols = fit_columns(px(440), 2, g);
+    float cw = column_width(cols, g);
+    rows.resize(items.size() / std::max(1, cols) + 2);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(g, g));
+    for (int k = 0; k < (int)items.size(); ++k) {
+        EqualRow& row = rows[k / cols];
+        if (k % cols) ImGui::SameLine(0, g);
+        plugin_card(items[k], cw, row, can_run);
+        if (k % cols == cols - 1 || k + 1 == (int)items.size()) row.next();
+    }
+    ImGui::PopStyleVar();
+}
+
+bool plugin_installed(const std::string& url) {
+    std::string file = url.substr(url.find_last_of('/') + 1);
+    for (auto& p : A.plugins)
+        if (p.file == file) return true;
+    return false;
+}
+
+void share_card() {
+    bool can = A.python.found() && !A.runner.running();
+    float sp = ImGui::GetStyle().ItemSpacing.x;
+    begin_card("share", tr(S::ShareTitle));
+    text_wrapped(tr(S::ShareHelp), C::muted);
+    float bw = button_width(tr(S::Install), IC_PLUS);
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - bw - sp);
+    bool enter = ImGui::InputTextWithHint("##src", tr(S::InstallHint), A.install_src, sizeof A.install_src, ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!can || !A.install_src[0]);
+    if ((button(tr(S::Install), BTN_PRIMARY, IC_PLUS, bw) || enter) && can && A.install_src[0])
+        run_hub(State::RUN_INSTALL, {"install", A.install_src, "--yes", "--dir", user_plugins_dir()});
+    ImGui::EndDisabled();
+    text_wrapped(tr(S::TrustWarn), C::warn, F.small);
+    gap(2);
+    ImGui::BeginDisabled(!can);
+    if (button(tr(S::Community), BTN_SECONDARY, IC_GLOBE)) run_hub(State::RUN_INDEX, {"search", "--json"});
+    ImGui::EndDisabled();
+    if (A.community_state == 1) {
+        ImGui::SameLine(0, px(12));
+        ImGui::AlignTextToFramePadding();
+        text(tr(S::CommunityLoading), C::muted);
+    } else if (A.community_state == 3) {
+        ImGui::SameLine(0, px(12));
+        ImGui::AlignTextToFramePadding();
+        text(tr(S::CommunityEmpty), C::bad);
+    }
+    if (A.community_state == 2 && !A.community.empty()) {
+        int lang = get_language();
+        ImGuiTableFlags tf = ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp;
+        ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(px(8), px(10)));
+        if (ImGui::BeginTable("##community", 3, tf)) {
+            float iw = std::max(button_width(tr(S::Install), IC_PLUS), badge_width(tr(S::Installed)));
+            float tw = std::max(badge_width("skill"), badge_width("tool"));
+            ImGui::TableSetupColumn("##n", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("##t", ImGuiTableColumnFlags_WidthFixed, tw);
+            ImGui::TableSetupColumn("##i", ImGuiTableColumnFlags_WidthFixed, iw);
+            for (int k = 0; k < (int)A.community.size(); ++k) {
+                const State::CommunityItem& it = A.community[k];
+                ImGui::PushID(k);
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                {
+                    FontScope f(F.bold);
+                    ImGui::TextUnformatted(!it.name[lang].empty() ? it.name[lang].c_str() : it.name[0].c_str());
+                }
+                const std::string& d = !it.desc[lang].empty() ? it.desc[lang] : it.desc[0];
+                std::string sub = d + (it.author.empty() ? "" : "  (" + it.author + ")");
+                if (!sub.empty()) text_wrapped(sub.c_str(), C::muted, F.small);
+                ImGui::TableNextColumn();
+                bool skill = it.type == "skill";
+                badge(skill ? "skill" : "tool", skill ? C::violet : C::teal, false);
+                ImGui::TableNextColumn();
+                if (plugin_installed(it.url)) {
+                    badge(tr(S::Installed), C::good, true);
+                } else {
+                    ImGui::BeginDisabled(!can);
+                    if (button(tr(S::Install), BTN_SECONDARY, IC_PLUS, iw))
+                        run_hub(State::RUN_INSTALL, {"install", it.url, "--yes", "--dir", user_plugins_dir()});
+                    ImGui::EndDisabled();
+                }
+                ImGui::PopID();
+            }
+            ImGui::EndTable();
+        }
+        ImGui::PopStyleVar();
+    }
+    end_card();
+}
+
 void page_plugins() {
     if (!A.plugins_scanned) {
         scan_all_plugins();
         A.python.start();
     }
     float sp = ImGui::GetStyle().ItemSpacing.x;
-    header(tr(S::NavPlugins), tr(S::PluginsHelp), button_width(tr(S::OpenPlugins), IC_FOLDER) + sp + button_width(tr(S::RefreshList), IC_REFRESH));
+    header(tr(S::NavPlugins), tr(S::PluginsHelp),
+           button_width(tr(S::NewSkill), IC_PLUS) + sp + button_width(tr(S::OpenPlugins), IC_FOLDER) + sp + button_width(tr(S::RefreshList), IC_REFRESH));
+    ImGui::BeginDisabled(!A.python.found() || A.runner.running());
+    if (button(tr(S::NewSkill), BTN_SECONDARY, IC_PLUS)) run_hub(State::RUN_NEW, {"new", "My skill", "--dir", user_plugins_dir()});
+    ImGui::EndDisabled();
+    ImGui::SameLine();
     if (button(tr(S::OpenPlugins), BTN_SECONDARY, IC_FOLDER)) {
         std::error_code ec;
         std::filesystem::create_directories(upath(user_plugins_dir()), ec);
@@ -1798,60 +2266,31 @@ void page_plugins() {
         for (auto& d : dirs) all += (all.empty() ? "" : "\n") + d;
         tooltip(all.c_str());
     }
-    if (busy()) banner(tr(S::PluginBusy), C::warn, IC_INFO);
-    gap(4);
-
-    if (A.plugins.empty()) text_wrapped(tr(S::NoPlugins), C::muted);
     bool can_run = A.python.found() && !busy() && !A.runner.running();
-    int lang = get_language();
-    float g = px(16);
-    int cols = fit_columns(px(440), 2, g);
-    float cw = column_width(cols, g), fh = ImGui::GetFrameHeight();
-    static std::vector<EqualRow> rows;
-    rows.resize((A.plugins.size() + cols - 1) / std::max(1, cols) + 1);
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(g, g));
-    for (int i = 0; i < (int)A.plugins.size(); ++i) {
-        const Plugin& p = A.plugins[i];
-        EqualRow& row = rows[i / cols];
-        if (i % cols) ImGui::SameLine(0, g);
-        ImGui::PushID(i);
-        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(px(10), px(10)));
-        begin_card("plugin", nullptr, row.prev, cw);
-        {
-            FontScope f(F.bold);
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextUnformatted(p.title(lang).c_str());
-        }
-        ImGui::SameLine(0, px(10));
-        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (fh - (F.small_bold ? F.small_bold->FontSize : 13.f) - px(8)) * 0.5f);
-        badge(p.file.c_str(), C::muted, false);
-        if (!p.description(lang).empty()) text_wrapped(p.description(lang).c_str(), C::muted);
-        row.cur = std::max(row.cur, push_to_bottom(row.prev, fh));
-        float bw = std::max(button_width(tr(S::Run), IC_PLAY), button_width(tr(S::Stop), IC_STOP));
-        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - bw - px(10));
-        ImGui::InputTextWithHint("##args", tr(S::Arguments), A.plugin_args[i].data(), A.plugin_args[i].size());
-        ImGui::SameLine();
-        if (A.plugin_running == i && A.runner.running()) {
-            if (button(tr(S::Stop), BTN_DANGER, IC_STOP, bw)) A.runner.cancel();
-        } else {
-            ImGui::BeginDisabled(!can_run);
-            if (button(tr(S::Run), BTN_PRIMARY, IC_PLAY, bw)) run_plugin(i);
-            ImGui::EndDisabled();
-        }
-        end_card();
-        ImGui::PopStyleVar();
-        ImGui::PopID();
-        if (i % cols == cols - 1 || i + 1 == (int)A.plugins.size()) row.next();
-    }
-    ImGui::PopStyleVar();
+    std::vector<int> skills, tools;
+    for (int i = 0; i < (int)A.plugins.size(); ++i) (A.plugins[i].skill ? skills : tools).push_back(i);
+    static std::vector<EqualRow> skill_rows, tool_rows;
 
-    if (!A.plugin_msg.empty()) {
+    plugin_section(tr(S::SkillsTitle), tr(S::SkillsHelp));
+    if (skills.empty()) text_wrapped(tr(S::NoSkills), C::muted);
+    else plugin_grid(skills, skill_rows, can_run);
+
+    plugin_section(tr(S::ToolsTitle), tr(S::ToolsHelp));
+    if (busy()) banner(tr(S::PluginBusy), C::warn, IC_INFO);
+    if (tools.empty()) text_wrapped(tr(S::NoPlugins), C::muted);
+    else plugin_grid(tools, tool_rows, can_run);
+
+    gap(4);
+    share_card();
+
+    bool show_out = A.run_kind != State::RUN_INDEX;
+    if (!A.plugin_msg.empty() && show_out) {
         gap();
-        banner(A.plugin_msg.c_str(), A.runner.running() ? C::accent : A.plugin_ok ? C::good : C::bad,
-               A.runner.running() ? IC_CLOCK : A.plugin_ok ? IC_CHECK : IC_WARN);
+        bool going = A.runner.running();
+        banner(A.plugin_msg.c_str(), going ? C::accent : A.plugin_ok ? C::good : C::bad, going ? IC_CLOCK : A.plugin_ok ? IC_CHECK : IC_WARN);
     }
     std::string out = A.runner.output();
-    if (out.empty()) return;
+    if (out.empty() || !show_out) return;
     gap();
     float rest = ImGui::GetContentRegionAvail().y;
     begin_card("pout");
@@ -1996,19 +2435,38 @@ void init(float ui_scale) {
     A.sys = detect_system();
     A.cfg.threads = recommended_threads(A.sys);
     int lang = system_language();
-    std::ifstream in(upath(settings_file()));
-    std::string key;
-    int value;
-    while (in >> key >> value)
-        if (key == "lang") lang = value;
+    std::ifstream in(upath(settings_file()), std::ios::binary);
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        size_t sp = line.find(' ');
+        std::string key = line.substr(0, sp), value = sp == std::string::npos ? "" : line.substr(sp + 1);
+        if (key == "lang") lang = std::atoi(value.c_str());
+        else if (key == "skill" && !value.empty()) A.skills_on.insert(value);
+        else if (key == "args") {
+            size_t tab = value.find('\t');
+            if (tab != std::string::npos) A.saved_args[value.substr(0, tab)] = value.substr(tab + 1);
+        }
+    }
     set_language(lang);
+    scan_all_plugins();
+    A.python.start();
 }
 
 void shutdown() {
     A.runner.cancel();
     A.trainer.stop();
-    std::ofstream out(upath(settings_file()));
+    if (!A.save_settings) return;
+    for (size_t i = 0; i < A.plugins.size() && i < A.plugin_args.size(); ++i)
+        A.saved_args[A.plugins[i].file] = A.plugin_args[i].data();
+    std::ofstream out(upath(settings_file()), std::ios::binary);
     out << "lang " << get_language() << "\n";
+    for (auto& s : A.skills_on) out << "skill " << s << "\n";
+    for (auto& kv : A.saved_args) {
+        auto p = std::find_if(A.plugins.begin(), A.plugins.end(), [&](const Plugin& x) { return x.file == kv.first; });
+        if (p != A.plugins.end() && p->args == kv.second) continue;  // still the default
+        out << "args " << kv.first << "\t" << kv.second << "\n";
+    }
 }
 
 void set_page(int page) {
@@ -2023,7 +2481,18 @@ bool load_data(const char* path) {
 
 void start_training() { begin_training(); }
 
-void set_train_tab(int tab) { A.train_tab = std::max(0, std::min(2, tab)); }
+void set_train_tab(int tab) { A.train_tab = std::max(0, std::min(3, tab)); }
+
+void use_skills_for_session(const char* const* files, int n) {
+    A.skills_on.clear();
+    for (int i = 0; i < n; ++i) A.skills_on.insert(files[i]);
+}
+
+void keep_settings() { A.save_settings = false; }
+
+void scroll_to_end() { A.scroll_end = true; }
+
+void load_community_list() { A.want_community = true; }
 
 void frame() {
     pump_events();
@@ -2053,6 +2522,11 @@ void frame() {
     ImGui::PopID();
     gap(4);
     if (A.page != PAGE_TEST) pump_generation();
+    if (A.want_community && A.python.found() && !A.runner.running()) {
+        A.want_community = false;
+        run_hub(State::RUN_INDEX, {"search", "--json"});
+    }
+    if (A.scroll_end && ImGui::GetScrollMaxY() > 0) ImGui::SetScrollY(ImGui::GetScrollMaxY());
     ImGui::End();
 }
 

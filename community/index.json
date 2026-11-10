@@ -1,0 +1,96 @@
+{
+  "version": 1,
+  "plugins": [
+    {
+      "id": "pattern-tutor",
+      "type": "skill",
+      "name": "Pattern tutor",
+      "name.tr": "Kalıp öğretmeni",
+      "name.ru": "Репетитор по шаблонам",
+      "description": "Learns the number patterns of dialogue data and adds fresh examples of the patterns the model still gets wrong.",
+      "description.tr": "Diyalog verisindeki sayı kalıplarını öğrenir; modelin hâlâ yanıldığı kalıplardan taze örnekler ekler.",
+      "description.ru": "Находит числовые шаблоны в диалогах и добавляет новые примеры тех, в которых модель ещё ошибается.",
+      "author": "Kor Studio",
+      "tags": "dialogue arithmetic curriculum",
+      "url": "https://raw.githubusercontent.com/Hydra-Ai-tr/kor-studio/main/plugins/pattern_tutor.py"
+    },
+    {
+      "id": "weak-spots",
+      "type": "skill",
+      "name": "Weak-spot coach",
+      "name.tr": "Zayıf nokta koçu",
+      "name.ru": "Тренер слабых мест",
+      "description": "Trains more often on the examples that look like the failed question tests.",
+      "description.tr": "Başarısız soru testlerine benzeyen örneklerle daha sık eğitir.",
+      "description.ru": "Чаще тренирует на примерах, похожих на непройденные вопросы.",
+      "author": "Kor Studio",
+      "tags": "dialogue tests curriculum",
+      "url": "https://raw.githubusercontent.com/Hydra-Ai-tr/kor-studio/main/plugins/weak_spots.py"
+    },
+    {
+      "id": "lr-doctor",
+      "type": "skill",
+      "name": "Learning-rate doctor",
+      "name.tr": "Öğrenme hızı doktoru",
+      "name.ru": "Доктор скорости обучения",
+      "description": "Lowers the learning rate on plateaus and rolls back to the best weights when the loss jumps.",
+      "description.tr": "Kayıp yerinde sayınca öğrenme hızını düşürür, kayıp fırlayınca en iyi ağırlıklara döner.",
+      "description.ru": "Снижает скорость на плато и откатывает к лучшим весам при скачке ошибки.",
+      "author": "Kor Studio",
+      "tags": "learning-rate schedule stability",
+      "url": "https://raw.githubusercontent.com/Hydra-Ai-tr/kor-studio/main/plugins/lr_doctor.py"
+    },
+    {
+      "id": "sample-watch",
+      "type": "skill",
+      "name": "Sample watcher",
+      "name.tr": "Örnek izleyici",
+      "name.ru": "Наблюдатель за текстом",
+      "description": "Logs text samples during training and charts how varied they are.",
+      "description.tr": "Eğitim sırasında metin örneklerini günlüğe yazar ve ne kadar çeşitli olduklarını çizer.",
+      "description.ru": "Пишет образцы текста во время обучения и рисует график их разнообразия.",
+      "author": "Kor Studio",
+      "tags": "samples monitoring",
+      "url": "https://raw.githubusercontent.com/Hydra-Ai-tr/kor-studio/main/plugins/sample_watch.py"
+    },
+    {
+      "id": "math-dialogs",
+      "type": "tool",
+      "name": "Math dialogue generator",
+      "name.tr": "Matematik diyaloğu üret",
+      "name.ru": "Генератор диалогов по арифметике",
+      "description": "Writes arithmetic dialogue data and held-out question tests.",
+      "description.tr": "Aritmetik diyalog verisi ve veride olmayan soru testleri yazar.",
+      "description.ru": "Создаёт диалоги по арифметике и отложенные проверочные вопросы.",
+      "author": "Kor Studio",
+      "tags": "data generator arithmetic",
+      "url": "https://raw.githubusercontent.com/Hydra-Ai-tr/kor-studio/main/plugins/math_dialogs.py"
+    },
+    {
+      "id": "clean-text",
+      "type": "tool",
+      "name": "Clean text",
+      "name.tr": "Metni temizle",
+      "name.ru": "Очистка текста",
+      "description": "Tidies a text dataset: invisible characters, odd spaces, typographic quotes; --dedupe drops repeated pairs.",
+      "description.tr": "Metin verisini toparlar: görünmez karakterler, garip boşluklar, tipografik tırnaklar; --dedupe tekrarlanan çiftleri atar.",
+      "description.ru": "Приводит текст в порядок: невидимые символы, лишние пробелы, типографские кавычки; --dedupe убирает повторы.",
+      "author": "Kor Studio",
+      "tags": "data cleaning",
+      "url": "https://raw.githubusercontent.com/Hydra-Ai-tr/kor-studio/main/plugins/clean_text.py"
+    },
+    {
+      "id": "quiz",
+      "type": "tool",
+      "name": "Quiz the model",
+      "name.tr": "Modeli sına",
+      "name.ru": "Экзамен для модели",
+      "description": "Asks the current model the question tests and writes a report.",
+      "description.tr": "Mevcut modele soru testlerini sorar ve bir rapor yazar.",
+      "description.ru": "Задаёт модели проверочные вопросы и пишет отчёт.",
+      "author": "Kor Studio",
+      "tags": "evaluation tests",
+      "url": "https://raw.githubusercontent.com/Hydra-Ai-tr/kor-studio/main/plugins/quiz.py"
+    }
+  ]
+}

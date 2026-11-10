@@ -13,6 +13,11 @@ void shutdown();   // stops training and saves settings
 void set_page(int page);
 bool load_data(const char* utf8_path);
 void start_training();
-void set_train_tab(int tab);  // 0 chart, 1 log, 2 question tests
+void set_train_tab(int tab);  // 0 chart, 1 log, 2 question tests, 3 skills
+// Scripted runs: use exactly these skills (plugin file names) and leave the settings file alone.
+void use_skills_for_session(const char* const* files, int n);
+void keep_settings();
+void scroll_to_end();          // scrolls the page to the bottom once it is drawn
+void load_community_list();    // fetches the community plugin list once Python is found
 
 }  // namespace app

@@ -3,12 +3,14 @@
 #include "../core/kernels.h"
 #include "../core/parallel.h"
 #include "../core/sysinfo.h"
+#include "../skills/skill.h"
 
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -21,6 +23,9 @@
 #endif
 #include <windows.h>
 #include <shellapi.h>
+#define PATH_SEP ";"
+#else
+#define PATH_SEP ":"
 #endif
 
 using namespace kor;
@@ -64,6 +69,66 @@ static bool has_flag(const std::vector<std::string>& a, const char* name) {
     for (auto& s : a)
         if (s == name) return true;
     return false;
+}
+// Every value given after a flag that may be repeated.
+static std::vector<std::string> flags(const std::vector<std::string>& a, const char* name) {
+    std::vector<std::string> out;
+    for (size_t i = 0; i + 1 < a.size(); ++i)
+        if (a[i] == name) out.push_back(a[++i]);
+    return out;
+}
+
+// Python skills given with --skill "file.py [args]".
+static bool add_skills(const std::vector<std::string>& a, const std::string& data_path, const Dataset& data,
+                       TrainConfig& cfg) {
+    std::vector<std::string> specs = flags(a, "--skill");
+    if (specs.empty()) return true;
+    std::string version;
+    std::vector<std::string> python = has_flag(a, "--python") ? split_command(flag(a, "--python")) : find_python3(&version);
+    if (python.empty()) {
+        std::printf("error: Python 3 was not found (install it or pass --python <command>)\n");
+        return false;
+    }
+    namespace fs = std::filesystem;
+    fs::path dir = upath(program_dir());
+    std::string lib = (dir / "python").u8string();
+    if (!fs::exists(dir / "python" / "kor")) {
+        fs::path src = dir.parent_path().parent_path() / "python";  // running from build/bin in the source tree
+        if (fs::exists(src / "kor")) lib = src.u8string();
+    }
+    std::string pypath = lib;
+    if (const char* old = std::getenv("PYTHONPATH"))
+        if (*old) pypath += std::string(PATH_SEP) + old;
+#if defined(_WIN32)
+    std::string cli = (dir / "kor-cli.exe").u8string();
+#else
+    std::string cli = (dir / "kor-cli").u8string();
+#endif
+    std::string qt, at;
+    data.dialogue_tags(qt, at);
+    for (auto& s : specs) {
+        std::vector<std::string> parts = split_command(s);
+        if (parts.empty()) continue;
+        if (!fs::exists(upath(parts[0]))) {
+            std::printf("error: skill not found: %s\n", parts[0].c_str());
+            return false;
+        }
+        SkillSpec sp;
+        sp.script = parts[0];
+        sp.name = upath(parts[0]).stem().u8string();
+        sp.args.assign(parts.begin() + 1, parts.end());
+        sp.python = python;
+        sp.lang = flag(a, "--lang", "en");
+        sp.q_tag = qt;
+        sp.a_tag = at;
+        sp.env = {{"PYTHONPATH", pypath}, {"KOR_PYLIB", lib}, {"KOR_CLI", cli}, {"KOR_DATA", data_path}};
+        cfg.hooks.push_back(std::make_shared<PythonSkill>(sp));
+        std::string shown = sp.name;
+        for (auto& x : sp.args) shown += " " + x;
+        std::printf("skill: %s\n", shown.c_str());
+    }
+    if (!version.empty()) std::printf("python: %s\n", version.c_str());
+    return true;
 }
 
 static void print_sysinfo() {
@@ -234,6 +299,7 @@ static int train(const std::vector<std::string>& a) {
         plan.cfg.probe_target = std::max(0.f, std::min(1.f, target));
     }
     plan.cfg.patience = patience;
+    if (!add_skills(a, path, data, plan.cfg)) return 1;
     std::ofstream log;
     if (!log_path.empty()) {
         log.open(upath(log_path), std::ios::binary);
@@ -271,6 +337,22 @@ static int train(const std::vector<std::string>& a) {
                 say("%s at step %d after %.1fs\n", e.kind == EV_DONE ? "finished" : "stopped", e.step, e.time);
             } else if (e.kind == EV_ERROR) {
                 say("error: %s\n", e.text.c_str());
+            } else if (e.kind == EV_HOOK_LOG) {
+                static const char* const mark[] = {"", "+ ", "! ", "x ", ""};
+                say("[%s] %s%s\n", e.source.c_str(), mark[e.n1 >= 0 && e.n1 < 5 ? e.n1 : 0], e.text.c_str());
+            } else if (e.kind == EV_HOOK_METRIC) {
+                say("[%s] step %d  %s = %g\n", e.source.c_str(), e.step, e.text.c_str(), e.loss);
+            } else if (e.kind == EV_HOOK_STOP) {
+                say("[%s] step %d  stop: %s\n", e.source.c_str(), e.step, e.text.empty() ? "-" : e.text.c_str());
+            } else if (e.kind == EV_HOOK_LR) {
+                if (e.n1) say("[%s] step %d  fixed learning rate %g\n", e.source.c_str(), e.step, e.loss);
+                else say("[%s] step %d  learning rate x%.3g\n", e.source.c_str(), e.step, e.loss);
+            } else if (e.kind == EV_HOOK_DATA) {
+                if (e.n1) say("[%s] step %d  +%lld characters of training text (%lld added in total)\n", e.source.c_str(), e.step, e.n1, e.n2);
+                else say("[%s] step %d  added training text cleared\n", e.source.c_str(), e.step);
+            } else if (e.kind == EV_HOOK_BEST) {
+                if (e.n1) say("[%s] step %d  kept these weights as the best\n", e.source.c_str(), e.step);
+                else say("[%s] step %d  went back to the best weights (step %lld)\n", e.source.c_str(), e.step, e.n2);
             }
         }
         std::fflush(stdout);
@@ -377,6 +459,7 @@ int main(int argc, char** argv) {
                 "  kor-cli demo-data <out.csv>          write a demo classification dataset\n"
                 "  kor-cli train <data> [--steps N] [--patience N] [--tests tests.txt] [--target 0..1]\n"
                 "                [--log train.log] [--out model.kor] [--text|--table]\n"
+                "                [--skill \"skill.py [args]\"]... [--python <command>] [--lang en|tr|ru]\n"
                 "  kor-cli generate <model.kor> [prompt] [--len N] [--temp T] [--line]\n"
                 "  kor-cli test <model.kor> <tests.txt> [--data <text>] [--tsv]\n"
                 "\n"

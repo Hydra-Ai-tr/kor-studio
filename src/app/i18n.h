@@ -189,7 +189,44 @@
     X(Fail, "fail", "kaldı", "нет") \
     X(NoTests, "No tests yet. Add lines such as:  What is the capital of Italy? => Rome", "Henüz test yok. Şöyle satırlar ekle:  İtalya'nın başkenti neresi? => Roma", "Тестов пока нет. Добавьте строки вида:  Столица Италии? => Рим") \
     X(NeedTextModel, "Build or train a text model to run the tests.", "Testleri çalıştırmak için bir metin modeli oluştur veya eğit.", "Создайте или обучите текстовую модель, чтобы запустить тесты.") \
-    X(PluginsHelp, "Plugins are Python scripts that work together with Kor Studio. They can prepare or generate training data, write question tests and quiz a trained model. The format is described in docs/plugins.md.", "Eklentiler, Kor Studio ile birlikte çalışan Python betikleridir. Eğitim verisi hazırlayabilir veya üretebilir, soru testleri yazabilir ve eğitilmiş bir modeli sınayabilirler. Biçimi docs/plugins.md dosyasında anlatılır.", "Плагины — это скрипты на Python, работающие вместе с Kor Studio. Они могут готовить или создавать данные, писать проверочные вопросы и проверять обученную модель. Формат описан в docs/plugins.md.") \
+    X(PluginsHelp, "Python plugins extend Kor Studio: skills steer training while it runs, tools prepare data and tests. Write your own with the kor library and share them with a link (docs/plugins.md).", "Python eklentileri Kor Studio'yu genişletir: beceriler eğitimi çalışırken yönlendirir, araçlar veri ve test hazırlar. kor kütüphanesiyle kendi eklentini yaz ve bir bağlantıyla paylaş (docs/plugins.md).", "Плагины на Python расширяют Kor Studio: навыки управляют обучением на ходу, инструменты готовят данные и тесты. Пишите свои с библиотекой kor и делитесь ссылкой (docs/plugins.md).") \
+    X(SkillsTitle, "Training skills", "Eğitim becerileri", "Навыки обучения") \
+    X(SkillsHelp, "Skills run alongside training and steer it live: they can change the learning rate, add training examples, stop early and keep the best weights. Turned-on skills join every training run.", "Beceriler eğitimle birlikte çalışır ve onu canlı yönlendirir: öğrenme hızını değiştirebilir, eğitim örneği ekleyebilir, erken durdurabilir ve en iyi ağırlıkları tutabilirler. Açık beceriler her eğitime katılır.", "Навыки работают вместе с обучением и управляют им на ходу: меняют скорость обучения, добавляют примеры, останавливают раньше и сохраняют лучшие веса. Включённые навыки участвуют в каждом обучении.") \
+    X(ToolsTitle, "Tools", "Araçlar", "Инструменты") \
+    X(ToolsHelp, "Tools run once when you press Run: they prepare data, write question tests or quiz the model.", "Araçlar Çalıştır'a basınca bir kez çalışır: veri hazırlar, soru testi yazar veya modeli sınar.", "Инструменты запускаются по кнопке «Запустить»: готовят данные, пишут проверочные вопросы или проверяют модель.") \
+    X(SkillOn, "On", "Açık", "Вкл.") \
+    X(SkillOff, "Off", "Kapalı", "Выкл.") \
+    X(NoSkills, "No skills yet. Install one below or create your own.", "Henüz beceri yok. Aşağıdan birini kur ya da kendin oluştur.", "Навыков пока нет. Установите ниже или создайте свой.") \
+    X(NewSkill, "New skill", "Yeni beceri", "Новый навык") \
+    X(NewSkillDone, "Created %s. Open it in your editor, then press Refresh list.", "%s oluşturuldu. Düzenleyicinde aç, sonra Listeyi yenile'ye bas.", "Создан %s. Откройте его в редакторе и нажмите «Обновить список».") \
+    X(ShareTitle, "Get and share plugins", "Eklenti edin ve paylaş", "Получить и поделиться") \
+    X(ShareHelp, "Paste a link to a .py file, a GitHub page, a gist or a .zip, or pick one from the community list. To share yours, put the file online and send the link.", "Bir .py dosyasının, GitHub sayfasının, gist'in veya .zip'in bağlantısını yapıştır ya da topluluk listesinden seç. Kendi eklentini paylaşmak için dosyayı internete koy ve bağlantıyı gönder.", "Вставьте ссылку на файл .py, страницу GitHub, gist или .zip либо выберите из каталога сообщества. Чтобы поделиться своим, выложите файл в сеть и отправьте ссылку.") \
+    X(InstallHint, "Link, file path or community id", "Bağlantı, dosya yolu veya topluluk kimliği", "Ссылка, путь к файлу или id из каталога") \
+    X(Install, "Install", "Kur", "Установить") \
+    X(Installed, "installed", "kurulu", "установлен") \
+    X(TrustWarn, "Plugins are Python programs that run on your computer. Install only plugins you trust.", "Eklentiler bilgisayarında çalışan Python programlarıdır. Yalnızca güvendiğin eklentileri kur.", "Плагины — это программы на Python, которые выполняются на вашем компьютере. Устанавливайте только те, которым доверяете.") \
+    X(Community, "Community list", "Topluluk listesi", "Каталог сообщества") \
+    X(CommunityLoading, "Loading the community list...", "Topluluk listesi yükleniyor...", "Загрузка каталога...") \
+    X(CommunityEmpty, "The community list could not be loaded.", "Topluluk listesi yüklenemedi.", "Не удалось загрузить каталог.") \
+    X(InstallRunning, "Installing...", "Kuruluyor...", "Установка...") \
+    X(InstallDone, "Installed - the plugin is in your list now.", "Kuruldu - eklenti artık listende.", "Установлено - плагин уже в списке.") \
+    X(InstallFailed, "Installation failed, see the output below.", "Kurulum başarısız, aşağıdaki çıktıya bak.", "Установка не удалась, см. вывод ниже.") \
+    X(NeedsPackages, "Needs: %s", "Gerekli: %s", "Требуется: %s") \
+    X(SkillsActive, "Skills", "Beceriler", "Навыки") \
+    X(SkillsNoPython, "Skills were skipped: Python 3 was not found.", "Beceriler atlandı: Python 3 bulunamadı.", "Навыки пропущены: Python 3 не найден.") \
+    X(SkillsManage, "Manage", "Yönet", "Настроить") \
+    X(AddedText, "+%s characters added", "+%s karakter eklendi", "добавлено символов: %s") \
+    X(LrFactor, "learning rate x%.2f", "öğrenme hızı x%.2f", "скорость x%.2f") \
+    X(LrFixed, "learning rate %g", "öğrenme hızı %g", "скорость %g") \
+    X(TabSkills, "Skills", "Beceriler", "Навыки") \
+    X(SkillMetricsEmpty, "The skills have not reported any values yet.", "Beceriler henüz bir değer bildirmedi.", "Навыки ещё не сообщили значений.") \
+    X(LogHookLr, "learning rate x%.3g", "öğrenme hızı x%.3g", "скорость обучения x%.3g") \
+    X(LogHookLrFixed, "fixed learning rate %g", "sabit öğrenme hızı %g", "фиксированная скорость обучения %g") \
+    X(LogHookData, "+%lld characters of training text (%lld added in total)", "+%lld karakter eğitim metni (toplam %lld eklendi)", "+%lld символов обучающего текста (всего добавлено %lld)") \
+    X(LogHookCleared, "added training text cleared", "eklenen eğitim metni temizlendi", "добавленный текст очищен") \
+    X(LogHookSaved, "kept these weights as the best", "bu ağırlıklar en iyi olarak saklandı", "эти веса сохранены как лучшие") \
+    X(LogHookRestored, "went back to the best weights (step %lld)", "en iyi ağırlıklara dönüldü (adım %lld)", "возврат к лучшим весам (шаг %lld)") \
+    X(LogHookStop, "stopping training: %s", "eğitim durduruluyor: %s", "обучение останавливается: %s") \
     X(PythonChecking, "Looking for Python...", "Python aranıyor...", "Поиск Python...") \
     X(PythonFound, "%s is ready", "%s hazır", "%s готов") \
     X(PythonMissing, "Python 3 was not found. Install it from python.org (tick \"Add python.exe to PATH\"), then press Check again.", "Python 3 bulunamadı. python.org adresinden kur (\"Add python.exe to PATH\" kutusunu işaretle), sonra Tekrar dene'ye bas.", "Python 3 не найден. Установите его с python.org (отметьте \"Add python.exe to PATH\") и нажмите «Проверить снова».") \

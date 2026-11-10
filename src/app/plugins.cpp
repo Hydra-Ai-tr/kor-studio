@@ -50,6 +50,11 @@ static bool read_header(const std::filesystem::path& file, Plugin& p) {
             if (key == std::string("description") + suffix[l]) p.desc[l] = value;
         }
         if (key == "args") p.args = value;
+        else if (key == "type") p.skill = value == "skill" || value == "Skill";
+        else if (key == "version") p.version = value;
+        else if (key == "author") p.author = value;
+        else if (key == "requires") p.packages = value;
+        else if (key == "url") p.url = value;
     }
     if (!marked) return false;
     if (p.name[0].empty()) p.name[0] = file.stem().u8string();

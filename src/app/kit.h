@@ -123,6 +123,9 @@ void progress_bar(float frac, float height, const ImVec4& c);
 bool slider_int(const char* id, int* v, int lo, int hi, const char* fmt = "%d");
 bool slider_float(const char* id, float* v, float lo, float hi, const char* fmt = "%.2f");
 bool checkbox(const char* label, bool* v);
+// On/off switch without a label.
+bool toggle(const char* id, bool* v);
+float toggle_width();
 // BeginCombo with a thin chevron instead of the arrow button; pair with ImGui::EndCombo.
 bool begin_combo(const char* id, const char* preview);
 bool combo(const char* id, int* current, const char* const* items, int n);

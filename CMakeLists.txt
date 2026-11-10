@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(KorStudio VERSION 0.3.0 LANGUAGES C CXX)
+project(KorStudio VERSION 0.4.0 LANGUAGES C CXX)
 
 option(KOR_BUILD_GUI "Build the Kor Studio desktop application" ON)
 
@@ -53,8 +53,19 @@ endif()
 find_package(Threads REQUIRED)
 target_link_libraries(korcore PUBLIC Threads::Threads)
 
+# Python training skills: child processes and the JSON line protocol.
+add_library(korskills STATIC
+  src/skills/json.cpp
+  src/skills/process.cpp
+  src/skills/skill.cpp)
+target_link_libraries(korskills PUBLIC korcore)
+
 add_executable(kor-cli src/cli/main.cpp)
-target_link_libraries(kor-cli PRIVATE korcore)
+target_link_libraries(kor-cli PRIVATE korskills)
+# The `kor` Python library sits next to the executables (skills import it).
+add_custom_command(TARGET kor-cli POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+          ${CMAKE_SOURCE_DIR}/python/kor $<TARGET_FILE_DIR:kor-cli>/python/kor)
 if(WIN32)
   target_link_libraries(kor-cli PRIVATE shell32)
 endif()
@@ -109,7 +120,7 @@ if(KOR_BUILD_GUI)
     list(APPEND KOR_APP_SOURCES assets/kor.rc)
   endif()
   add_executable(kor-studio WIN32 ${KOR_APP_SOURCES})
-  target_link_libraries(kor-studio PRIVATE korcore imgui)
+  target_link_libraries(kor-studio PRIVATE korskills imgui)
   if(WIN32)
     target_link_libraries(kor-studio PRIVATE comdlg32)
   endif()
@@ -126,5 +137,7 @@ if(KOR_BUILD_GUI)
     COMMAND ${CMAKE_COMMAND} -E copy_directory
             ${CMAKE_SOURCE_DIR}/examples $<TARGET_FILE_DIR:kor-studio>/examples
     COMMAND ${CMAKE_COMMAND} -E copy_directory
-            ${CMAKE_SOURCE_DIR}/plugins $<TARGET_FILE_DIR:kor-studio>/plugins)
+            ${CMAKE_SOURCE_DIR}/plugins $<TARGET_FILE_DIR:kor-studio>/plugins
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_SOURCE_DIR}/community $<TARGET_FILE_DIR:kor-studio>/community)
 endif()

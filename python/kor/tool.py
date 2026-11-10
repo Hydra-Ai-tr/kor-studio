@@ -1,8 +1,8 @@
-"""Helpers for Kor Studio plugins (see docs/plugins.md).
+"""Helpers for tool plugins: scripts you run from the Plugins page.
 
-Kor Studio runs a plugin with these environment variables:
+Kor Studio runs a tool with these environment variables:
 
-    KOR_OUT    folder for the plugin's results (a new one for every run)
+    KOR_OUT    folder for the tool's results (a new one for every run)
     KOR_DATA   path of the loaded dataset, or empty
     KOR_MODEL  a copy of the current model (.kor), or empty
     KOR_TESTS  the current question tests, one "question => answer" per line
@@ -14,11 +14,12 @@ After a successful run (exit code 0) Kor Studio picks up:
     KOR_OUT/data.txt, data.csv or data.tsv   loaded as the new dataset
     KOR_OUT/tests.txt                        becomes the question tests
 
-A plugin can also be run by hand; then set the variables yourself (or pass
+A tool can also be run by hand; then set the variables yourself (or pass
 paths to the functions below) and results go to the current folder.
 """
 
 import os
+import shutil
 import subprocess
 from collections import namedtuple
 
@@ -62,7 +63,7 @@ def read_data(path=None):
 
 
 def write_data(text, ext="txt"):
-    """Writes a dataset that Kor Studio loads when the plugin finishes."""
+    """Writes a dataset that Kor Studio loads when the tool finishes."""
     path = os.path.join(out_dir(), "data." + ext)
     with open(path, "w", encoding="utf-8", newline="\n") as f:
         f.write(text)
@@ -96,18 +97,30 @@ def read_tests(path=None):
 
 
 def write_tests(pairs):
-    """Writes question tests that Kor Studio uses when the plugin finishes."""
+    """Writes question tests that Kor Studio uses when the tool finishes."""
     path = os.path.join(out_dir(), "tests.txt")
     with open(path, "w", encoding="utf-8", newline="\n") as f:
         f.write(format_tests(pairs))
     return path
 
 
+def cli_path():
+    """kor-cli: $KOR_CLI, next to this library's folder, or on PATH."""
+    exe = _env("KOR_CLI")
+    if exe:
+        return exe
+    name = "kor-cli.exe" if os.name == "nt" else "kor-cli"
+    here = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if os.path.isfile(os.path.join(here, name)):
+        return os.path.join(here, name)
+    return shutil.which("kor-cli")
+
+
 def cli(*args):
     """Runs kor-cli and returns its output; raises RuntimeError on failure."""
-    exe = _env("KOR_CLI")
+    exe = cli_path()
     if not exe:
-        raise RuntimeError("kor-cli was not found (KOR_CLI is empty)")
+        raise RuntimeError("kor-cli was not found (set KOR_CLI)")
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     r = subprocess.run([exe, *map(str, args)], capture_output=True, text=True,
                        encoding="utf-8", errors="replace", creationflags=flags)

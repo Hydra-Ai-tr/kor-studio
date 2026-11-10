@@ -1,8 +1,8 @@
 // Kor Studio - Python plugins: discovery, Python detection and a background runner.
 //
 // A plugin is a .py file whose first comment lines start with "# kor-plugin",
-// followed by "# key: value" lines (name, description, args; name.tr etc. for
-// translations). See docs/plugins.md.
+// followed by "# key: value" lines (name, description, args, type, version,
+// author, requires, url; name.tr etc. for translations). See docs/plugins.md.
 #pragma once
 #include <atomic>
 #include <mutex>
@@ -17,6 +17,8 @@ struct Plugin {
     std::string path, file;     // UTF-8
     std::string name[3], desc[3];  // per Lang value; English is the fallback
     std::string args;           // default arguments
+    bool skill = false;         // "# type: skill": runs during training instead of on demand
+    std::string version, author, packages, url;  // packages: the "requires" line
     const std::string& title(int lang) const;
     const std::string& description(int lang) const;
 };

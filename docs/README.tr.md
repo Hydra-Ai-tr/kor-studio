@@ -25,8 +25,14 @@ işlemcide eğitilir.
   hiç görmediği sorularla sınanır: ezberi değil gerçekten öğrenip öğrenmediğini ölçer. Model
   eğitim sırasında sınanır, en çok soruyu bilen ağırlıklar korunur ve istenirse bütün cevaplar
   doğru olunca eğitim kendiliğinden durur.
-- **Eklentiler** – veri hazırlayan veya üreten, test yazan ve modeli sınayan Python betikleri
-  ([docs/plugins.md](plugins.md)). Üç eklenti hazır gelir.
+- **Python eğitim becerileri** – eğitimle birlikte çalışıp onu canlı yönlendiren eklentiler:
+  öğrenme hızını değiştirir, modelin zayıf olduğu yerlere eğitim örneği ekler, en iyi ağırlıklara
+  döner, erken durdurur ve kendi grafiklerini çizer. `kor` kütüphanesiyle birkaç satırda yazılır.
+  Örnek diyalog verisinde hazır `pattern_tutor` ve `weak_spots` becerileri, modelin hiç görmediği
+  12 sorudan doğru cevapladığı sayıyı 0'dan 3'e çıkarır.
+- **Araçlar ve paylaşım** – veri hazırlayan, test yazan ve modeli sınayan Python araçları. Eklentiler
+  bir bağlantıyla (GitHub, gist, .zip) ya da topluluk listesinden uygulama içinde veya
+  `python -m kor install` ile kurulur ([docs/plugins.md](plugins.md)).
 - **Deneme** – eğitim sürerken bile metin üret veya tahmin yap.
 - **Kaydet / Yükle** – modeller açık [`.kor` biçiminde](kor-format.md) saklanır.
 - **Üç dil** – Türkçe, İngilizce ve Rusça; çalışırken değiştirilebilir.
@@ -43,7 +49,7 @@ işlemcide eğitilir.
 
 ### Dürüstçe: ne beklemeli
 
-Kor Studio v0.3 eğitimi **işlemcide** yapar. Küçük modeller içindir: tablo ağları ve birkaç milyon
+Kor Studio v0.4 eğitimi **işlemcide** yapar. Küçük modeller içindir: tablo ağları ve birkaç milyon
 parametreye kadar karakter düzeyinde transformer'lar; bunlar bir dizüstünde saniyeler ya da
 dakikalar içinde eğitilir. ChatGPT boyutunda bir modeli dizüstünde eğitmez; bunu hiçbir program
 yapamaz. Ekran kartı desteği yol haritasındadır.
