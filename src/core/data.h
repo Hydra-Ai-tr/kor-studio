@@ -46,6 +46,11 @@ struct Dataset {
     std::vector<std::pair<std::string, std::string>> dialogue_pairs(int n) const;
     // dialogue_pairs() turned into question tests.
     std::vector<Probe> auto_probes(int n) const;
+    // Removes every line that asks one of the test questions (with dialogue data: the
+    // question turn and the answer after it) from the tokens the model trains and
+    // validates on, so the tests measure answers to questions it has never seen.
+    // raw is left unchanged. Returns how many question lines were removed.
+    int hold_out(const std::vector<Probe>& tests);
 
     size_t train_items() const;
     size_t val_items() const;

@@ -10,7 +10,7 @@ işlemcide eğitilir.
 
 *Kor*, ateşin közüdür: bir ateşi başlatmaya yeten küçük bir parıltı.
 
-![Eğitim ekranı](screenshot-train.png)
+![Eğitim ekranı](screenshots/demo.gif)
 
 ## Neler yapar
 
@@ -21,8 +21,10 @@ işlemcide eğitilir.
 - **Eğitim** – canlı kayıp eğrileri, doğrulama, doğruluk, hız, kalan süre, duraklat/sürdür/durdur,
   erken durdurma ve dosyaya da kaydedilen bir eğitim logu.
 - **Soru testleri** – önce eğit, sonra sor: `soru => beklenen cevap` satırları yaz (diyalog
-  verisinde otomatik doldurulur). Model eğitim sırasında sınanır, en çok soruyu bilen ağırlıklar
-  korunur ve istenirse bütün cevaplar doğru olunca eğitim kendiliğinden durur.
+  verisinde otomatik doldurulur). Test soruları eğitim verisinden çıkarılır, yani model hep
+  hiç görmediği sorularla sınanır: ezberi değil gerçekten öğrenip öğrenmediğini ölçer. Model
+  eğitim sırasında sınanır, en çok soruyu bilen ağırlıklar korunur ve istenirse bütün cevaplar
+  doğru olunca eğitim kendiliğinden durur.
 - **Eklentiler** – veri hazırlayan veya üreten, test yazan ve modeli sınayan Python betikleri
   ([docs/plugins.md](plugins.md)). Üç eklenti hazır gelir.
 - **Deneme** – eğitim sürerken bile metin üret veya tahmin yap.

@@ -132,7 +132,8 @@ void Trainer::run() {
 
     // Early stopping follows the validation loss. The best-weights snapshot
     // follows the question tests when they run during training (most passed
-    // wins; a later tie wins), otherwise the validation loss.
+    // wins; a later tie wins), otherwise - or while no test has passed yet -
+    // the validation loss.
     float best_val = -1;
     int best_step = 0, stale = 0;
     bool use_probes = text && !cfg.probes.empty(), target_hit = false;
@@ -225,7 +226,7 @@ void Trainer::run() {
                         best_val = val_loss;
                         best_step = step;
                         stale = 0;
-                        if (cfg.keep_best && !probe_best) snapshot(step);
+                        if (cfg.keep_best && (!probe_best || snap_pass < 1)) snapshot(step);
                     } else if (cfg.patience > 0 && ++stale >= cfg.patience) {
                         early = true;
                     }
@@ -300,6 +301,12 @@ void Trainer::run() {
                 e.step = snap_step;
                 e.n1 = snap_pass;
                 e.n2 = (long long)cfg.probes.size();
+                emit(e);
+                run_probes(last_step);
+            } else if (cfg.keep_best && !snap_w.empty() && snap_pass < 1 && pass == 0 && snap_step != last_step) {
+                restore();  // no test ever passed: fall back to the lowest validation loss
+                e.step = snap_step;
+                e.val_loss = best_val;
                 emit(e);
                 run_probes(last_step);
             }

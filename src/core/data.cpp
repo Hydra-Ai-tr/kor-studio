@@ -47,15 +47,20 @@ bool Dataset::load_text(const std::string& p, std::string* err) {
     return true;
 }
 
-void Dataset::encode_with(const std::vector<std::string>& fixed) {
+static std::vector<int> encode(const std::string& text, const std::vector<std::string>& vocab) {
     std::unordered_map<std::string, int> map;
-    for (size_t i = 0; i < fixed.size(); ++i) map[fixed[i]] = (int)i;
-    vocab = fixed;
-    ids.clear();
-    for (auto& c : utf8_chars(raw)) {
+    for (size_t i = 0; i < vocab.size(); ++i) map[vocab[i]] = (int)i;
+    std::vector<int> ids;
+    for (auto& c : utf8_chars(text)) {
         auto it = map.find(c);
         if (it != map.end()) ids.push_back(it->second);
     }
+    return ids;
+}
+
+void Dataset::encode_with(const std::vector<std::string>& fixed) {
+    vocab = fixed;
+    ids = encode(raw, vocab);
     split_text();
 }
 
@@ -126,6 +131,40 @@ std::vector<Probe> Dataset::auto_probes(int n) const {
 static std::string trim(const std::string& s) {
     size_t a = s.find_first_not_of(" \t\r\n"), b = s.find_last_not_of(" \t\r\n");
     return a == std::string::npos ? "" : s.substr(a, b - a + 1);
+}
+
+int Dataset::hold_out(const std::vector<Probe>& tests) {
+    if (kind != DATA_TEXT || tests.empty()) return 0;
+    std::string qt, at;
+    bool dialogue = dialogue_tags(qt, at);
+    std::set<std::string> questions;
+    for (auto& p : tests)
+        if (!p.question.empty()) questions.insert(p.question);
+    std::vector<std::string> lines = split_lines(raw);
+    std::string kept;
+    int removed = 0;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        bool drop = false;
+        if (dialogue) {
+            drop = lines[i].compare(0, qt.size(), qt) == 0 && questions.count(trim(lines[i].substr(qt.size())));
+        } else {
+            std::string l = trim(lines[i]);
+            for (auto& q : questions)
+                if (l.compare(0, q.size(), q) == 0) { drop = true; break; }
+        }
+        if (drop) {
+            ++removed;
+            if (dialogue && i + 1 < lines.size() && lines[i + 1].compare(0, at.size(), at) == 0) ++i;
+            continue;
+        }
+        kept += lines[i];
+        kept += '\n';
+    }
+    if (removed) {
+        ids = encode(kept, vocab);
+        split_text();
+    }
+    return removed;
 }
 
 Probe make_probe(const std::string& question, const std::string& expected, const std::string& q_tag, const std::string& a_tag) {

@@ -41,6 +41,7 @@ struct State {
 
     SysInfo sys;
     Dataset data;
+    Dataset train_data;  // data without the test questions; read by the trainer thread
     std::shared_ptr<Model> model;
     Trainer trainer;
     ModelSpec spec;
@@ -477,8 +478,16 @@ void begin_training() {
     A.cfg.probe_target = A.stop_on_pass ? 1.f : 0.f;
     A.run_tests = A.cfg.probes;
     A.results.clear();
+    A.train_data = A.data;
+    int held = A.train_data.hold_out(A.cfg.probes);
     start_log();
-    if (!A.trainer.start(A.model, &A.data, A.cfg)) {
+    if (held) log_fmt(State::T_MUTED, S::LogHeldOut, held);
+    if (A.train_data.kind == DATA_TEXT && A.train_data.n_train < (size_t)A.model->spec.ctx + 2) {
+        log_fmt(State::T_BAD, S::LogError, tr(S::HeldOutTooMuch));
+        A.log_file.close();
+        return;
+    }
+    if (!A.trainer.start(A.model, &A.train_data, A.cfg)) {
         log_fmt(State::T_BAD, S::LogError, A.trainer.stats().error.c_str());
         A.log_file.close();
     } else {

@@ -8,6 +8,7 @@
 
 #include <GLFW/glfw3.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -71,10 +72,12 @@ static bool save_bmp(const char* path, int w, int h) {
 int main(int argc, char** argv) {
     // Optional scripting flags, mainly for producing screenshots:
     //   --lang en|tr|ru  --page N  --tab N  --data <file>  --train  --shot <out.bmp>  --delay <seconds>
-    std::string shot, data;
-    int page = -1, lang = -1, tab = -1;
+    //   --record <folder> --every <seconds>   saves frame_0000.bmp, ... until --delay
+    //   --size <width>x<height>
+    std::string shot, data, record;
+    int page = -1, lang = -1, tab = -1, width = 1320, height = 820;
     bool train = false;
-    double delay = 1.0;
+    double delay = 1.0, every = 0.5;
     for (int i = 1; i < argc; ++i) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
         if (!std::strcmp(argv[i], "--shot")) shot = next();
@@ -82,6 +85,9 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--page")) page = std::atoi(next());
         else if (!std::strcmp(argv[i], "--tab")) tab = std::atoi(next());
         else if (!std::strcmp(argv[i], "--delay")) delay = std::atof(next());
+        else if (!std::strcmp(argv[i], "--record")) record = next();
+        else if (!std::strcmp(argv[i], "--every")) every = std::max(0.05, std::atof(next()));
+        else if (!std::strcmp(argv[i], "--size")) std::sscanf(next(), "%dx%d", &width, &height);
         else if (!std::strcmp(argv[i], "--train")) train = true;
         else if (!std::strcmp(argv[i], "--lang")) {
             std::string l = next();
@@ -96,7 +102,7 @@ int main(int argc, char** argv) {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
     glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_TRUE);
-    GLFWwindow* window = glfwCreateWindow(1320, 820, "Kor Studio", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(std::max(900, width), std::max(600, height), "Kor Studio", nullptr, nullptr);
     if (!window) {
         std::fprintf(stderr, "Kor Studio: cannot create an OpenGL 3.0 window\n");
         glfwTerminate();
@@ -132,6 +138,7 @@ int main(int argc, char** argv) {
     if (tab >= 0) app::set_train_tab(tab);
 
     auto t0 = std::chrono::steady_clock::now();
+    int frame_no = 0;
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
         if (glfwGetWindowAttrib(window, GLFW_ICONIFIED)) {
@@ -149,8 +156,14 @@ int main(int argc, char** argv) {
         glClearColor(0.086f, 0.074f, 0.066f, 1.f);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-        if (!shot.empty() && std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() > delay) {
-            save_bmp(shot.c_str(), w, h);
+        double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        if (!record.empty() && t >= frame_no * every) {
+            char name[32];
+            std::snprintf(name, sizeof name, "/frame_%04d.bmp", frame_no++);
+            save_bmp((record + name).c_str(), w, h);
+        }
+        if ((!shot.empty() || !record.empty()) && t > delay) {
+            if (!shot.empty()) save_bmp(shot.c_str(), w, h);
             break;
         }
         glfwSwapBuffers(window);

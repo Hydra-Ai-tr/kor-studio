@@ -221,8 +221,14 @@ static int train(const std::vector<std::string>& a) {
             if (!load_tests(tests, &data, plan.cfg.probes)) { std::printf("error: cannot read %s\n", tests.c_str()); return 1; }
             std::printf("%zu question tests from %s\n", plan.cfg.probes.size(), tests.c_str());
         } else {
-            plan.cfg.probes = data.auto_probes(12);  // dialogue data: test with questions from the data
+            plan.cfg.probes = data.auto_probes(12);
             if (!plan.cfg.probes.empty()) std::printf("dialogue data detected: %zu question tests\n", plan.cfg.probes.size());
+        }
+        if (int held = data.hold_out(plan.cfg.probes))
+            std::printf("test questions held out: %d lines removed from the training data\n", held);
+        if (data.n_train < (size_t)plan.spec.ctx + 2) {
+            std::printf("error: too little training text is left after removing the test questions\n");
+            return 1;
         }
         plan.cfg.probe_every = std::max(1, plan.cfg.steps / 10);
         plan.cfg.probe_target = std::max(0.f, std::min(1.f, target));
