@@ -1,13 +1,11 @@
 // Kor Studio - application UI (Dear ImGui).
 #pragma once
 
-struct ImFont;
-
 namespace app {
 
 enum Page { PAGE_HOME = 0, PAGE_DATA, PAGE_MODEL, PAGE_TRAIN, PAGE_TEST, PAGE_FILES, PAGE_PLUGINS, PAGE_COUNT };
 
-void init(float ui_scale, ImFont* title_font);
+void init(float ui_scale);  // loads fonts and the theme; call before the first frame
 void frame();      // draws one frame of the whole interface
 void shutdown();   // stops training and saves settings
 

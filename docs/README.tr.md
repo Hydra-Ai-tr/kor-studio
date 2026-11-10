@@ -43,7 +43,7 @@ işlemcide eğitilir.
 
 ### Dürüstçe: ne beklemeli
 
-Kor Studio v0.2 eğitimi **işlemcide** yapar. Küçük modeller içindir: tablo ağları ve birkaç milyon
+Kor Studio v0.3 eğitimi **işlemcide** yapar. Küçük modeller içindir: tablo ağları ve birkaç milyon
 parametreye kadar karakter düzeyinde transformer'lar; bunlar bir dizüstünde saniyeler ya da
 dakikalar içinde eğitilir. ChatGPT boyutunda bir modeli dizüstünde eğitmez; bunu hiçbir program
 yapamaz. Ekran kartı desteği yol haritasındadır.

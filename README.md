@@ -56,6 +56,8 @@ code a readable reference for how training actually works.
 - **Open model format.** Models are saved as [`.kor` files](docs/kor-format.md), optionally in
   half precision.
 - **Command-line tool.** `kor-cli` trains, tests and samples models for scripting and CI.
+- **Modern desktop interface.** A sidebar workspace with cards, live status and a dark theme,
+  rendered with Dear ImGui and scaled for high-DPI screens.
 - **Three interface languages.** English, Turkish and Russian, switchable at runtime.
 
 ## Screenshots

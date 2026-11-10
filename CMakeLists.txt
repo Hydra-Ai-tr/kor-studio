@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(KorStudio VERSION 0.2.0 LANGUAGES C CXX)
+project(KorStudio VERSION 0.3.0 LANGUAGES C CXX)
 
 option(KOR_BUILD_GUI "Build the Kor Studio desktop application" ON)
 
@@ -101,6 +101,7 @@ if(KOR_BUILD_GUI)
   set(KOR_APP_SOURCES
     src/app/main.cpp
     src/app/ui.cpp
+    src/app/kit.cpp
     src/app/i18n.cpp
     src/app/platform.cpp
     src/app/plugins.cpp)

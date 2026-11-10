@@ -1,5 +1,6 @@
 // Kor Studio - desktop application entry point (GLFW + OpenGL + Dear ImGui).
 #include "i18n.h"
+#include "kit.h"
 #include "ui.h"
 
 #include "imgui.h"
@@ -18,28 +19,6 @@
 #include <string>
 #include <thread>
 #include <vector>
-
-// Latin (incl. Turkish), Cyrillic and common punctuation.
-static const ImWchar kGlyphRanges[] = {0x0020, 0x00FF, 0x0100, 0x017F, 0x0400, 0x052F, 0x2010, 0x205E, 0};
-
-static const char* find_font() {
-    static const char* const candidates[] = {
-        "C:/Windows/Fonts/segoeui.ttf",
-        "C:/Windows/Fonts/arial.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/TTF/DejaVuSans.ttf",
-        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
-        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-        "/System/Library/Fonts/Supplemental/Arial.ttf",
-    };
-    for (const char* c : candidates) {
-        std::error_code ec;
-        if (std::filesystem::exists(c, ec)) return c;
-    }
-    return nullptr;
-}
 
 // Saves the framebuffer as a 24-bit BMP (used by --shot for documentation).
 static bool save_bmp(const char* path, int w, int h) {
@@ -120,17 +99,11 @@ int main(int argc, char** argv) {
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;
-    ImFont* title = nullptr;
-    if (const char* font = find_font()) {
-        io.Fonts->AddFontFromFileTTF(font, 18.f * scale, nullptr, kGlyphRanges);
-        title = io.Fonts->AddFontFromFileTTF(font, 30.f * scale, nullptr, kGlyphRanges);
-    } else {
-        io.Fonts->AddFontDefault();  // ASCII only: Turkish/Russian text needs a system font
-    }
+    if (!shot.empty() || !record.empty()) io.ConfigFlags |= ImGuiConfigFlags_NoMouse;
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 130");
 
-    app::init(scale, title);
+    app::init(scale);
     if (lang >= 0) set_language(lang);
     if (!data.empty()) app::load_data(data.c_str());
     if (train) app::start_training();
@@ -145,15 +118,19 @@ int main(int argc, char** argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             continue;
         }
-        ImGui_ImplOpenGL3_NewFrame();
-        ImGui_ImplGlfw_NewFrame();
-        ImGui::NewFrame();
-        app::frame();
-        ImGui::Render();
+        for (int pass = 0; pass < 2; ++pass) {
+            ImGui_ImplOpenGL3_NewFrame();
+            ImGui_ImplGlfw_NewFrame();
+            if (io.DeltaTime <= 0.f) io.DeltaTime = 1e-4f;
+            ImGui::NewFrame();
+            app::frame();
+            ImGui::Render();
+            if (!kit::take_relayout()) break;
+        }
         int w, h;
         glfwGetFramebufferSize(window, &w, &h);
         glViewport(0, 0, w, h);
-        glClearColor(0.086f, 0.074f, 0.066f, 1.f);
+        glClearColor(kit::C::bg.x, kit::C::bg.y, kit::C::bg.z, 1.f);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();

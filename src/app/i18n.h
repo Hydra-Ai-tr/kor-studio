@@ -25,10 +25,10 @@
     X(Gpu, "Graphics", "Ekran kartı", "Видеокарта") \
     X(GpuNote, "Training currently runs on the CPU. A GPU backend is on the roadmap.", "Eğitim şu an işlemcide çalışır. Ekran kartı desteği yol haritasında.", "Сейчас обучение идёт на процессоре. Поддержка видеокарт — в планах.") \
     X(QuickStart, "Quick start", "Hızlı başlangıç", "Быстрый старт") \
-    X(Step1, "1.  Load a text file or a CSV table", "1.  Bir metin dosyası veya CSV tablosu yükle", "1.  Загрузите текстовый файл или таблицу CSV") \
-    X(Step2, "2.  Let Kor pick a model that fits your computer", "2.  Kor bilgisayarına uygun modeli seçsin", "2.  Позвольте Kor подобрать модель под ваш компьютер") \
-    X(Step3, "3.  Train and watch the loss fall", "3.  Eğit ve kaybın düşüşünü izle", "3.  Обучайте и следите, как падает ошибка") \
-    X(Step4, "4.  Test the model and save it", "4.  Modeli dene ve kaydet", "4.  Проверьте модель и сохраните её") \
+    X(Step1, "Load a text file or a CSV table", "Bir metin dosyası veya CSV tablosu yükle", "Загрузите текстовый файл или таблицу CSV") \
+    X(Step2, "Let Kor pick a model that fits your computer", "Kor bilgisayarına uygun modeli seçsin", "Позвольте Kor подобрать модель под ваш компьютер") \
+    X(Step3, "Train and watch the loss fall", "Eğit ve kaybın düşüşünü izle", "Обучайте и следите, как падает ошибка") \
+    X(Step4, "Test the model and save it", "Modeli dene ve kaydet", "Проверьте модель и сохраните её") \
     X(Start, "Get started", "Başla", "Начать") \
     X(LightTitle, "Why it is light", "Neden hafif", "Почему это легко") \
     X(Light1, "Auto-tuning: model size, batch and threads are chosen from your RAM and CPU", "Otomatik ayar: model boyutu, batch ve iş parçacıkları RAM ve işlemcine göre seçilir", "Автонастройка: размер модели, батч и потоки подбираются по вашей памяти и процессору") \
@@ -114,8 +114,8 @@
     X(ValLoss, "Validation loss", "Doğrulama kaybı", "Ошибка проверки") \
     X(Accuracy, "Accuracy", "Doğruluk", "Точность") \
     X(Speed, "Speed", "Hız", "Скорость") \
-    X(TokPerSec, "%.0f chars/s", "%.0f karakter/sn", "%.0f симв/с") \
-    X(SampPerSec, "%.0f samples/s", "%.0f örnek/sn", "%.0f примеров/с") \
+    X(TokPerSec, "characters per second", "karakter / saniye", "символов в секунду") \
+    X(SampPerSec, "samples per second", "örnek / saniye", "примеров в секунду") \
     X(Elapsed, "Elapsed", "Geçen süre", "Прошло") \
     X(Eta, "Remaining", "Kalan süre", "Осталось") \
     X(PlotEmpty, "The loss curve will appear here.", "Kayıp eğrisi burada görünecek.", "Здесь появится график ошибки.") \
@@ -209,7 +209,28 @@
     X(PluginTests, "The plugin wrote %d question tests (Training > Question tests).", "Eklenti %d soru testi yazdı (Eğitim > Soru testleri).", "Плагин записал проверочных вопросов: %d (Обучение > Проверка вопросами).") \
     X(PluginBusy, "Stop training before running a plugin.", "Eklenti çalıştırmadan önce eğitimi durdur.", "Остановите обучение перед запуском плагина.") \
     X(PluginOutput, "Output", "Çıktı", "Вывод") \
-    X(Clear, "Clear", "Temizle", "Очистить")
+    X(Clear, "Clear", "Temizle", "Очистить") \
+    X(Workspace, "WORKSPACE", "ÇALIŞMA ALANI", "РАБОЧАЯ ОБЛАСТЬ") \
+    X(TrainHelp, "Train the model, watch it learn and quiz it with questions it has never seen.", "Modeli eğit, öğrenişini izle ve hiç görmediği sorularla sına.", "Обучайте модель, следите за прогрессом и проверяйте её на вопросах, которых она не видела.") \
+    X(TestHelp, "Generate text or run predictions with the current model - even while it trains.", "Mevcut modelle metin üret veya tahmin yap - eğitim sürerken bile.", "Генерируйте текст или получайте предсказания текущей модели - даже во время обучения.") \
+    X(Source, "Source file", "Kaynak dosya", "Исходный файл") \
+    X(OrExample, "Or start with an example:", "Ya da bir örnekle başla:", "Или начните с примера:") \
+    X(Workflow, "Workflow", "İş akışı", "Порядок работы") \
+    X(StepOf, "Step %d of %d", "Adım %d / %d", "Шаг %d из %d") \
+    X(PluginFolders, "Plugin folders (%d)", "Eklenti klasörleri (%d)", "Папки плагинов (%d)") \
+    X(ModelType, "Type", "Tür", "Тип") \
+    X(GenEmpty, "Generated text will appear here.", "Üretilen metin burada görünecek.", "Здесь появится сгенерированный текст.") \
+    X(StepLbl, "Step %d", "Adım %d", "Шаг %d") \
+    X(NoResults, "No results yet. Run the tests or start training.", "Henüz sonuç yok. Testleri çalıştır veya eğitimi başlat.", "Результатов пока нет. Запустите проверку или обучение.") \
+    X(Format, "Format", "Biçim", "Формат") \
+    X(FmtDialogue, "Dialogue", "Diyalog", "Диалог") \
+    X(FmtPlain, "Plain text", "Düz metin", "Обычный текст") \
+    X(ModelFile, "Model file", "Model dosyası", "Файл модели") \
+    X(SaveHelp, "Writes the current model to the file above.", "Mevcut modeli yukarıdaki dosyaya yazar.", "Записывает текущую модель в указанный файл.") \
+    X(LoadHelp, "Replaces the current model with the one in the file.", "Mevcut modelin yerine dosyadaki modeli koyar.", "Заменяет текущую модель моделью из файла.") \
+    X(Network, "Network", "Ağ yapısı", "Структура сети") \
+    X(MemoryFit, "Memory", "Bellek", "Память") \
+    X(Latest, "latest: %d / %d", "son: %d / %d", "последний: %d / %d")
 
 enum class S {
 #define X(id, en, tr, ru) id,

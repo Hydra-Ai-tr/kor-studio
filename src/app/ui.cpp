@@ -1,6 +1,7 @@
 #include "ui.h"
 
 #include "i18n.h"
+#include "kit.h"
 #include "platform.h"
 #include "plugins.h"
 
@@ -11,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cfloat>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -28,6 +30,7 @@
 #endif
 
 using namespace kor;
+using namespace kit;
 
 namespace app {
 namespace {
@@ -35,8 +38,6 @@ namespace {
 // ------------------------------------------------------------------ state
 
 struct State {
-    float sc = 1.f;
-    ImFont* title_font = nullptr;
     int page = PAGE_HOME;
 
     SysInfo sys;
@@ -78,8 +79,8 @@ struct State {
     std::vector<LogLine> log;
     std::ofstream log_file;
     std::string log_path;
-    int want_tab = -1;
-    bool fold_settings = false;
+    int train_tab = 0;
+    bool settings_open = true;
 
     // question tests ("question => answer" per line)
     std::string q_tag, a_tag;  // dialogue tags of the loaded text, empty for plain text
@@ -101,16 +102,16 @@ struct State {
 };
 State A;
 
-const ImVec4 kEmber(1.00f, 0.48f, 0.10f, 1.f);
-const ImVec4 kEmberHi(1.00f, 0.76f, 0.29f, 1.f);
-const ImVec4 kMuted(0.64f, 0.60f, 0.57f, 1.f);
-const ImVec4 kGood(0.45f, 0.85f, 0.55f, 1.f);
-const ImVec4 kBad(1.00f, 0.42f, 0.36f, 1.f);
-const ImVec4 kBlue(0.42f, 0.72f, 1.00f, 1.f);
-
 bool busy() { return A.trainer.running(); }
 
 // ---------------------------------------------------------------- helpers
+
+template <class... Args>
+std::string strf(const char* fmt, Args... args) {
+    char b[2048];
+    std::snprintf(b, sizeof b, fmt, args...);
+    return b;
+}
 
 std::string fmt_count(double n) {
     char b[32];
@@ -136,49 +137,6 @@ std::string fmt_mb(double mb) {
     return b;
 }
 
-void Title(const char* s) {
-    if (A.title_font) ImGui::PushFont(A.title_font);
-    ImGui::TextUnformatted(s);
-    if (A.title_font) ImGui::PopFont();
-    ImGui::Dummy(ImVec2(0, 4 * A.sc));
-}
-
-void Muted(const char* s) {
-    ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
-    ImGui::TextWrapped("%s", s);
-    ImGui::PopStyleColor();
-}
-
-void Row(const char* label, const char* value, const ImVec4* color = nullptr) {
-    ImGui::TextColored(kMuted, "%s", label);
-    ImGui::SameLine(230 * A.sc);
-    if (color) ImGui::TextColored(*color, "%s", value);
-    else ImGui::TextWrapped("%s", value);
-}
-
-bool PrimaryButton(const char* label, ImVec2 size = ImVec2(0, 0)) {
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.90f, 0.40f, 0.06f, 1));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kEmber);
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.78f, 0.33f, 0.04f, 1));
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 1, 1, 1));
-    bool r = ImGui::Button(label, size);
-    ImGui::PopStyleColor(4);
-    return r;
-}
-
-bool BeginCard(const char* id, float height = 0) {
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.115f, 0.100f, 0.092f, 1));
-    ImGuiChildFlags flags = ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding;
-    if (height == 0) flags |= ImGuiChildFlags_AutoResizeY;
-    bool open = ImGui::BeginChild(id, ImVec2(0, height), flags);
-    ImGui::PopStyleColor();
-    return open;
-}
-void EndCard() {
-    ImGui::EndChild();
-    ImGui::Dummy(ImVec2(0, 6 * A.sc));
-}
-
 const char* layer_name(int type) {
     switch (type) {
         case L_DENSE: return tr(S::LDense);
@@ -197,27 +155,6 @@ const char* tier_name(int t) {
     return n[t < 0 ? 0 : t > 4 ? 4 : t];
 }
 
-// The Kor mark: an ember (flame drop) holding a three-node network.
-void draw_logo(ImDrawList* dl, ImVec2 p, float sz) {
-    auto P = [&](float x, float y) { return ImVec2(p.x + x / 256.f * sz, p.y + y / 256.f * sz); };
-    const ImU32 dark = IM_COL32(23, 18, 15, 255);
-    dl->AddRectFilled(p, ImVec2(p.x + sz, p.y + sz), dark, sz * 0.22f);
-    dl->PathLineTo(P(128, 26));
-    dl->PathBezierCubicCurveTo(P(150, 70), P(202, 100), P(202, 154));
-    dl->PathArcTo(P(128, 154), 74.f / 256.f * sz, 0.f, 3.14159265f, 28);
-    dl->PathBezierCubicCurveTo(P(54, 100), P(106, 70), P(128, 26));
-    dl->PathFillConcave(ImGui::GetColorU32(kEmber));
-    ImVec2 n0 = P(128, 112), n1 = P(94, 172), n2 = P(162, 172);
-    float lw = sz * 0.035f;
-    dl->AddLine(n0, n1, dark, lw);
-    dl->AddLine(n0, n2, dark, lw);
-    dl->AddLine(n1, n2, dark, lw);
-    for (ImVec2 n : {n0, n1, n2}) {
-        dl->AddCircleFilled(n, sz * 0.062f, dark, 20);
-        dl->AddCircleFilled(n, sz * 0.026f, ImGui::GetColorU32(kEmberHi), 12);
-    }
-}
-
 // Local time, e.g. "2026-11-10 22:05:31" (or "2026-11-10_22-05-31" for file names).
 std::string timestamp(bool for_file) {
     std::time_t t = std::time(nullptr);
@@ -225,10 +162,6 @@ std::string timestamp(bool for_file) {
     char b[32];
     std::strftime(b, sizeof b, for_file ? "%Y-%m-%d_%H-%M-%S" : "%Y-%m-%d %H:%M:%S", &tm);
     return b;
-}
-
-void Tooltip(const char* s) {
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("%s", s);
 }
 
 std::string find_example(const char* name) {
@@ -240,6 +173,35 @@ std::string find_example(const char* name) {
         if (fs::exists(p, ec)) return fs::weakly_canonical(p, ec).u8string();
     }
     return "";
+}
+
+// Places the cursor so that `h` pixels of content end at the bottom of a card
+// that is min_h tall. Returns the natural card height (without the push).
+float push_to_bottom(float min_h, float h) {
+    float y = ImGui::GetCursorPosY();
+    float target = min_h - card_padding_y() - h;
+    if (target > y) ImGui::SetCursorPosY(target);
+    return y + h + card_padding_y();
+}
+
+// Inset box (logs, previews, consoles) filling `height`.
+bool begin_inset(const char* id, float height, bool hscroll = false) {
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, C::inset);
+    ImGui::PushStyleColor(ImGuiCol_Border, C::border);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(px(14), px(12)));
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, px(10));
+    bool open = ImGui::BeginChild(id, ImVec2(0, height), ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding,
+                                  hscroll ? ImGuiWindowFlags_HorizontalScrollbar : 0);
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(2);
+    return open;
+}
+
+void table_headers() {
+    FontScope f(F.small_bold);
+    ImGui::PushStyleColor(ImGuiCol_Text, C::muted);
+    ImGui::TableHeadersRow();
+    ImGui::PopStyleColor();
 }
 
 // ------------------------------------------------------------ training log
@@ -458,6 +420,12 @@ bool load_data_impl(const std::string& path, int kind, int target_col) {
     return true;
 }
 
+void load_example(int kind) {
+    std::string p = find_example(kind ? "spiral.csv" : "tiny_text.txt");
+    if (p.empty()) { A.data_ok = false; A.data_msg = tr(S::ExampleMissing); }
+    else load_data_impl(p, kind, -1);
+}
+
 void reset_model() {
     if (busy()) return;
     A.model.reset();
@@ -491,88 +459,165 @@ void begin_training() {
         log_fmt(State::T_BAD, S::LogError, A.trainer.stats().error.c_str());
         A.log_file.close();
     } else {
-        A.fold_settings = true;
+        A.settings_open = false;  // the chart, log and tests get the room
     }
 }
 
 std::string settings_file() { return (upath(config_dir()) / "settings.cfg").u8string(); }
 
-// ------------------------------------------------------------------ pages
+const ImVec4& state_color(int state) {
+    switch (state) {
+        case TS_RUNNING: return C::accent;
+        case TS_PAUSED: return C::warn;
+        case TS_DONE: return C::good;
+        case TS_ERROR: return C::bad;
+    }
+    return C::muted;
+}
 
-void need_data_notice() {
-    Muted(tr(S::NoData));
-    if (ImGui::Button(tr(S::GoData))) A.page = PAGE_DATA;
+const char* state_name(int state) {
+    static const S names[] = {S::StIdle, S::StRunning, S::StPaused, S::StDone, S::StStopped, S::StError};
+    return tr(names[state < 0 || state > 5 ? 0 : state]);
+}
+
+// =================================================================== pages
+
+// ------------------------------------------------------------------- home
+
+void step_cards() {
+    static const S titles[] = {S::NavData, S::NavModel, S::NavTrain, S::NavTest};
+    static const S texts[] = {S::Step1, S::Step2, S::Step3, S::Step4};
+    static const int pages[] = {PAGE_DATA, PAGE_MODEL, PAGE_TRAIN, PAGE_TEST};
+    static const Icon icons[] = {IC_DATA, IC_MODEL, IC_TRAIN, IC_CHAT};
+    float g = px(12), pad = px(16);
+    int cols = fit_columns(px(200), 4, g);
+    float cw = column_width(cols, g), tw = cw - pad * 2;
+    ImFont* bf = F.bold ? F.bold : ImGui::GetFont();
+    ImFont* body = ImGui::GetFont();
+    float h = 0;
+    for (int i = 0; i < 4; ++i)
+        h = std::max(h, pad + px(30) + px(14) + bf->FontSize + px(6) + text_size(body, tr(texts[i]), nullptr, tw).y + pad);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(g, g));
+    for (int i = 0; i < 4; ++i) {
+        if (i % cols) ImGui::SameLine(0, g);
+        ImGui::PushID(i);
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        if (ImGui::InvisibleButton("##step", ImVec2(cw, h))) A.page = pages[i];
+        bool hov = ImGui::IsItemHovered();
+        if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        float t = anim(ImGui::GetItemID(), hov);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddRectFilled(p, ImVec2(p.x + cw, p.y + h), col(mix(C::surface, C::surface2, t)), px(12));
+        dl->AddRect(p, ImVec2(p.x + cw, p.y + h), col(mix(C::border, C::border_hi, t)), px(12));
+        ImVec2 nc(p.x + pad + px(15), p.y + pad + px(15));
+        dl->AddCircleFilled(nc, px(15), col(C::accent, 0.14f));
+        std::string num = std::to_string(i + 1);
+        ImFont* nf = F.small_bold ? F.small_bold : body;
+        ImVec2 ns = text_size(nf, num.c_str());
+        dl->AddText(nf, nf->FontSize, ImVec2(nc.x - ns.x * 0.5f, nc.y - ns.y * 0.5f), col(C::accent), num.c_str());
+        icon(dl, icons[i], ImVec2(p.x + cw - pad - px(9), nc.y), px(18), col(mix(C::subtle, C::accent, t)));
+        float y = p.y + pad + px(30) + px(14);
+        dl->AddText(bf, bf->FontSize, ImVec2(p.x + pad, y), col(C::text), tr(titles[i]));
+        dl->AddText(body, body->FontSize, ImVec2(p.x + pad, y + bf->FontSize + px(6)), col(C::muted), tr(texts[i]), nullptr, tw);
+        ImGui::PopID();
+    }
+    ImGui::PopStyleVar();
 }
 
 void page_home() {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 p = ImGui::GetCursorScreenPos();
-    float sz = 84 * A.sc;
-    draw_logo(dl, p, sz);
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + sz + 18 * A.sc);
-    ImGui::BeginGroup();
-    ImGui::Dummy(ImVec2(0, 8 * A.sc));
-    Title("Kor Studio");
-    ImGui::TextColored(kEmberHi, "%s", tr(S::Tagline));
-    ImGui::EndGroup();
-    ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + sz + 16 * A.sc));
-    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 820 * A.sc);
-    ImGui::TextWrapped("%s", tr(S::HomeIntro));
-    ImGui::PopTextWrapPos();
-    ImGui::Dummy(ImVec2(0, 8 * A.sc));
-
     float w = ImGui::GetContentRegionAvail().x;
-    float colw = (w - 12 * A.sc) * 0.5f;
-    ImGui::BeginChild("##left", ImVec2(colw, 0), ImGuiChildFlags_AutoResizeY);
-    if (BeginCard("sys")) {
-        ImGui::SeparatorText(tr(S::YourSystem));
-        char b[256];
-        Row(tr(S::Cpu), A.sys.cpu.c_str());
-        std::snprintf(b, sizeof b, tr(S::ThreadsFmt), A.sys.logical, recommended_threads(A.sys));
-        Row(tr(S::Threads), b);
-        std::snprintf(b, sizeof b, tr(S::RamFmt), A.sys.ram_total_gb, A.sys.ram_free_gb);
-        Row(tr(S::Ram), b);
-        Row(tr(S::Simd), K().name, &kGood);
-        for (auto& g : A.sys.gpus) Row(tr(S::Gpu), g.c_str());
-        ImGui::Dummy(ImVec2(0, 2 * A.sc));
-        Muted(tr(S::GpuNote));
+    float lz = px(68);
+    draw_logo(dl, p, lz);
+    ImGui::SetCursorScreenPos(ImVec2(p.x + lz + px(20), p.y + px(4)));
+    ImGui::BeginGroup();
+    {
+        FontScope f(F.h1);
+        ImGui::TextUnformatted("Kor Studio");
     }
-    EndCard();
-    if (BeginCard("quick")) {
-        ImGui::SeparatorText(tr(S::QuickStart));
-        for (S s : {S::Step1, S::Step2, S::Step3, S::Step4}) ImGui::TextWrapped("%s", tr(s));
-        ImGui::Dummy(ImVec2(0, 4 * A.sc));
-        if (PrimaryButton(tr(S::Start), ImVec2(160 * A.sc, 0))) A.page = PAGE_DATA;
+    {
+        FontScope f(F.bold);
+        text(tr(S::Tagline), C::accent_hi);
     }
-    EndCard();
-    ImGui::EndChild();
-    ImGui::SameLine(0, 12 * A.sc);
-    ImGui::BeginChild("##right", ImVec2(colw, 0), ImGuiChildFlags_AutoResizeY);
-    if (BeginCard("light")) {
-        ImGui::SeparatorText(tr(S::LightTitle));
-        for (S s : {S::Light1, S::Light2, S::Light3, S::Light4, S::Light5}) {
-            ImGui::TextColored(kEmber, "%s", "\xE2\x80\xA2");  // bullet
-            ImGui::SameLine();
-            ImGui::TextWrapped("%s", tr(s));
+    ImGui::EndGroup();
+    ImGui::SetCursorScreenPos(ImVec2(p.x, std::max(p.y + lz, ImGui::GetItemRectMax().y) + px(16)));
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::min(w, px(800)));
+    text(tr(S::HomeIntro), C::muted);
+    ImGui::PopTextWrapPos();
+    gap(6);
+    if (button(tr(S::Start), BTN_PRIMARY, IC_PLAY, 0, px(40))) A.page = PAGE_DATA;
+    ImGui::SameLine(0, px(10));
+    ImGui::BeginDisabled(busy());
+    if (button(tr(S::ExampleText), BTN_SECONDARY, IC_DOC, 0, px(40))) {
+        load_example(0);
+        A.page = PAGE_DATA;
+    }
+    ImGui::EndDisabled();
+
+    gap(22);
+    section_title(tr(S::YourSystem));
+    text_wrapped(tr(S::GpuNote), C::muted, F.small);
+    gap(2);
+    std::vector<Stat> sys;
+    sys.push_back({tr(S::Cpu), A.sys.cpu, "", C::text, IC_CPU});
+    sys.push_back({tr(S::Threads), std::to_string(A.sys.logical), strf(tr(S::ThreadsFmt), A.sys.logical, recommended_threads(A.sys)), C::text, IC_THREADS});
+    sys.push_back({tr(S::Ram), strf("%.1f GB", A.sys.ram_total_gb), strf(tr(S::RamFmt), A.sys.ram_total_gb, A.sys.ram_free_gb), C::text, IC_MEMORY});
+    sys.push_back({tr(S::Simd), K().name, "", C::good, IC_BOLT});
+    if (!A.sys.gpus.empty())
+        sys.push_back({tr(S::Gpu), A.sys.gpus[0], A.sys.gpus.size() > 1 ? A.sys.gpus[1] : "", C::text, IC_GPU});
+    stat_grid(sys, px(180), false);
+
+    gap(22);
+    section_title(tr(S::Workflow));
+    gap(2);
+    step_cards();
+
+    gap(22);
+    begin_card("light", tr(S::LightTitle));
+    static const S feats[] = {S::Light1, S::Light2, S::Light3, S::Light4, S::Light5};
+    static const Icon ficons[] = {IC_SPARK, IC_LAYERS, IC_TARGET, IC_SAVE, IC_BOLT};
+    int cols = ImGui::GetContentRegionAvail().x > px(640) ? 2 : 1;
+    ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(px(10), px(8)));
+    if (ImGui::BeginTable("##feats", cols, ImGuiTableFlags_SizingStretchSame)) {
+        for (int i = 0; i < 5; ++i) {
+            ImGui::TableNextColumn();
+            ImVec2 q = ImGui::GetCursorScreenPos();
+            float s = px(30);
+            ImDrawList* d = ImGui::GetWindowDrawList();
+            d->AddRectFilled(q, ImVec2(q.x + s, q.y + s), col(C::accent, 0.12f), px(8));
+            icon(d, ficons[i], ImVec2(q.x + s * 0.5f, q.y + s * 0.5f), px(16), col(C::accent));
+            ImGui::Dummy(ImVec2(s, s));
+            ImGui::SameLine(0, px(12));
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (s - ImGui::GetFontSize()) * 0.5f);
+            ImGui::PushTextWrapPos(0.f);
+            ImGui::TextUnformatted(tr(feats[i]));
+            ImGui::PopTextWrapPos();
         }
+        ImGui::EndTable();
     }
-    EndCard();
-    ImGui::EndChild();
+    ImGui::PopStyleVar();
+    end_card();
 }
 
+// ------------------------------------------------------------------- data
+
 void page_data() {
-    Title(tr(S::NavData));
-    Muted(tr(S::DataHelp));
-    ImGui::Dummy(ImVec2(0, 4 * A.sc));
+    header(tr(S::NavData), tr(S::DataHelp));
+    header_end();
+
+    begin_card("source", tr(S::Source));
     ImGui::BeginDisabled(busy());
-    ImGui::RadioButton(tr(S::KindText), &A.data_kind, 0);
-    ImGui::SameLine();
-    ImGui::RadioButton(tr(S::KindTable), &A.data_kind, 1);
-    ImGui::SetNextItemWidth(-260 * A.sc);
+    const char* kinds[] = {tr(S::KindText), tr(S::KindTable)};
+    segmented("kind", &A.data_kind, kinds, 2);
+    float sp = ImGui::GetStyle().ItemSpacing.x;
+    float bw_browse = has_native_dialogs() ? button_width(tr(S::Browse), IC_FOLDER) + sp : 0;
+    float bw_load = button_width(tr(S::Load), IC_UPLOAD);
+    ImGui::SetNextItemWidth(std::max(px(120), ImGui::GetContentRegionAvail().x - bw_browse - bw_load - sp));
     bool enter = ImGui::InputTextWithHint("##path", tr(S::PathHint), A.data_path, sizeof A.data_path, ImGuiInputTextFlags_EnterReturnsTrue);
     if (has_native_dialogs()) {
         ImGui::SameLine();
-        if (ImGui::Button(tr(S::Browse))) {
+        if (button(tr(S::Browse), BTN_SECONDARY, IC_FOLDER)) {
             std::string p = open_file_dialog(DLG_DATA);
             if (!p.empty()) {
                 std::snprintf(A.data_path, sizeof A.data_path, "%s", p.c_str());
@@ -584,500 +629,696 @@ void page_data() {
         }
     }
     ImGui::SameLine();
-    if (PrimaryButton(tr(S::Load)) || enter) load_data_impl(A.data_path, A.data_kind, -1);
-    for (int k = 0; k < 2; ++k) {
-        if (k) ImGui::SameLine();
-        if (ImGui::Button(tr(k ? S::ExampleTable : S::ExampleText))) {
-            std::string p = find_example(k ? "spiral.csv" : "tiny_text.txt");
-            if (p.empty()) { A.data_ok = false; A.data_msg = tr(S::ExampleMissing); }
-            else load_data_impl(p, k, -1);
-        }
-    }
+    if (button(tr(S::Load), BTN_PRIMARY, IC_UPLOAD) || enter) load_data_impl(A.data_path, A.data_kind, -1);
+    ImGui::AlignTextToFramePadding();
+    text(tr(S::OrExample), C::muted);
+    ImGui::SameLine();
+    if (button(tr(S::ExampleText), BTN_GHOST, IC_DOC)) load_example(0);
+    ImGui::SameLine(0, px(4));
+    if (button(tr(S::ExampleTable), BTN_GHOST, IC_TABLE)) load_example(1);
     ImGui::EndDisabled();
-    if (busy()) Muted(tr(S::Busy));
-    if (!A.data_ok && !A.data_msg.empty()) {
-        char b[512];
-        std::snprintf(b, sizeof b, tr(S::Failed), A.data_msg.c_str());
-        ImGui::TextColored(kBad, "%s", b);
-    }
-    ImGui::Dummy(ImVec2(0, 6 * A.sc));
+    if (busy()) banner(tr(S::Busy), C::warn, IC_INFO);
+    if (!A.data_ok && !A.data_msg.empty()) banner(strf(tr(S::Failed), A.data_msg.c_str()).c_str(), C::bad, IC_WARN);
+    end_card();
     if (A.data.kind == DATA_NONE) return;
 
-    char b[256];
-    if (BeginCard("dinfo")) {
-        ImGui::TextColored(kGood, "%s", tr(S::Loaded));
-        ImGui::SameLine();
-        ImGui::TextColored(kMuted, "%s", A.data.path.c_str());
-        if (A.data.kind == DATA_TEXT) {
-            Row(tr(S::Characters), fmt_count((double)A.data.ids.size()).c_str());
-            std::snprintf(b, sizeof b, "%d", (int)A.data.vocab.size());
-            Row(tr(S::VocabSize), b);
-            std::snprintf(b, sizeof b, "%s / %s", fmt_count((double)A.data.train_items()).c_str(), fmt_count((double)A.data.val_items()).c_str());
-            Row(tr(S::TrainVal), b);
-        } else {
-            std::snprintf(b, sizeof b, "%d", (int)(A.data.train_idx.size() + A.data.val_idx.size()));
-            Row(tr(S::Rows), b);
-            std::snprintf(b, sizeof b, "%d", A.data.n_feat);
-            Row(tr(S::Features), b);
-            if (A.data.regression) Row(tr(S::Task), tr(S::Regression));
-            else {
-                std::snprintf(b, sizeof b, tr(S::Classification), (int)A.data.labels.size());
-                Row(tr(S::Task), b);
-            }
-            std::snprintf(b, sizeof b, "%d / %d", (int)A.data.train_idx.size(), (int)A.data.val_idx.size());
-            Row(tr(S::TrainVal), b);
-            ImGui::TextColored(kMuted, "%s", tr(S::Target));
-            ImGui::SameLine(230 * A.sc);
-            ImGui::SetNextItemWidth(240 * A.sc);
-            ImGui::BeginDisabled(busy());
-            if (ImGui::BeginCombo("##target", A.data.header[A.data.target_col].c_str())) {
-                for (int c = 0; c < A.data.n_cols; ++c)
-                    if (ImGui::Selectable(A.data.header[c].c_str(), c == A.data.target_col) && c != A.data.target_col) {
-                        std::string path = A.data.path;
-                        load_data_impl(path, 1, c);
-                        break;
-                    }
-                ImGui::EndCombo();
-            }
-            ImGui::EndDisabled();
-            if (A.data.bad_cells > 0) {
-                std::snprintf(b, sizeof b, tr(S::BadCells), A.data.bad_cells);
-                ImGui::TextColored(kEmberHi, "%s", b);
-            }
-        }
-    }
-    EndCard();
-    if (A.data.kind == DATA_NONE) return;
-
-    ImGui::SeparatorText(tr(S::Preview));
+    gap();
+    std::vector<Stat> st;
     if (A.data.kind == DATA_TEXT) {
-        size_t n = std::min<size_t>(A.data.raw.size(), 1200);
-        while (n < A.data.raw.size() && ((unsigned char)A.data.raw[n] & 0xC0) == 0x80) ++n;  // do not cut a UTF-8 sequence
-        ImGui::BeginChild("##ptext", ImVec2(0, 0), ImGuiChildFlags_Borders);
-        ImGui::PushTextWrapPos(0);
-        ImGui::TextUnformatted(A.data.raw.data(), A.data.raw.data() + n);
-        ImGui::PopTextWrapPos();
-        ImGui::EndChild();
-    } else if (ImGui::BeginTable("##ptable", std::min(A.data.n_cols, 60),
-                                 ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollX | ImGuiTableFlags_SizingFixedFit)) {
-        int nc = std::min(A.data.n_cols, 60);
-        for (int c = 0; c < nc; ++c) ImGui::TableSetupColumn(A.data.header[c].c_str());
-        ImGui::TableHeadersRow();
-        for (auto& r : A.data.preview) {
-            ImGui::TableNextRow();
-            for (int c = 0; c < nc; ++c) {
-                ImGui::TableSetColumnIndex(c);
-                if (c == A.data.target_col) ImGui::TextColored(kEmberHi, "%s", r[c].c_str());
-                else ImGui::TextUnformatted(r[c].c_str());
-            }
-        }
-        ImGui::EndTable();
+        st.push_back({tr(S::Characters), fmt_count((double)A.data.ids.size()), "", C::text, IC_DOC});
+        st.push_back({tr(S::VocabSize), std::to_string(A.data.vocab.size()), "", C::text, IC_LAYERS});
+        st.push_back({tr(S::TrainVal), fmt_count((double)A.data.train_items()) + " / " + fmt_count((double)A.data.val_items()), "", C::text, IC_PERCENT});
+        st.push_back({tr(S::Format), tr(A.q_tag.empty() ? S::FmtPlain : S::FmtDialogue),
+                      A.q_tag.empty() ? "" : A.q_tag + "/ " + A.a_tag, A.q_tag.empty() ? C::text : C::blue, IC_CHAT});
+    } else {
+        st.push_back({tr(S::Rows), std::to_string(A.data.train_idx.size() + A.data.val_idx.size()), "", C::text, IC_TABLE});
+        st.push_back({tr(S::Features), std::to_string(A.data.n_feat), "", C::text, IC_LAYERS});
+        st.push_back({tr(S::Task), A.data.regression ? tr(S::Regression) : strf(tr(S::Classification), (int)A.data.labels.size()), "", C::blue, IC_TARGET});
+        st.push_back({tr(S::TrainVal), strf("%d / %d", (int)A.data.train_idx.size(), (int)A.data.val_idx.size()), "", C::text, IC_PERCENT});
     }
+    stat_grid(st, px(170), false);
+
+    if (A.data.kind == DATA_TABLE) {
+        gap();
+        begin_card("target");
+        float lw = std::min(px(220), ImGui::GetContentRegionAvail().x * 0.4f);
+        ImGui::BeginDisabled(busy());
+        field_label(tr(S::Target), lw);
+        ImGui::SetNextItemWidth(std::min(px(320), ImGui::GetContentRegionAvail().x));
+        if (begin_combo("##target", A.data.header[A.data.target_col].c_str())) {
+            for (int c = 0; c < A.data.n_cols; ++c)
+                if (ImGui::Selectable(A.data.header[c].c_str(), c == A.data.target_col) && c != A.data.target_col) {
+                    std::string path = A.data.path;
+                    load_data_impl(path, 1, c);
+                    break;
+                }
+            ImGui::EndCombo();
+        }
+        ImGui::EndDisabled();
+        if (A.data.bad_cells > 0) banner(strf(tr(S::BadCells), A.data.bad_cells).c_str(), C::warn, IC_WARN);
+        end_card();
+        if (A.data.kind == DATA_NONE) return;
+    }
+
+    gap();
+    float rest = ImGui::GetContentRegionAvail().y;
+    std::string file_name = std::filesystem::u8path(A.data.path).filename().u8string();
+    begin_card("preview", tr(S::Preview), 0, 0, file_name.c_str());
+    float inner = std::max(px(220), rest - ImGui::GetCursorPosY() - card_padding_y() - px(2));
+    if (A.data.kind == DATA_TEXT) {
+        size_t n = std::min<size_t>(A.data.raw.size(), 4000);
+        while (n < A.data.raw.size() && ((unsigned char)A.data.raw[n] & 0xC0) == 0x80) ++n;  // do not cut a UTF-8 sequence
+        if (begin_inset("##ptext", inner)) {
+            FontScope f(F.mono);
+            ImGui::PushTextWrapPos(0);
+            ImGui::TextUnformatted(A.data.raw.data(), A.data.raw.data() + n);
+            ImGui::PopTextWrapPos();
+        }
+        ImGui::EndChild();
+    } else {
+        int nc = std::min(A.data.n_cols, 60);
+        ImGuiTableFlags tf = ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_BordersOuter | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollX |
+                             ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingFixedFit;
+        if (ImGui::BeginTable("##ptable", nc, tf, ImVec2(0, inner))) {
+            ImGui::TableSetupScrollFreeze(0, 1);
+            for (int c = 0; c < nc; ++c) ImGui::TableSetupColumn(A.data.header[c].c_str());
+            table_headers();
+            for (auto& r : A.data.preview) {
+                ImGui::TableNextRow();
+                for (int c = 0; c < nc; ++c) {
+                    ImGui::TableSetColumnIndex(c);
+                    if (c == A.data.target_col) text(r[c].c_str(), C::accent_hi);
+                    else ImGui::TextUnformatted(r[c].c_str());
+                }
+            }
+            ImGui::EndTable();
+        }
+    }
+    end_card();
 }
 
+// ------------------------------------------------------------------ model
+
 void draw_diagram(const ModelSpec& s) {
-    struct Box { std::string top, sub; ImU32 col; };
+    struct Box { std::string top, sub; ImVec4 col; };
     std::vector<Box> boxes;
-    const ImU32 cIO = IM_COL32(70, 60, 54, 255), cDense = IM_COL32(190, 86, 16, 255), cAct = IM_COL32(52, 96, 140, 255),
-                cNorm = IM_COL32(70, 110, 78, 255);
-    char b[64];
     if (s.kind == MODEL_GPT) {
-        std::snprintf(b, sizeof b, "%d", s.ctx);
-        boxes.push_back({tr(S::Input), b, cIO});
-        std::snprintf(b, sizeof b, "%d x %d", s.vocab, s.dim);
-        boxes.push_back({"Embedding", b, cNorm});
+        boxes.push_back({tr(S::Input), std::to_string(s.ctx), C::muted});
+        boxes.push_back({"Embedding", strf("%d x %d", s.vocab, s.dim), C::teal});
         for (int i = 0; i < s.nlayer && i < 12; ++i) {
-            std::snprintf(b, sizeof b, "%d heads", s.heads);
-            boxes.push_back({"Attention", b, cDense});
-            std::snprintf(b, sizeof b, "%d", s.dim * 4);
-            boxes.push_back({"MLP", b, cAct});
+            boxes.push_back({"Attention", strf("%d heads", s.heads), C::accent});
+            boxes.push_back({"MLP", std::to_string(s.dim * 4), C::blue});
         }
-        boxes.push_back({"LayerNorm", "", cNorm});
-        std::snprintf(b, sizeof b, "%d", s.vocab);
-        boxes.push_back({tr(S::Output), b, cIO});
+        boxes.push_back({"LayerNorm", "", C::violet});
+        boxes.push_back({tr(S::Output), std::to_string(s.vocab), C::muted});
     } else {
-        std::snprintf(b, sizeof b, "%d", s.in_dim);
-        boxes.push_back({tr(S::Input), b, cIO});
+        boxes.push_back({tr(S::Input), std::to_string(s.in_dim), C::muted});
         for (auto& l : s.layers) {
-            if (l.type == L_DENSE) { std::snprintf(b, sizeof b, "%d", l.units); boxes.push_back({layer_name(l.type), b, cDense}); }
-            else if (l.type == L_DROPOUT) { std::snprintf(b, sizeof b, "%.0f%%", l.p * 100); boxes.push_back({layer_name(l.type), b, cNorm}); }
-            else boxes.push_back({layer_name(l.type), "", l.type == L_LAYERNORM ? cNorm : cAct});
+            if (l.type == L_DENSE) boxes.push_back({layer_name(l.type), std::to_string(l.units), C::accent});
+            else if (l.type == L_DROPOUT) boxes.push_back({layer_name(l.type), strf("%.0f%%", l.p * 100), C::muted});
+            else boxes.push_back({layer_name(l.type), "", l.type == L_LAYERNORM ? C::violet : C::blue});
         }
-        std::snprintf(b, sizeof b, "%d", s.out_dim);
-        boxes.push_back({tr(S::Output), b, cIO});
+        boxes.push_back({tr(S::Output), std::to_string(s.out_dim), C::muted});
     }
-    float h = 58 * A.sc, gap = 26 * A.sc, pad = 12 * A.sc;
-    const ImGuiStyle& style = ImGui::GetStyle();
-    ImGui::BeginChild("##diagram", ImVec2(0, h + style.WindowPadding.y * 2 + style.ScrollbarSize + 4 * A.sc),
-                      ImGuiChildFlags_Borders, ImGuiWindowFlags_HorizontalScrollbar);
+    ImFont* bf = F.bold ? F.bold : ImGui::GetFont();
+    ImFont* sf = F.small ? F.small : ImGui::GetFont();
+    float h = px(60), g = px(30), pad = px(16);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(px(2), px(6)));
+    ImGui::BeginChild("##diagram", ImVec2(0, h + px(12) + ImGui::GetStyle().ScrollbarSize), ImGuiChildFlags_AlwaysUseWindowPadding,
+                      ImGuiWindowFlags_HorizontalScrollbar);
+    ImGui::PopStyleVar();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 p = ImGui::GetCursorScreenPos();
     float x = p.x;
     for (size_t i = 0; i < boxes.size(); ++i) {
-        ImVec2 t1 = ImGui::CalcTextSize(boxes[i].top.c_str()), t2 = ImGui::CalcTextSize(boxes[i].sub.c_str());
-        float w = std::max(t1.x, t2.x) + pad * 2;
-        dl->AddRectFilled(ImVec2(x, p.y), ImVec2(x + w, p.y + h), boxes[i].col, 8 * A.sc);
-        float ty = boxes[i].sub.empty() ? p.y + (h - t1.y) * 0.5f : p.y + h * 0.5f - t1.y - 1;
-        dl->AddText(ImVec2(x + (w - t1.x) * 0.5f, ty), IM_COL32(255, 255, 255, 255), boxes[i].top.c_str());
-        if (!boxes[i].sub.empty())
-            dl->AddText(ImVec2(x + (w - t2.x) * 0.5f, p.y + h * 0.5f + 1), IM_COL32(255, 226, 190, 255), boxes[i].sub.c_str());
+        const Box& b = boxes[i];
+        ImVec2 t1 = text_size(bf, b.top.c_str()), t2 = text_size(sf, b.sub.c_str());
+        float w = std::max(px(76), std::max(t1.x, t2.x) + pad * 2);
+        dl->AddRectFilled(ImVec2(x, p.y), ImVec2(x + w, p.y + h), col(b.col, 0.12f), px(10));
+        dl->AddRect(ImVec2(x, p.y), ImVec2(x + w, p.y + h), col(b.col, 0.45f), px(10));
+        float ty = b.sub.empty() ? p.y + (h - t1.y) * 0.5f : p.y + h * 0.5f - t1.y;
+        dl->AddText(bf, bf->FontSize, ImVec2(x + (w - t1.x) * 0.5f, ty), col(C::text), b.top.c_str());
+        if (!b.sub.empty())
+            dl->AddText(sf, sf->FontSize, ImVec2(x + (w - t2.x) * 0.5f, p.y + h * 0.5f + px(2)), col(mix(b.col, C::text, 0.35f)), b.sub.c_str());
         x += w;
         if (i + 1 < boxes.size()) {
             float y = p.y + h * 0.5f;
-            ImU32 c = IM_COL32(150, 140, 132, 255);
-            dl->AddLine(ImVec2(x + 4 * A.sc, y), ImVec2(x + gap - 5 * A.sc, y), c, 1.5f * A.sc);
-            dl->AddTriangleFilled(ImVec2(x + gap - 3 * A.sc, y), ImVec2(x + gap - 9 * A.sc, y - 4 * A.sc), ImVec2(x + gap - 9 * A.sc, y + 4 * A.sc), c);
-            x += gap;
+            ImU32 c = col(C::border_hi);
+            dl->AddLine(ImVec2(x + px(5), y), ImVec2(x + g - px(6), y), c, px(1.5f));
+            icon(dl, IC_CHEVRON_RIGHT, ImVec2(x + g - px(8), y), px(12), c);
+            x += g;
         }
     }
-    ImGui::Dummy(ImVec2(x - p.x, h));
+    ImGui::Dummy(ImVec2(x - p.x + px(2), h));
     ImGui::EndChild();
 }
 
-void page_model() {
-    Title(tr(S::NavModel));
-    Muted(tr(S::ModelHelp));
-    ImGui::Dummy(ImVec2(0, 4 * A.sc));
-    char b[256];
-
-    if (A.model) {  // ---- a model exists: show it, offer LoRA and reset
-        if (BeginCard("built")) {
-            ImGui::TextColored(kGood, "%s", tr(S::Built));
+void arch_controls(ModelSpec& s) {
+    float lw = std::min(px(230), ImGui::GetContentRegionAvail().x * 0.45f);
+    if (s.kind == MODEL_GPT) {
+        int per = std::max(4, s.dim / std::max(1, s.heads));
+        int max_ctx = std::max(8, std::min(512, (int)A.data.n_train - 2));
+        field_label(tr(S::Heads), lw);
+        slider_int("##heads", &s.heads, 1, 12);
+        field_label(tr(S::HeadDim), lw);
+        slider_int("##hdim", &per, 8, 64);
+        field_label(tr(S::Layers), lw);
+        slider_int("##layers", &s.nlayer, 1, 12);
+        field_label(tr(S::Context), lw);
+        slider_int("##ctx", &s.ctx, 8, max_ctx);
+        s.heads = std::max(1, std::min(12, s.heads));
+        s.nlayer = std::max(1, std::min(12, s.nlayer));
+        s.dim = s.heads * std::max(4, std::min(64, per));
+        s.ctx = std::max(8, std::min(max_ctx, s.ctx));
+        text_wrapped(strf(tr(S::Width), s.dim).c_str(), C::muted, F.small);
+        return;
+    }
+    float fh = ImGui::GetFrameHeight(), sp = ImGui::GetStyle().ItemSpacing.x;
+    int remove = -1, up = -1;
+    for (int i = 0; i < (int)s.layers.size(); ++i) {
+        LayerSpec& l = s.layers[i];
+        ImGui::PushID(i);
+        float x0 = ImGui::GetCursorPosX(), aw = ImGui::GetContentRegionAvail().x;
+        ImGui::AlignTextToFramePadding();
+        text(strf("%2d", i + 1).c_str(), C::subtle);
+        ImGui::SameLine(x0 + px(30));
+        ImGui::SetNextItemWidth(px(190));
+        if (begin_combo("##type", layer_name(l.type))) {
+            for (int t = 0; t < L_TYPE_COUNT; ++t)
+                if (ImGui::Selectable(layer_name(t), t == l.type)) l.type = t;
+            ImGui::EndCombo();
+        }
+        ImGui::SameLine();
+        if (l.type == L_DENSE) {
+            ImGui::SetNextItemWidth(px(110));
+            ImGui::InputInt("##units", &l.units, 0, 0);
+            l.units = std::max(1, std::min(4096, l.units));
             ImGui::SameLine();
-            ImGui::TextColored(kMuted, "%s", tr(A.model->spec.kind == MODEL_GPT ? S::TextModel : S::TableModel));
-            size_t total, train;
-            {
-                std::lock_guard<std::mutex> lk(A.trainer.model_mu);
-                total = A.model->param_count(false);
-                train = A.model->param_count(true);
-            }
-            std::snprintf(b, sizeof b, "%s  (%s %s)", fmt_count((double)total).c_str(), fmt_count((double)train).c_str(), tr(S::Trainable));
-            Row(tr(S::Params), b);
-            draw_diagram(A.model->spec);
-            Muted(tr(S::ResetHint));
-            ImGui::BeginDisabled(busy());
-            if (ImGui::Button(tr(S::ResetModel))) reset_model();
-            ImGui::EndDisabled();
+            ImGui::AlignTextToFramePadding();
+            text(tr(S::Units), C::muted);
+        } else if (l.type == L_DROPOUT) {
+            ImGui::SetNextItemWidth(px(220));
+            slider_float("##p", &l.p, 0.f, 0.8f, "p = %.2f");
+        } else {
+            ImGui::Dummy(ImVec2(px(1), fh));
         }
-        EndCard();
-        if (A.model && BeginCard("lora")) {
-            ImGui::SeparatorText(tr(S::LoraTitle));
-            Muted(tr(S::LoraHelp));
-            ImGui::BeginDisabled(busy());
-            if (A.model->spec.lora_rank == 0) {
-                ImGui::SetNextItemWidth(140 * A.sc);
-                ImGui::SliderInt(tr(S::Rank), &A.lora_rank, 1, 32);
-                ImGui::SameLine();
-                if (ImGui::Button(tr(S::EnableLora))) A.model->enable_lora(A.lora_rank);
-            } else {
-                std::snprintf(b, sizeof b, "%s: %d", tr(S::Rank), A.model->spec.lora_rank);
-                ImGui::TextColored(kEmberHi, "%s", b);
-                ImGui::SameLine();
-                if (ImGui::Button(tr(S::MergeLora))) A.model->merge_lora();
-            }
-            ImGui::EndDisabled();
+        ImGui::SameLine(x0 + aw - fh * 2 - sp);
+        ImGui::BeginDisabled(i == 0);
+        if (button("##up", BTN_GHOST, IC_ARROW_UP, fh, fh)) up = i;
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (button("##rm", BTN_GHOST, IC_TRASH, fh, fh)) remove = i;
+        ImGui::PopID();
+    }
+    if (up > 0) std::swap(s.layers[up], s.layers[up - 1]);
+    if (remove >= 0) s.layers.erase(s.layers.begin() + remove);
+    ImGui::SetNextItemWidth(px(190));
+    if (begin_combo("##add", layer_name(A.add_type))) {
+        for (int t = 0; t < L_TYPE_COUNT; ++t)
+            if (ImGui::Selectable(layer_name(t), t == A.add_type)) A.add_type = t;
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine();
+    if (button(tr(S::AddLayer), BTN_SECONDARY, IC_PLUS) && s.layers.size() < 64) {
+        LayerSpec l;
+        l.type = A.add_type;
+        s.layers.push_back(l);
+    }
+}
+
+void fit_card(float min_h, float width, float* natural) {
+    begin_card("fit", tr(S::MemoryFit), min_h, width);
+    double mb = (double)estimate_train_bytes(A.spec, A.cfg.batch) / (1024.0 * 1024.0);
+    double budget = A.has_plan ? A.plan.budget_mb : 512;
+    text(tr(S::Params), C::muted);
+    {
+        FontScope f(F.stat);
+        ImGui::TextUnformatted(fmt_count((double)estimate_params(A.spec)).c_str());
+    }
+    gap(4);
+    text(tr(S::EstRam), C::muted);
+    {
+        FontScope f(F.bold);
+        ImGui::TextUnformatted(fmt_mb(mb).c_str());
+    }
+    ImGui::SameLine();
+    {
+        FontScope f(F.small);
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + px(2));
+        text(strf(tr(S::Budget), budget).c_str(), C::muted);
+    }
+    float ratio = (float)(mb / std::max(1.0, budget));
+    const ImVec4& c = ratio <= 0.7f ? C::good : ratio <= 1.f ? C::warn : C::bad;
+    progress_bar(ratio, px(6), c);
+    gap(2);
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    icon(ImGui::GetWindowDrawList(), mb <= budget ? IC_CHECK : IC_WARN, ImVec2(p.x + px(8), p.y + ImGui::GetFontSize() * 0.5f), px(14), col(mb <= budget ? C::good : C::bad));
+    ImGui::SetCursorScreenPos(ImVec2(p.x + px(22), p.y));
+    ImGui::PushTextWrapPos(0);
+    text(tr(mb <= budget ? S::Fits : S::TooBig), mb <= budget ? C::good : C::bad);
+    ImGui::PopTextWrapPos();
+    end_card(natural);
+}
+
+void page_model() {
+    char b[256];
+    if (A.model) {
+        header(tr(S::NavModel), tr(S::ModelHelp), button_width(tr(S::ResetModel), IC_TRASH));
+        ImGui::BeginDisabled(busy());
+        if (button(tr(S::ResetModel), BTN_DANGER, IC_TRASH)) reset_model();
+        ImGui::EndDisabled();
+        header_end();
+        if (!A.model) return;
+        size_t total, train;
+        {
+            std::lock_guard<std::mutex> lk(A.trainer.model_mu);
+            total = A.model->param_count(false);
+            train = A.model->param_count(true);
         }
-        if (A.model) EndCard();
+        std::vector<Stat> st;
+        st.push_back({tr(S::ModelType), tr(A.model->spec.kind == MODEL_GPT ? S::TextModel : S::TableModel), "", C::text, IC_MODEL});
+        st.push_back({tr(S::Params), fmt_count((double)total), "", C::text, IC_LAYERS});
+        st.push_back({tr(S::Trainable), fmt_count((double)train), "", A.model->spec.lora_rank ? C::accent_hi : C::text, IC_TARGET});
+        stat_grid(st, px(200), false);
+        gap();
+        begin_card("built", tr(S::Network), 0, 0, tr(S::ResetHint));
+        draw_diagram(A.model->spec);
+        end_card();
+        gap();
+        begin_card("lora", tr(S::LoraTitle), 0, 0, tr(S::LoraHelp));
+        ImGui::BeginDisabled(busy());
+        if (A.model->spec.lora_rank == 0) {
+            float bw = button_width(tr(S::EnableLora), IC_PLUS);
+            field_label(tr(S::Rank), std::min(px(140), ImGui::GetContentRegionAvail().x * 0.3f));
+            ImGui::SetNextItemWidth(std::max(px(80), std::min(px(260), ImGui::GetContentRegionAvail().x - bw - px(16))));
+            slider_int("##rank", &A.lora_rank, 1, 32);
+            ImGui::SameLine(0, px(16));
+            if (button(tr(S::EnableLora), BTN_PRIMARY, IC_PLUS)) A.model->enable_lora(A.lora_rank);
+        } else {
+            std::snprintf(b, sizeof b, "%s: %d", tr(S::Rank), A.model->spec.lora_rank);
+            badge(b, C::accent_hi, true);
+            if (button(tr(S::MergeLora), BTN_SECONDARY, IC_LAYERS)) A.model->merge_lora();
+        }
+        ImGui::EndDisabled();
+        end_card();
         return;
     }
 
-    if (A.data.kind == DATA_NONE) { need_data_notice(); return; }
+    if (A.data.kind == DATA_NONE) {
+        header(tr(S::NavModel), tr(S::ModelHelp));
+        header_end();
+        if (empty_state(IC_DATA, nullptr, tr(S::NoData), tr(S::GoData)) == 1) A.page = PAGE_DATA;
+        return;
+    }
     finalize_spec();
-
-    if (PrimaryButton(tr(S::AutoBtn))) auto_configure();
+    float sp = ImGui::GetStyle().ItemSpacing.x;
+    header(tr(S::NavModel), tr(S::ModelHelp), button_width(tr(S::AutoBtn), IC_SPARK) + sp + button_width(tr(S::BuildModel), IC_CHECK));
+    if (button(tr(S::AutoBtn), BTN_SECONDARY, IC_SPARK)) auto_configure();
+    ImGui::SameLine();
+    if (button(tr(S::BuildModel), BTN_PRIMARY, IC_CHECK)) build_model();
+    header_end();
     if (A.has_plan) {
-        ImGui::SameLine();
-        std::snprintf(b, sizeof b, tr(S::AutoDone), tier_name(A.plan.tier));
-        ImGui::TextColored(kMuted, "%s", b);
+        badge(strf(tr(S::AutoDone), tier_name(A.plan.tier)).c_str(), C::blue);
+        gap(2);
     }
-    ImGui::Dummy(ImVec2(0, 4 * A.sc));
 
-    if (BeginCard("arch")) {
-        ImGui::SeparatorText(tr(S::Arch));
-        ModelSpec& s = A.spec;
-        if (s.kind == MODEL_GPT) {
-            int per = std::max(4, s.dim / std::max(1, s.heads));
-            ImGui::PushItemWidth(320 * A.sc);
-            ImGui::SliderInt(tr(S::Heads), &s.heads, 1, 12);
-            ImGui::SliderInt(tr(S::HeadDim), &per, 8, 64);
-            ImGui::SliderInt(tr(S::Layers), &s.nlayer, 1, 12);
-            int max_ctx = std::max(8, std::min(512, (int)A.data.n_train - 2));
-            ImGui::SliderInt(tr(S::Context), &s.ctx, 8, max_ctx);
-            ImGui::PopItemWidth();
-            s.heads = std::max(1, std::min(12, s.heads));
-            s.nlayer = std::max(1, std::min(12, s.nlayer));
-            s.dim = s.heads * std::max(4, std::min(64, per));
-            s.ctx = std::max(8, std::min(max_ctx, s.ctx));
-            std::snprintf(b, sizeof b, tr(S::Width), s.dim);
-            ImGui::TextColored(kMuted, "%s", b);
-        } else {
-            int remove = -1, up = -1;
-            for (int i = 0; i < (int)s.layers.size(); ++i) {
-                LayerSpec& l = s.layers[i];
-                ImGui::PushID(i);
-                ImGui::TextColored(kMuted, "%2d", i + 1);
-                ImGui::SameLine();
-                ImGui::SetNextItemWidth(190 * A.sc);
-                if (ImGui::BeginCombo("##type", layer_name(l.type))) {
-                    for (int t = 0; t < L_TYPE_COUNT; ++t)
-                        if (ImGui::Selectable(layer_name(t), t == l.type)) l.type = t;
-                    ImGui::EndCombo();
-                }
-                ImGui::SameLine();
-                if (l.type == L_DENSE) {
-                    ImGui::SetNextItemWidth(150 * A.sc);
-                    ImGui::InputInt(tr(S::Units), &l.units, 8, 64);
-                    l.units = std::max(1, std::min(4096, l.units));
-                } else if (l.type == L_DROPOUT) {
-                    ImGui::SetNextItemWidth(150 * A.sc);
-                    ImGui::SliderFloat("p", &l.p, 0.f, 0.8f, "%.2f");
-                } else {
-                    ImGui::Dummy(ImVec2(150 * A.sc, 1));
-                }
-                ImGui::SameLine(520 * A.sc);
-                if (ImGui::SmallButton("^") && i > 0) up = i;
-                ImGui::SameLine();
-                if (ImGui::SmallButton("x")) remove = i;
-                ImGui::PopID();
-            }
-            if (up > 0) std::swap(s.layers[up], s.layers[up - 1]);
-            if (remove >= 0) s.layers.erase(s.layers.begin() + remove);
-            ImGui::SetNextItemWidth(190 * A.sc);
-            if (ImGui::BeginCombo("##add", layer_name(A.add_type))) {
-                for (int t = 0; t < L_TYPE_COUNT; ++t)
-                    if (ImGui::Selectable(layer_name(t), t == A.add_type)) A.add_type = t;
-                ImGui::EndCombo();
-            }
-            ImGui::SameLine();
-            if (ImGui::Button(tr(S::AddLayer)) && s.layers.size() < 64) {
-                LayerSpec l;
-                l.type = A.add_type;
-                s.layers.push_back(l);
-            }
-        }
-        ImGui::Dummy(ImVec2(0, 4 * A.sc));
-        draw_diagram(s);
-    }
-    EndCard();
-
-    if (BeginCard("fit")) {
-        double mb = (double)estimate_train_bytes(A.spec, A.cfg.batch) / (1024.0 * 1024.0);
-        double budget = A.has_plan ? A.plan.budget_mb : 512;
-        Row(tr(S::Params), fmt_count((double)estimate_params(A.spec)).c_str());
-        char bud[96];
-        std::snprintf(bud, sizeof bud, tr(S::Budget), budget);
-        std::snprintf(b, sizeof b, "%s  (%s)", fmt_mb(mb).c_str(), bud);
-        Row(tr(S::EstRam), b);
-        if (mb <= budget) ImGui::TextColored(kGood, "%s", tr(S::Fits));
-        else ImGui::TextColored(kBad, "%s", tr(S::TooBig));
-    }
-    EndCard();
-    if (PrimaryButton(tr(S::BuildModel))) build_model();
+    static EqualRow row;
+    float g = px(16);
+    bool two = ImGui::GetContentRegionAvail().x > px(780);
+    float total = ImGui::GetContentRegionAvail().x;
+    float lw = two ? std::floor((total - g) * 0.62f) : 0;
+    begin_card("arch", tr(S::Arch), two ? row.prev : 0, lw);
+    arch_controls(A.spec);
+    end_card(row.track());
+    if (two) ImGui::SameLine(0, g);
+    else gap();
+    fit_card(two ? row.prev : 0, two ? total - lw - g : 0, row.track());
+    row.next();
+    gap();
+    begin_card("diagram", tr(S::Network));
+    draw_diagram(A.spec);
+    end_card();
 }
 
-void plot_loss(const TrainStats& st, float height) {
+// --------------------------------------------------------------- training
+
+void plot_loss(const TrainStats& st, ImVec2 size) {
     ImVec2 p0 = ImGui::GetCursorScreenPos();
-    ImVec2 size(ImGui::GetContentRegionAvail().x, height);
     ImGui::InvisibleButton("##plot", size);
+    bool hov = ImGui::IsItemHovered();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 p1(p0.x + size.x, p0.y + size.y);
-    dl->AddRectFilled(p0, p1, IM_COL32(20, 17, 15, 255), 8 * A.sc);
-    dl->AddRect(p0, p1, IM_COL32(64, 56, 50, 255), 8 * A.sc);
+    dl->AddRectFilled(p0, p1, col(C::surface), px(12));
+    dl->AddRect(p0, p1, col(C::border), px(12));
+    ImFont* sf = F.small ? F.small : ImGui::GetFont();
+
+    // legend
+    float lx = p0.x + px(18), ly = p0.y + px(16);
+    for (int k = 0; k < 2; ++k) {
+        const char* name = tr(k ? S::ValLoss : S::Loss);
+        const ImVec4& c = k ? C::blue : C::accent;
+        dl->AddRectFilled(ImVec2(lx, ly + sf->FontSize * 0.5f - px(1.5f)), ImVec2(lx + px(16), ly + sf->FontSize * 0.5f + px(1.5f)), col(c), px(2));
+        dl->AddText(sf, sf->FontSize, ImVec2(lx + px(22), ly), col(C::muted), name);
+        lx += px(22) + text_size(sf, name).x + px(22);
+    }
+
     if (st.train_hist.size() < 2) {
-        ImVec2 ts = ImGui::CalcTextSize(tr(S::PlotEmpty));
-        dl->AddText(ImVec2(p0.x + (size.x - ts.x) * 0.5f, p0.y + (size.y - ts.y) * 0.5f), ImGui::GetColorU32(kMuted), tr(S::PlotEmpty));
+        const char* msg = tr(S::PlotEmpty);
+        ImVec2 ts = ImGui::CalcTextSize(msg);
+        ImVec2 c(p0.x + size.x * 0.5f, p0.y + size.y * 0.5f);
+        icon(dl, IC_TREND, ImVec2(c.x, c.y - px(22)), px(30), col(C::subtle));
+        dl->AddText(ImVec2(c.x - ts.x * 0.5f, c.y + px(4)), col(C::muted), msg);
         return;
     }
     float lo = 1e30f, hi = -1e30f;
     for (float v : st.train_hist) { lo = std::min(lo, v); hi = std::max(hi, v); }
     for (float v : st.val_hist) { lo = std::min(lo, v); hi = std::max(hi, v); }
     if (hi - lo < 1e-6f) hi = lo + 1e-6f;
-    float padl = 58 * A.sc, padr = 14 * A.sc, padt = 30 * A.sc, padb = 14 * A.sc;
-    ImVec2 a(p0.x + padl, p0.y + padt), bq(p1.x - padr, p1.y - padb);
+    float headroom = (hi - lo) * 0.06f;
+    lo = std::max(0.f, lo - headroom);
+    hi += headroom;
+    ImVec2 a(p0.x + px(60), p0.y + px(46)), bq(p1.x - px(22), p1.y - px(36));
     int total = std::max(st.total, (int)st.train_hist.size());
     auto X = [&](float step) { return a.x + (bq.x - a.x) * (step - 1) / std::max(1, total - 1); };
     auto Y = [&](float v) { return bq.y - (bq.y - a.y) * (v - lo) / (hi - lo); };
-    char b[32];
-    for (int g = 0; g <= 4; ++g) {
-        float v = lo + (hi - lo) * g / 4.f, y = Y(v);
-        dl->AddLine(ImVec2(a.x, y), ImVec2(bq.x, y), IM_COL32(48, 42, 38, 255));
+    char b[64];
+    for (int gi = 0; gi <= 4; ++gi) {
+        float v = lo + (hi - lo) * gi / 4.f, y = Y(v);
+        dl->AddLine(ImVec2(a.x, y), ImVec2(bq.x, y), col(C::border, gi == 0 ? 1.f : 0.55f));
         std::snprintf(b, sizeof b, "%.3f", v);
-        ImVec2 ts = ImGui::CalcTextSize(b);
-        dl->AddText(ImVec2(a.x - ts.x - 6 * A.sc, y - ts.y * 0.5f), ImGui::GetColorU32(kMuted), b);
+        ImVec2 ts = text_size(sf, b);
+        dl->AddText(sf, sf->FontSize, ImVec2(a.x - ts.x - px(10), y - ts.y * 0.5f), col(C::subtle), b);
     }
+    for (int gi = 0; gi <= 4; ++gi) {
+        int step = gi == 0 ? 1 : (int)std::lround((double)total * gi / 4);
+        float x = X((float)step);
+        std::snprintf(b, sizeof b, "%d", step);
+        ImVec2 ts = text_size(sf, b);
+        float tx = std::min(std::max(x - ts.x * 0.5f, a.x - px(4)), bq.x - ts.x + px(4));
+        dl->AddText(sf, sf->FontSize, ImVec2(tx, bq.y + px(10)), col(C::subtle), b);
+    }
+
     int n = (int)st.train_hist.size();
     int stride = std::max(1, n / std::max(1, (int)(bq.x - a.x)));
-    for (int i = 0; i < n; i += stride) dl->PathLineTo(ImVec2(X((float)(i + 1)), Y(st.train_hist[i])));
-    dl->PathLineTo(ImVec2(X((float)n), Y(st.train_hist[n - 1])));
-    dl->PathStroke(ImGui::GetColorU32(kEmber), 0, 2.f * A.sc);
-    for (size_t i = 0; i < st.val_hist.size(); ++i) dl->PathLineTo(ImVec2(X((float)st.val_steps[i]), Y(st.val_hist[i])));
-    dl->PathStroke(ImGui::GetColorU32(kBlue), 0, 2.f * A.sc);
-    for (size_t i = 0; i < st.val_hist.size(); ++i)
-        dl->AddCircleFilled(ImVec2(X((float)st.val_steps[i]), Y(st.val_hist[i])), 3 * A.sc, ImGui::GetColorU32(kBlue));
-    float lx = a.x, ly = p0.y + 8 * A.sc;
-    for (int k = 0; k < 2; ++k) {
-        const char* name = tr(k ? S::ValLoss : S::Loss);
-        dl->AddRectFilled(ImVec2(lx, ly + 5 * A.sc), ImVec2(lx + 14 * A.sc, ly + 9 * A.sc), ImGui::GetColorU32(k ? kBlue : kEmber));
-        dl->AddText(ImVec2(lx + 20 * A.sc, ly - 2 * A.sc), ImGui::GetColorU32(ImGuiCol_Text), name);
-        lx += ImGui::CalcTextSize(name).x + 44 * A.sc;
+    std::vector<ImVec2> pts;
+    for (int i = 0; i < n; i += stride) pts.push_back(ImVec2(X((float)(i + 1)), Y(st.train_hist[i])));
+    pts.push_back(ImVec2(X((float)n), Y(st.train_hist[n - 1])));
+
+    // area under the training curve, fading towards the axis
+    ImVec2 uv = ImGui::GetFontTexUvWhitePixel();
+    float span = std::max(1.f, bq.y - a.y);
+    for (size_t i = 0; i + 1 < pts.size(); ++i) {
+        ImU32 c0 = col(C::accent, 0.20f * (bq.y - pts[i].y) / span), c1 = col(C::accent, 0.20f * (bq.y - pts[i + 1].y) / span);
+        ImU32 cb = col(C::accent, 0.f);
+        dl->PrimReserve(6, 4);
+        ImDrawIdx idx = (ImDrawIdx)dl->_VtxCurrentIdx;
+        dl->PrimWriteVtx(pts[i], uv, c0);
+        dl->PrimWriteVtx(pts[i + 1], uv, c1);
+        dl->PrimWriteVtx(ImVec2(pts[i + 1].x, bq.y), uv, cb);
+        dl->PrimWriteVtx(ImVec2(pts[i].x, bq.y), uv, cb);
+        dl->PrimWriteIdx(idx); dl->PrimWriteIdx((ImDrawIdx)(idx + 1)); dl->PrimWriteIdx((ImDrawIdx)(idx + 2));
+        dl->PrimWriteIdx(idx); dl->PrimWriteIdx((ImDrawIdx)(idx + 2)); dl->PrimWriteIdx((ImDrawIdx)(idx + 3));
+    }
+    dl->AddPolyline(pts.data(), (int)pts.size(), col(C::accent), 0, px(2.f));
+    if (!st.val_hist.empty()) {
+        std::vector<ImVec2> vp;
+        for (size_t i = 0; i < st.val_hist.size(); ++i) vp.push_back(ImVec2(X((float)st.val_steps[i]), Y(st.val_hist[i])));
+        if (vp.size() >= 2) dl->AddPolyline(vp.data(), (int)vp.size(), col(C::blue), 0, px(2.f));
+        for (const ImVec2& q : vp) {
+            dl->AddCircleFilled(q, px(3.5f), col(C::surface));
+            dl->AddCircle(q, px(3.5f), col(C::blue), 0, px(1.6f));
+        }
+    }
+
+    // hover read-out
+    ImVec2 m = ImGui::GetIO().MousePos;
+    if (hov && m.x >= a.x && m.x <= bq.x) {
+        int step = (int)std::lround((m.x - a.x) / std::max(1.f, bq.x - a.x) * (total - 1) + 1);
+        int idx = std::max(0, std::min(n - 1, step - 1));
+        float x = X((float)(idx + 1));
+        dl->AddLine(ImVec2(x, a.y), ImVec2(x, bq.y), col(C::border_hi), 1.f);
+        ImVec2 tp(x, Y(st.train_hist[idx]));
+        dl->AddCircleFilled(tp, px(5), col(C::surface));
+        dl->AddCircle(tp, px(5), col(C::accent), 0, px(2));
+        std::string l1 = strf(tr(S::StepLbl), idx + 1);
+        std::string l2 = strf("%s  %.4f", tr(S::Loss), st.train_hist[idx]);
+        std::string l3;
+        if (!st.val_hist.empty()) {
+            size_t best = 0;
+            for (size_t i = 1; i < st.val_steps.size(); ++i)
+                if (std::abs(st.val_steps[i] - (idx + 1)) < std::abs(st.val_steps[best] - (idx + 1))) best = i;
+            ImVec2 vq(X((float)st.val_steps[best]), Y(st.val_hist[best]));
+            dl->AddCircleFilled(vq, px(5), col(C::surface));
+            dl->AddCircle(vq, px(5), col(C::blue), 0, px(2));
+            l3 = strf("%s  %.4f", tr(S::ValLoss), st.val_hist[best]);
+        }
+        ImFont* bf = F.small_bold ? F.small_bold : sf;
+        float tw = std::max(text_size(bf, l1.c_str()).x, std::max(text_size(sf, l2.c_str()).x, text_size(sf, l3.c_str()).x)) + px(34);
+        float th = px(12) * 2 + bf->FontSize + (sf->FontSize + px(4)) * (l3.empty() ? 1 : 2);
+        float bx = x + px(14);
+        if (bx + tw > p1.x - px(8)) bx = x - px(14) - tw;
+        float by = std::max(a.y, std::min(m.y - th * 0.5f, bq.y - th));
+        dl->AddRectFilled(ImVec2(bx, by), ImVec2(bx + tw, by + th), col(C::surface3), px(8));
+        dl->AddRect(ImVec2(bx, by), ImVec2(bx + tw, by + th), col(C::border_hi), px(8));
+        float ty = by + px(12);
+        dl->AddText(bf, bf->FontSize, ImVec2(bx + px(12), ty), col(C::text), l1.c_str());
+        ty += bf->FontSize + px(4);
+        dl->AddCircleFilled(ImVec2(bx + px(16), ty + sf->FontSize * 0.5f), px(3.5f), col(C::accent));
+        dl->AddText(sf, sf->FontSize, ImVec2(bx + px(26), ty), col(C::text), l2.c_str());
+        if (!l3.empty()) {
+            ty += sf->FontSize + px(4);
+            dl->AddCircleFilled(ImVec2(bx + px(16), ty + sf->FontSize * 0.5f), px(3.5f), col(C::blue));
+            dl->AddText(sf, sf->FontSize, ImVec2(bx + px(26), ty), col(C::text), l3.c_str());
+        }
     }
 }
 
-ImVec4 tone_color(int tone) {
+const ImVec4& tone_color(int tone) {
     switch (tone) {
-        case State::T_GOOD: return kGood;
-        case State::T_BAD: return kBad;
-        case State::T_ACCENT: return kEmberHi;
-        case State::T_MUTED: return kMuted;
+        case State::T_GOOD: return C::good;
+        case State::T_BAD: return C::bad;
+        case State::T_ACCENT: return C::accent_hi;
+        case State::T_MUTED: return C::muted;
     }
-    return ImGui::GetStyleColorVec4(ImGuiCol_Text);
+    return C::text;
 }
 
 void log_view(float height) {
     ImGui::BeginDisabled(A.log.empty());
-    if (ImGui::Button(tr(S::CopyLog))) {
+    if (button(tr(S::CopyLog), BTN_GHOST, IC_COPY)) {
         std::string all;
         for (auto& l : A.log) all += l.text + "\n";
         ImGui::SetClipboardText(all.c_str());
     }
     ImGui::EndDisabled();
-    ImGui::SameLine();
-    if (ImGui::Button(tr(S::OpenLogs))) {
+    ImGui::SameLine(0, px(4));
+    if (button(tr(S::OpenLogs), BTN_GHOST, IC_FOLDER)) {
         std::error_code ec;
         std::filesystem::create_directories(upath(logs_dir()), ec);
         open_folder(logs_dir());
     }
     if (!A.log_path.empty()) {
-        ImGui::SameLine();
-        char b[2400];
-        std::snprintf(b, sizeof b, tr(S::LogFile), A.log_path.c_str());
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextColored(kMuted, "%s", b);
+        ImGui::SameLine(0, px(12));
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        float w = ImGui::GetContentRegionAvail().x, fh = ImGui::GetFrameHeight();
+        ImFont* sf = F.small ? F.small : ImGui::GetFont();
+        std::string s = strf(tr(S::LogFile), std::filesystem::u8path(A.log_path).filename().u8string().c_str());
+        ImGui::Dummy(ImVec2(std::max(1.f, w), fh));
+        text_ellipsis(ImGui::GetWindowDrawList(), sf, ImVec2(p.x, p.y + (fh - sf->FontSize) * 0.5f), w, s.c_str(), col(C::subtle));
+        tooltip(A.log_path.c_str());
     }
-    ImGui::BeginChild("##log", ImVec2(0, std::max(120 * A.sc, height - ImGui::GetFrameHeightWithSpacing())), ImGuiChildFlags_Borders,
-                      ImGuiWindowFlags_HorizontalScrollbar);
-    if (A.log.empty()) Muted(tr(S::LogEmpty));
-    bool at_end = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4;
-    ImGuiListClipper clip;
-    clip.Begin((int)A.log.size());
-    while (clip.Step())
-        for (int i = clip.DisplayStart; i < clip.DisplayEnd; ++i)
-            ImGui::TextColored(tone_color(A.log[i].tone), "%s", A.log[i].text.c_str());
-    if (at_end) ImGui::SetScrollHereY(1.f);
+    float h = std::max(px(140), height - ImGui::GetFrameHeight() - ImGui::GetStyle().ItemSpacing.y);
+    if (begin_inset("##log", h, true)) {
+        FontScope f(F.mono);
+        if (A.log.empty()) text(tr(S::LogEmpty), C::subtle);
+        bool at_end = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4;
+        ImGuiListClipper clip;
+        clip.Begin((int)A.log.size());
+        while (clip.Step())
+            for (int i = clip.DisplayStart; i < clip.DisplayEnd; ++i) {
+                const std::string& t = A.log[i].text;
+                size_t close = t.size() > 1 && t[0] == '[' ? t.find("] ") : std::string::npos;
+                if (close != std::string::npos && close < 12) {
+                    text(t.substr(0, close + 1).c_str(), C::subtle);
+                    ImGui::SameLine(0, ImGui::CalcTextSize(" ").x);
+                    text(t.c_str() + close + 2, tone_color(A.log[i].tone));
+                } else {
+                    text(t.c_str(), tone_color(A.log[i].tone));
+                }
+            }
+        if (at_end) ImGui::SetScrollHereY(1.f);
+    }
     ImGui::EndChild();
 }
 
-void tests_view(const TrainStats& st) {
-    char b[1024];
-    Muted(tr(S::TestsHelp));
-    if (!A.q_tag.empty()) {
-        std::snprintf(b, sizeof b, tr(S::DialogDetected), A.q_tag.c_str(), A.a_tag.c_str());
-        ImGui::TextColored(kBlue, "%s", b);
-    } else {
-        Muted(tr(S::NoDialog));
+void history_bars(const TrainStats& st, float height) {
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    float w = ImGui::GetContentRegionAvail().x;
+    ImGui::Dummy(ImVec2(w, height));
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    int n = (int)st.probe_hist.size();
+    float total = (float)std::max(1, st.probe_total);
+    for (int g = 0; g <= 2; ++g) {
+        float y = p.y + height - height * g / 2.f;
+        dl->AddLine(ImVec2(p.x, y), ImVec2(p.x + w, y), col(C::border, g == 0 ? 1.f : 0.5f));
     }
-    bool run = busy();
-    ImGui::BeginDisabled(run);
-    ImGui::InputTextMultiline("##tests", A.tests, sizeof A.tests, ImVec2(-1, 120 * A.sc));
-    ImGui::EndDisabled();
-    std::vector<Probe> tests = current_tests();
-    std::snprintf(b, sizeof b, tr(S::TestsCount), (int)tests.size());
-    ImGui::TextColored(kMuted, "%s", b);
-    if (!A.q_tag.empty()) {
-        ImGui::SameLine();
-        ImGui::BeginDisabled(run);
-        if (ImGui::SmallButton(tr(S::UseDataQuestions))) tests_from_data();
-        ImGui::EndDisabled();
+    if (n == 0) return;
+    float slot = w / n, bw = std::max(px(2), std::min(px(22), slot * 0.62f));
+    for (int i = 0; i < n; ++i) {
+        float f = st.probe_hist[i] / total;
+        float x = p.x + slot * i + (slot - bw) * 0.5f;
+        float top = p.y + height - std::max(px(5), (height - px(2)) * f);
+        const ImVec4& c = f >= 1.f ? C::good : f > 0 ? C::accent : C::bad;
+        dl->AddRectFilled(ImVec2(x, top), ImVec2(x + bw, p.y + height), col(c, i == n - 1 ? 1.f : 0.65f), px(3), ImDrawFlags_RoundCornersTop);
     }
-    ImGui::SameLine();
-    ImGui::BeginDisabled(!can_run_tests() || tests.empty());
-    if (ImGui::SmallButton(tr(S::RunTestsNow))) run_tests_now();
-    ImGui::EndDisabled();
-    if (tests.empty()) Muted(tr(S::NoTests));
-    else if (!A.model || A.model->spec.kind != MODEL_GPT) Muted(tr(S::NeedTextModel));
+}
 
-    if (A.results.empty()) return;
+void tests_view(const TrainStats& st) {
+    bool run = busy();
+    std::vector<Probe> tests = current_tests();
     int pass = 0;
     for (auto& r : A.results) pass += r.pass;
-    ImGui::Dummy(ImVec2(0, 2 * A.sc));
-    std::snprintf(b, sizeof b, tr(S::TestsPassed), pass, (int)A.results.size());
-    if (A.title_font) ImGui::PushFont(A.title_font);
-    ImGui::TextColored(pass == (int)A.results.size() ? kGood : pass > 0 ? kEmberHi : kBad, "%s", b);
-    if (A.title_font) ImGui::PopFont();
-    ImGui::SameLine();
-    ImGui::AlignTextToFramePadding();
-    if (A.results_step > 0) std::snprintf(b, sizeof b, tr(S::ResultsAt), A.results_step);
-    else std::snprintf(b, sizeof b, "%s", tr(S::ResultsManual));
-    ImGui::TextColored(kMuted, "%s", b);
+    int nres = (int)A.results.size();
 
-    if (st.probe_hist.size() >= 2 && A.results_step > 0) {
-        std::vector<float> h(st.probe_hist.begin(), st.probe_hist.end());
-        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, kEmber);
-        ImGui::PlotHistogram("##phist", h.data(), (int)h.size(), 0, tr(S::TestsHistory), 0.f, (float)std::max(1, st.probe_total),
-                             ImVec2(-1, 60 * A.sc));
-        ImGui::PopStyleColor();
-    }
-
-    int n = (int)std::min(A.results.size(), A.run_tests.size());
-    ImGuiTableFlags tf = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable;
-    float th = std::max(140 * A.sc, ImGui::GetContentRegionAvail().y - 4 * A.sc);
-    if (ImGui::BeginTable("##results", 4, tf, ImVec2(0, th))) {
-        ImGui::TableSetupScrollFreeze(0, 1);
-        ImGui::TableSetupColumn(tr(S::ColQuestion), ImGuiTableColumnFlags_WidthStretch, 1.2f);
-        ImGui::TableSetupColumn(tr(S::ColExpected), ImGuiTableColumnFlags_WidthStretch, 1.f);
-        ImGui::TableSetupColumn(tr(S::ColAnswer), ImGuiTableColumnFlags_WidthStretch, 1.f);
-        ImGui::TableSetupColumn(tr(S::Result), ImGuiTableColumnFlags_WidthFixed, 70 * A.sc);
-        ImGui::TableHeadersRow();
-        for (int i = 0; i < n; ++i) {
-            const ProbeResult& r = A.results[i];
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn();
-            ImGui::TextWrapped("%s", A.run_tests[i].question.c_str());
-            ImGui::TableNextColumn();
-            ImGui::TextWrapped("%s", A.run_tests[i].expected.c_str());
-            ImGui::TableNextColumn();
-            ImGui::PushStyleColor(ImGuiCol_Text, r.pass ? kGood : kBad);
-            ImGui::TextWrapped("%s", r.answer.empty() ? "-" : r.answer.c_str());
-            ImGui::PopStyleColor();
-            ImGui::TableNextColumn();
-            ImGui::TextColored(r.pass ? kGood : kBad, "%s", tr(r.pass ? S::Pass : S::Fail));
+    // ---- summary
+    if (nres > 0) {
+        float frac = (float)pass / nres;
+        const ImVec4& c = pass == nres ? C::good : pass > 0 ? C::accent : C::bad;
+        ring(frac, px(34), px(7), c, strf("%d/%d", pass, nres).c_str());
+        ImGui::SameLine(0, px(18));
+        ImGui::BeginGroup();
+        ImGui::Dummy(ImVec2(0, px(8)));
+        {
+            FontScope f(F.h2);
+            text(strf(tr(S::TestsPassed), pass, nres).c_str(), c);
         }
-        ImGui::EndTable();
+        text(A.results_step > 0 ? strf(tr(S::ResultsAt), A.results_step).c_str() : tr(S::ResultsManual), C::muted);
+        ImGui::EndGroup();
+    } else {
+        banner(tr(S::NoResults), C::muted, IC_INFO);
+    }
+    gap(4);
+
+    // ---- editor and history
+    static EqualRow row;
+    bool hist = st.probe_hist.size() >= 2 && A.results_step > 0;
+    float g = px(16), total = ImGui::GetContentRegionAvail().x;
+    bool two = hist && total > px(820);
+    float lw = two ? std::floor((total - g) * 0.6f) : 0;
+    begin_card("editor", tr(S::TabTests), two ? row.prev : 0, lw, tr(S::TestsHelp));
+    if (!A.q_tag.empty()) text_wrapped(strf(tr(S::DialogDetected), A.q_tag.c_str(), A.a_tag.c_str()).c_str(), C::blue, F.small);
+    else text_wrapped(tr(S::NoDialog), C::muted, F.small);
+    ImGui::BeginDisabled(run);
+    {
+        FontScope f(F.mono);
+        ImGui::InputTextMultiline("##tests", A.tests, sizeof A.tests, ImVec2(-FLT_MIN, px(130)));
+    }
+    ImGui::EndDisabled();
+    float sp = ImGui::GetStyle().ItemSpacing.x;
+    float bw = button_width(tr(S::RunTestsNow), IC_PLAY) + (A.q_tag.empty() ? 0 : button_width(tr(S::UseDataQuestions), IC_REFRESH) + sp);
+    float x0 = ImGui::GetCursorPosX(), aw = ImGui::GetContentRegionAvail().x;
+    ImGui::AlignTextToFramePadding();
+    text(strf(tr(S::TestsCount), (int)tests.size()).c_str(), C::muted);
+    float count_end = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x + px(12);
+    ImGui::SameLine(std::max(count_end, x0 + aw - bw));
+    if (!A.q_tag.empty()) {
+        ImGui::BeginDisabled(run);
+        if (button(tr(S::UseDataQuestions), BTN_SECONDARY, IC_REFRESH)) tests_from_data();
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+    }
+    ImGui::BeginDisabled(!can_run_tests() || tests.empty());
+    if (button(tr(S::RunTestsNow), BTN_PRIMARY, IC_PLAY)) run_tests_now();
+    ImGui::EndDisabled();
+    if (tests.empty()) text_wrapped(tr(S::NoTests), C::muted, F.small);
+    else if (!A.model || A.model->spec.kind != MODEL_GPT) text_wrapped(tr(S::NeedTextModel), C::muted, F.small);
+    end_card(row.track());
+    if (hist) {
+        if (two) ImGui::SameLine(0, g);
+        else gap();
+        begin_card("history", tr(S::TestsHistory), two ? row.prev : 0, two ? total - lw - g : 0,
+                   strf(tr(S::Latest), st.probe_hist.back(), st.probe_total).c_str());
+        float hh = two ? std::max(px(90), row.prev - ImGui::GetCursorPosY() - card_padding_y()) : px(110);
+        history_bars(st, hh);
+        end_card(nullptr);
+        row.cur = std::max(row.cur, px(180));
+    }
+    row.next();
+
+    // ---- results
+    int n = (int)std::min(A.results.size(), A.run_tests.size());
+    if (n > 0) {
+        gap();
+        ImGuiTableFlags tf = ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_BordersOuter | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable |
+                             ImGuiTableFlags_SizingStretchProp;
+        ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(px(12), px(9)));
+        if (ImGui::BeginTable("##results", 4, tf)) {
+            ImGui::TableSetupColumn(tr(S::ColQuestion), ImGuiTableColumnFlags_WidthStretch, 1.2f);
+            ImGui::TableSetupColumn(tr(S::ColExpected), ImGuiTableColumnFlags_WidthStretch, 1.f);
+            ImGui::TableSetupColumn(tr(S::ColAnswer), ImGuiTableColumnFlags_WidthStretch, 1.f);
+            float rw = std::max(badge_width(tr(S::Pass)), badge_width(tr(S::Fail))) + px(8);
+            ImGui::TableSetupColumn(tr(S::Result), ImGuiTableColumnFlags_WidthFixed, std::max(rw, ImGui::CalcTextSize(tr(S::Result)).x + px(8)));
+            table_headers();
+            for (int i = 0; i < n; ++i) {
+                const ProbeResult& r = A.results[i];
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::PushTextWrapPos(0);
+                ImGui::TextUnformatted(A.run_tests[i].question.c_str());
+                ImGui::TableNextColumn();
+                text(A.run_tests[i].expected.c_str(), C::muted);
+                ImGui::TableNextColumn();
+                text(r.answer.empty() ? "-" : r.answer.c_str(), r.pass ? C::good : C::bad);
+                ImGui::PopTextWrapPos();
+                ImGui::TableNextColumn();
+                badge(tr(r.pass ? S::Pass : S::Fail), r.pass ? C::good : C::bad);
+            }
+            ImGui::EndTable();
+        }
+        ImGui::PopStyleVar();
     }
 }
 
 void train_settings(bool run) {
     ImGui::BeginDisabled(run);
-    float w = (ImGui::GetContentRegionAvail().x - 24 * A.sc) / 2;
-    ImGui::BeginGroup();
-    ImGui::PushItemWidth(170 * A.sc);
-    ImGui::InputInt(tr(S::Steps), &A.cfg.steps, 100, 1000);
-    ImGui::InputInt(tr(S::BatchSize), &A.cfg.batch, 1, 8);
-    ImGui::InputInt(tr(S::Accum), &A.cfg.accum, 1, 2);
-    ImGui::InputInt(tr(S::EvalEvery), &A.cfg.eval_every, 10, 100);
-    ImGui::InputInt(tr(S::Patience), &A.cfg.patience, 1, 5);
-    Tooltip(tr(S::PatienceHelp));
-    ImGui::PopItemWidth();
-    ImGui::EndGroup();
-    ImGui::SameLine(w + 24 * A.sc);
-    ImGui::BeginGroup();
-    ImGui::PushItemWidth(170 * A.sc);
-    ImGui::InputFloat(tr(S::LR), &A.cfg.lr, 0, 0, "%.5f");
-    ImGui::InputFloat(tr(S::WD), &A.cfg.weight_decay, 0, 0, "%.4f");
-    ImGui::SliderInt(tr(S::ThreadsUse), &A.cfg.threads, 1, std::max(1, A.sys.logical));
-    const char* opts[] = {"AdamW", "SGD + momentum"};
-    ImGui::Combo(tr(S::Optimizer), &A.cfg.optimizer, opts, 2);
-    if (A.data.kind == DATA_TEXT) {
-        ImGui::InputInt(tr(S::TestEvery), &A.cfg.probe_every, 50, 500);
-        Tooltip(tr(S::TestEveryHelp));
+    int cols = ImGui::GetContentRegionAvail().x > px(720) ? 2 : 1;
+    ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(px(12), 0));
+    if (ImGui::BeginTable("##cfg", cols, ImGuiTableFlags_SizingStretchSame)) {
+        ImGui::TableNextColumn();
+        float lw = std::min(px(220), ImGui::GetContentRegionAvail().x * 0.5f);
+        field_label(tr(S::Steps), lw);
+        ImGui::InputInt("##steps", &A.cfg.steps, 0, 0);
+        field_label(tr(S::BatchSize), lw);
+        ImGui::InputInt("##batch", &A.cfg.batch, 0, 0);
+        field_label(tr(S::Accum), lw);
+        ImGui::InputInt("##accum", &A.cfg.accum, 0, 0);
+        field_label(tr(S::EvalEvery), lw);
+        ImGui::InputInt("##eval", &A.cfg.eval_every, 0, 0);
+        field_label(tr(S::Patience), lw, tr(S::PatienceHelp));
+        ImGui::InputInt("##patience", &A.cfg.patience, 0, 0);
+        if (cols == 2) ImGui::TableNextColumn();
+        field_label(tr(S::LR), lw);
+        ImGui::InputFloat("##lr", &A.cfg.lr, 0, 0, "%.5f");
+        field_label(tr(S::WD), lw);
+        ImGui::InputFloat("##wd", &A.cfg.weight_decay, 0, 0, "%.4f");
+        field_label(tr(S::ThreadsUse), lw);
+        slider_int("##threads", &A.cfg.threads, 1, std::max(1, A.sys.logical));
+        const char* opts[] = {"AdamW", "SGD + momentum"};
+        field_label(tr(S::Optimizer), lw);
+        combo("##opt", &A.cfg.optimizer, opts, 2);
+        if (A.data.kind == DATA_TEXT) {
+            field_label(tr(S::TestEvery), lw, tr(S::TestEveryHelp));
+            ImGui::InputInt("##probe", &A.cfg.probe_every, 0, 0);
+        }
+        ImGui::EndTable();
     }
-    ImGui::PopItemWidth();
-    ImGui::EndGroup();
-    ImGui::Checkbox(tr(S::KeepBest), &A.cfg.keep_best);
-    Tooltip(tr(S::KeepBestHelp));
+    ImGui::PopStyleVar();
+    gap(2);
+    checkbox(tr(S::KeepBest), &A.cfg.keep_best);
+    tooltip(tr(S::KeepBestHelp));
     if (A.data.kind == DATA_TEXT) {
-        ImGui::SameLine(w + 24 * A.sc);
-        ImGui::Checkbox(tr(S::StopOnPass), &A.stop_on_pass);
+        ImGui::SameLine(0, px(28));
+        checkbox(tr(S::StopOnPass), &A.stop_on_pass);
     }
     A.cfg.patience = std::max(0, std::min(1000, A.cfg.patience));
     A.cfg.probe_every = std::max(0, A.cfg.probe_every);
@@ -1092,94 +1333,85 @@ void train_settings(bool run) {
     ImGui::EndDisabled();
     const ModelSpec& ms = A.model && model_matches_data() ? A.model->spec : A.spec;
     double mb = (double)estimate_train_bytes(ms, A.cfg.batch) / (1024.0 * 1024.0);
-    char eff[96], b[256];
-    std::snprintf(eff, sizeof eff, tr(S::EffBatch), A.cfg.batch * A.cfg.accum);
-    std::snprintf(b, sizeof b, "%s   |   %s: %s", eff, tr(S::EstRam), fmt_mb(mb).c_str());
-    ImGui::TextColored(kMuted, "%s", b);
+    std::string info = strf(tr(S::EffBatch), A.cfg.batch * A.cfg.accum) + "   \xC2\xB7   " + tr(S::EstRam) + ": " + fmt_mb(mb);
+    text_wrapped(info.c_str(), C::subtle, F.small);
 }
 
 void page_train() {
-    Title(tr(S::NavTrain));
-    if (A.data.kind == DATA_NONE) { need_data_notice(); return; }
+    if (A.data.kind == DATA_NONE) {
+        header(tr(S::NavTrain), tr(S::TrainHelp));
+        header_end();
+        if (empty_state(IC_DATA, nullptr, tr(S::NoData), tr(S::GoData)) == 1) A.page = PAGE_DATA;
+        return;
+    }
     TrainStats st = A.trainer.stats();
     bool run = busy();
-    char b[256];
-
-    if (BeginCard("cfg")) {
-        // Folded while training so the chart, log and tests get the room.
-        if (A.fold_settings) {
-            ImGui::SetNextItemOpen(false);
-            A.fold_settings = false;
-        }
-        if (ImGui::CollapsingHeader(tr(S::Settings), ImGuiTreeNodeFlags_DefaultOpen)) train_settings(run);
-    }
-    EndCard();
-
-    ImVec2 bs(190 * A.sc, 34 * A.sc);
+    float sp = ImGui::GetStyle().ItemSpacing.x;
+    const char* main_label = tr(A.model && model_matches_data() ? S::ContinueTrain : S::StartTrain);
+    bool paused = A.trainer.paused();
+    const char* pause_label = tr(paused ? S::Resume : S::Pause);
+    float aw = run ? button_width(pause_label, IC_PAUSE) + sp + button_width(tr(S::Stop), IC_STOP) : button_width(main_label, IC_PLAY);
+    header(tr(S::NavTrain), tr(S::TrainHelp), aw);
     if (!run) {
-        if (PrimaryButton(tr(A.model && model_matches_data() ? S::ContinueTrain : S::StartTrain), bs)) begin_training();
+        if (button(main_label, BTN_PRIMARY, IC_PLAY)) begin_training();
     } else {
-        if (PrimaryButton(tr(A.trainer.paused() ? S::Resume : S::Pause), bs)) A.trainer.pause(!A.trainer.paused());
+        if (button(pause_label, BTN_SECONDARY, paused ? IC_PLAY : IC_PAUSE)) A.trainer.pause(!paused);
         ImGui::SameLine();
-        if (ImGui::Button(tr(S::Stop), ImVec2(120 * A.sc, bs.y))) A.trainer.stop();
+        if (button(tr(S::Stop), BTN_DANGER, IC_STOP)) A.trainer.stop();
     }
-    ImGui::SameLine(0, 18 * A.sc);
-    static const S state_names[] = {S::StIdle, S::StRunning, S::StPaused, S::StDone, S::StStopped, S::StError};
-    const ImVec4& sc = st.state == TS_ERROR ? kBad : st.state == TS_DONE ? kGood : st.state == TS_RUNNING ? kEmberHi : kMuted;
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextColored(sc, "%s", tr(state_names[st.state]));
-    if (st.state == TS_ERROR) {
-        ImGui::SameLine();
-        ImGui::TextColored(kBad, "%s", st.error.c_str());
-    }
-    ImGui::Dummy(ImVec2(0, 4 * A.sc));
+    header_end();
 
-    std::snprintf(b, sizeof b, "%d / %d", st.step, st.total);
-    ImGui::PushStyleColor(ImGuiCol_PlotHistogram, kEmber);
-    ImGui::ProgressBar(st.total > 0 ? (float)st.step / st.total : 0.f, ImVec2(-1, 22 * A.sc), b);
-    ImGui::PopStyleColor();
-
-    if (ImGui::BeginTable("##metrics", 6, ImGuiTableFlags_SizingStretchSame)) {
-        auto cell = [&](const char* label, const char* value, const ImVec4& col) {
-            ImGui::TableNextColumn();
-            ImGui::TextColored(kMuted, "%s", label);
-            ImGui::TextColored(col, "%s", value);
-        };
-        const ImVec4 white = ImGui::GetStyleColorVec4(ImGuiCol_Text);
-        std::snprintf(b, sizeof b, st.step ? "%.4f" : "-", st.loss);
-        cell(tr(S::Loss), b, kEmber);
-        std::snprintf(b, sizeof b, st.val_loss >= 0 ? "%.4f" : "-", st.val_loss);
-        cell(tr(S::ValLoss), b, kBlue);
-        std::snprintf(b, sizeof b, st.val_acc >= 0 ? "%.1f%%" : "-", st.val_acc * 100);
-        cell(tr(S::Accuracy), b, white);
-        if (st.step) std::snprintf(b, sizeof b, tr(A.data.kind == DATA_TEXT ? S::TokPerSec : S::SampPerSec), st.items_per_sec);
-        else std::snprintf(b, sizeof b, "-");
-        cell(tr(S::Speed), b, white);
-        cell(tr(S::Elapsed), fmt_time(st.elapsed).c_str(), white);
-        cell(tr(S::Eta), st.state == TS_RUNNING || st.state == TS_PAUSED ? fmt_time(st.eta).c_str() : "-", white);
-        ImGui::EndTable();
+    // ---- status
+    begin_card("status");
+    {
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        float w = ImGui::GetContentRegionAvail().x;
+        const char* sname = state_name(st.state);
+        badge(sname, state_color(st.state), true, st.state == TS_RUNNING);
+        float bh = ImGui::GetItemRectSize().y;
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        std::string steps = strf(tr(S::StepOf), st.step, st.total);
+        float fs = ImGui::GetFontSize();
+        dl->AddText(ImVec2(p.x + badge_width(sname) + px(12), p.y + (bh - fs) * 0.5f), col(C::muted), steps.c_str());
+        std::string pct = strf("%.0f%%", st.total > 0 ? 100.0 * st.step / st.total : 0.0);
+        ImFont* bf = F.bold ? F.bold : ImGui::GetFont();
+        ImVec2 ps = text_size(bf, pct.c_str());
+        dl->AddText(bf, bf->FontSize, ImVec2(p.x + w - ps.x, p.y + (bh - ps.y) * 0.5f), col(C::text), pct.c_str());
     }
-    ImGui::Dummy(ImVec2(0, 4 * A.sc));
+    if (st.state == TS_ERROR) text_wrapped(st.error.c_str(), C::bad);
+    progress_bar(st.total > 0 ? (float)st.step / st.total : 0.f, px(8), st.state == TS_DONE ? C::good : C::accent);
+    end_card();
+    gap();
 
-    if (ImGui::BeginTabBar("##traintabs")) {
-        auto flags = [](int tab) { return A.want_tab == tab ? ImGuiTabItemFlags_SetSelected : 0; };
-        float h = std::max(220 * A.sc, ImGui::GetContentRegionAvail().y - 40 * A.sc);
-        if (ImGui::BeginTabItem(tr(S::TabChart), nullptr, flags(0))) {
-            plot_loss(st, std::max(180 * A.sc, ImGui::GetContentRegionAvail().y - 8 * A.sc));
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem(tr(S::TabLog), nullptr, flags(1))) {
-            log_view(h);
-            ImGui::EndTabItem();
-        }
-        if (A.data.kind == DATA_TEXT && ImGui::BeginTabItem(tr(S::TabTests), nullptr, flags(2))) {
-            tests_view(st);
-            ImGui::EndTabItem();
-        }
-        ImGui::EndTabBar();
-    }
-    A.want_tab = -1;
+    // ---- metrics
+    std::vector<Stat> m;
+    m.push_back({tr(S::Loss), st.step ? strf("%.4f", st.loss) : "-", "", C::accent, IC_TREND});
+    m.push_back({tr(S::ValLoss), st.val_loss >= 0 ? strf("%.4f", st.val_loss) : "-", "", C::blue, IC_TARGET});
+    m.push_back({tr(S::Accuracy), st.val_acc >= 0 ? strf("%.1f%%", st.val_acc * 100) : "-", "", C::text, IC_PERCENT});
+    m.push_back({tr(S::Speed), st.step ? fmt_count(st.items_per_sec) : "-", tr(A.data.kind == DATA_TEXT ? S::TokPerSec : S::SampPerSec), C::text, IC_GAUGE});
+    m.push_back({tr(S::Elapsed), fmt_time(st.elapsed), "", C::text, IC_CLOCK});
+    m.push_back({tr(S::Eta), st.state == TS_RUNNING || st.state == TS_PAUSED ? fmt_time(st.eta) : "-", "", C::text, IC_CLOCK});
+    stat_grid(m, px(150), true);
+    gap();
+
+    // ---- settings
+    std::string summary = strf("%s %d   \xC2\xB7   %s %d   \xC2\xB7   %s %g", tr(S::Steps), A.cfg.steps, tr(S::BatchSize), A.cfg.batch, tr(S::LR), (double)A.cfg.lr);
+    if (begin_collapsible_card("cfg", tr(S::Settings), &A.settings_open, summary.c_str())) train_settings(run);
+    end_card();
+    gap();
+
+    // ---- chart / log / tests
+    bool text_data = A.data.kind == DATA_TEXT;
+    const char* labels[] = {tr(S::TabChart), tr(S::TabLog), tr(S::TabTests)};
+    if (!text_data && A.train_tab == 2) A.train_tab = 0;
+    tabs("traintabs", &A.train_tab, labels, text_data ? 3 : 2);
+    float h = std::max(px(300), ImGui::GetContentRegionAvail().y - px(2));
+    if (A.train_tab == 0) plot_loss(st, ImVec2(ImGui::GetContentRegionAvail().x, h));
+    else if (A.train_tab == 1) log_view(h);
+    else tests_view(st);
 }
+
+// ------------------------------------------------------------- playground
 
 // Generates a few characters per frame so the interface never blocks; uses
 // try_lock so it interleaves with training steps.
@@ -1198,150 +1430,208 @@ void pump_generation() {
 }
 
 void page_test() {
-    Title(tr(S::NavTest));
+    header(tr(S::NavTest), tr(S::TestHelp));
+    header_end();
     if (!A.model) {
-        Muted(tr(S::NoModel));
+        int r = empty_state(IC_CHAT, nullptr, tr(S::NoModel), tr(S::NavTrain), tr(S::LoadModel));
+        if (r == 1) A.page = PAGE_TRAIN;
+        if (r == 2) A.page = PAGE_FILES;
         return;
     }
     if (A.model->spec.kind == MODEL_GPT) {
-        ImGui::TextColored(kMuted, "%s", tr(S::Prompt));
-        ImGui::InputTextMultiline("##prompt", A.prompt, sizeof A.prompt, ImVec2(-1, 70 * A.sc));
-        ImGui::PushItemWidth(260 * A.sc);
-        ImGui::SliderFloat(tr(S::Temperature), &A.temperature, 0.f, 1.5f, "%.2f");
-        ImGui::SliderInt(tr(S::Length), &A.gen_len, 20, 2000);
-        ImGui::PopItemWidth();
-        if (A.gen_left > 0) {
-            if (ImGui::Button(tr(S::Stop), ImVec2(160 * A.sc, 0))) A.gen_left = 0;
-        } else if (PrimaryButton(tr(S::Generate), ImVec2(160 * A.sc, 0))) {
-            A.gen_ids = A.model->encode(A.prompt);
-            if (A.gen_ids.empty()) A.gen_ids.push_back(A.gen_rng.below(std::max(1, A.model->spec.vocab)));
-            A.gen_out = A.prompt;
-            A.gen_left = A.gen_len;
+        begin_card("prompt", tr(S::Prompt));
+        ImGui::InputTextMultiline("##prompt", A.prompt, sizeof A.prompt, ImVec2(-FLT_MIN, px(86)));
+        float bw = std::max(button_width(tr(S::Generate), IC_SPARK), button_width(tr(S::Stop), IC_STOP));
+        ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(px(12), 0));
+        if (ImGui::BeginTable("##gen", 3, ImGuiTableFlags_SizingStretchSame)) {
+            ImGui::TableSetupColumn("a", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("b", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("c", ImGuiTableColumnFlags_WidthFixed, bw);
+            ImFont* sf = F.small ? F.small : ImGui::GetFont();
+            float label_h = sf->FontSize + px(6);
+            auto stacked_label = [&](const char* s) {
+                ImVec2 lp = ImGui::GetCursorScreenPos();
+                ImGui::Dummy(ImVec2(ImGui::GetContentRegionAvail().x, label_h));
+                text_ellipsis(ImGui::GetWindowDrawList(), sf, lp, ImGui::GetContentRegionAvail().x, s, col(C::muted));
+                ImGui::SetCursorScreenPos(ImVec2(lp.x, lp.y + label_h));
+                ImGui::SetNextItemWidth(-FLT_MIN);
+            };
+            ImGui::TableNextColumn();
+            stacked_label(tr(S::Temperature));
+            slider_float("##temp", &A.temperature, 0.f, 1.5f, "%.2f");
+            ImGui::TableNextColumn();
+            stacked_label(tr(S::Length));
+            slider_int("##len", &A.gen_len, 20, 2000);
+            ImGui::TableNextColumn();
+            ImGui::Dummy(ImVec2(1, label_h - ImGui::GetStyle().ItemSpacing.y));
+            if (A.gen_left > 0) {
+                if (button(tr(S::Stop), BTN_DANGER, IC_STOP, bw)) A.gen_left = 0;
+            } else if (button(tr(S::Generate), BTN_PRIMARY, IC_SPARK, bw)) {
+                A.gen_ids = A.model->encode(A.prompt);
+                if (A.gen_ids.empty()) A.gen_ids.push_back(A.gen_rng.below(std::max(1, A.model->spec.vocab)));
+                A.gen_out = A.prompt;
+                A.gen_left = A.gen_len;
+            }
+            ImGui::EndTable();
         }
+        ImGui::PopStyleVar();
+        end_card();
         pump_generation();
-        ImGui::SeparatorText(tr(S::Result));
-        ImGui::BeginChild("##out", ImVec2(0, 0), ImGuiChildFlags_Borders);
-        ImGui::PushTextWrapPos(0);
-        ImGui::TextUnformatted(A.gen_out.data(), A.gen_out.data() + A.gen_out.size());
-        ImGui::PopTextWrapPos();
-        if (A.gen_left > 0) ImGui::SetScrollHereY(1.f);
-        ImGui::EndChild();
-    } else {
-        const ModelSpec& s = A.model->spec;
-        if ((int)A.feat_in.size() != s.in_dim) {
-            A.feat_in.assign(s.in_dim, 0.f);
-            for (int j = 0; j < s.in_dim && j < (int)A.model->norm_mean.size(); ++j) A.feat_in[j] = A.model->norm_mean[j];
-            A.pred.clear();
+        gap();
+        float rest = ImGui::GetContentRegionAvail().y;
+        begin_card("out", tr(S::Result));
+        float inner = std::max(px(200), rest - ImGui::GetCursorPosY() - card_padding_y() - px(2));
+        if (begin_inset("##out", inner)) {
+            FontScope f(F.mono);
+            if (A.gen_out.empty()) text(tr(S::GenEmpty), C::subtle);
+            ImGui::PushTextWrapPos(0);
+            ImGui::TextUnformatted(A.gen_out.data(), A.gen_out.data() + A.gen_out.size());
+            ImGui::PopTextWrapPos();
+            if (A.gen_left > 0) ImGui::SetScrollHereY(1.f);
         }
-        ImGui::SeparatorText(tr(S::InputsLbl));
-        ImGui::BeginChild("##feat", ImVec2(0, std::min(300.f, 34.f * s.in_dim + 16) * A.sc), ImGuiChildFlags_Borders);
-        ImGui::PushItemWidth(200 * A.sc);
+        ImGui::EndChild();
+        end_card();
+        return;
+    }
+
+    const ModelSpec& s = A.model->spec;
+    if ((int)A.feat_in.size() != s.in_dim) {
+        A.feat_in.assign(s.in_dim, 0.f);
+        for (int j = 0; j < s.in_dim && j < (int)A.model->norm_mean.size(); ++j) A.feat_in[j] = A.model->norm_mean[j];
+        A.pred.clear();
+    }
+    begin_card("inputs", tr(S::InputsLbl));
+    int cols = ImGui::GetContentRegionAvail().x > px(700) ? 2 : 1;
+    if (ImGui::BeginTable("##feat", cols, ImGuiTableFlags_SizingStretchSame)) {
         for (int j = 0; j < s.in_dim; ++j) {
+            ImGui::TableNextColumn();
             ImGui::PushID(j);
             std::string name = j < (int)A.model->feat_names.size() ? A.model->feat_names[j] : "x" + std::to_string(j + 1);
-            ImGui::InputFloat(name.c_str(), &A.feat_in[j], 0, 0, "%.4f");
+            field_label(name.c_str(), std::min(px(200), ImGui::GetContentRegionAvail().x * 0.45f));
+            ImGui::InputFloat("##v", &A.feat_in[j], 0, 0, "%.4f");
             ImGui::PopID();
         }
-        ImGui::PopItemWidth();
-        ImGui::EndChild();
-        if (PrimaryButton(tr(S::Predict), ImVec2(160 * A.sc, 0))) {
-            std::lock_guard<std::mutex> lk(A.trainer.model_mu);
-            A.pred = A.model->predict(A.feat_in);
-        }
-        if (!A.pred.empty()) {
-            ImGui::SeparatorText(tr(S::Result));
-            if (s.regression) {
-                if (A.title_font) ImGui::PushFont(A.title_font);
-                ImGui::TextColored(kEmberHi, "%.5g", A.pred[0]);
-                if (A.title_font) ImGui::PopFont();
-            } else {
-                size_t best = 0;
-                for (size_t i = 1; i < A.pred.size(); ++i)
-                    if (A.pred[i] > A.pred[best]) best = i;
-                for (size_t i = 0; i < A.pred.size(); ++i) {
-                    std::string name = i < A.model->vocab.size() ? A.model->vocab[i] : std::to_string(i);
-                    char pb[32];
-                    std::snprintf(pb, sizeof pb, "%.1f%%", A.pred[i] * 100);
-                    ImGui::PushStyleColor(ImGuiCol_PlotHistogram, i == best ? kEmber : ImVec4(0.35f, 0.31f, 0.28f, 1));
-                    ImGui::ProgressBar(A.pred[i], ImVec2(360 * A.sc, 0), pb);
-                    ImGui::PopStyleColor();
-                    ImGui::SameLine();
-                    ImGui::TextUnformatted(name.c_str());
-                }
-            }
+        ImGui::EndTable();
+    }
+    gap(2);
+    if (button(tr(S::Predict), BTN_PRIMARY, IC_SPARK)) {
+        std::lock_guard<std::mutex> lk(A.trainer.model_mu);
+        A.pred = A.model->predict(A.feat_in);
+    }
+    end_card();
+    if (A.pred.empty()) return;
+    gap();
+    begin_card("pred", tr(S::Result));
+    if (s.regression) {
+        FontScope f(F.stat);
+        text(strf("%.5g", A.pred[0]).c_str(), C::accent_hi);
+    } else {
+        size_t best = 0;
+        for (size_t i = 1; i < A.pred.size(); ++i)
+            if (A.pred[i] > A.pred[best]) best = i;
+        float aw = ImGui::GetContentRegionAvail().x;
+        float nw = std::min(px(180), aw * 0.3f);
+        ImFont* bf = F.bold ? F.bold : ImGui::GetFont();
+        float pw = text_size(bf, "100.0%").x;
+        float rh = ImGui::GetFontSize() + px(10);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        for (size_t i = 0; i < A.pred.size(); ++i) {
+            std::string name = i < A.model->vocab.size() ? A.model->vocab[i] : std::to_string(i);
+            ImVec2 p = ImGui::GetCursorScreenPos();
+            ImGui::Dummy(ImVec2(aw, rh));
+            bool top = i == best;
+            ImFont* f = top ? bf : ImGui::GetFont();
+            float ty = p.y + (rh - f->FontSize) * 0.5f;
+            text_ellipsis(dl, f, ImVec2(p.x, ty), nw - px(12), name.c_str(), col(top ? C::text : C::muted));
+            float x0 = p.x + nw, x1 = p.x + aw - pw - px(14), cy = p.y + rh * 0.5f;
+            dl->AddRectFilled(ImVec2(x0, cy - px(4)), ImVec2(x1, cy + px(4)), col(C::surface3), px(4));
+            if (A.pred[i] > 0)
+                dl->AddRectFilled(ImVec2(x0, cy - px(4)), ImVec2(x0 + std::max(px(8), (x1 - x0) * A.pred[i]), cy + px(4)),
+                                  col(top ? C::accent : C::border_hi), px(4));
+            std::string pc = strf("%.1f%%", A.pred[i] * 100);
+            float tw = text_size(f, pc.c_str()).x;
+            dl->AddText(f, f->FontSize, ImVec2(p.x + aw - tw, ty), col(top ? C::accent_hi : C::muted), pc.c_str());
         }
     }
+    end_card();
 }
 
+// ------------------------------------------------------------------ files
+
 void page_files() {
-    Title(tr(S::NavFiles));
-    Muted(tr(S::FilesHelp));
-    ImGui::Dummy(ImVec2(0, 4 * A.sc));
-    ImGui::SetNextItemWidth(-140 * A.sc);
+    header(tr(S::NavFiles), tr(S::FilesHelp));
+    header_end();
+    begin_card("mpath", tr(S::ModelFile));
+    ImGui::SetNextItemWidth(-FLT_MIN);
     ImGui::InputTextWithHint("##mpath", tr(S::PathHint), A.model_path, sizeof A.model_path);
-    ImGui::Dummy(ImVec2(0, 4 * A.sc));
+    end_card();
+    gap();
 
-    if (BeginCard("save")) {
-        ImGui::SeparatorText(tr(S::SaveModel));
-        if (!A.model) Muted(tr(S::NoModel));
-        ImGui::BeginDisabled(!A.model);
-        ImGui::Checkbox(tr(S::Half), &A.half);
-        bool go = false;
-        if (has_native_dialogs()) {
-            if (ImGui::Button(tr(S::Browse))) {
-                std::string p = save_file_dialog();
-                if (!p.empty()) { std::snprintf(A.model_path, sizeof A.model_path, "%s", p.c_str()); go = true; }
-            }
-            ImGui::SameLine();
-        }
-        if (PrimaryButton(tr(S::Save), ImVec2(140 * A.sc, 0))) go = true;
-        if (go && A.model && A.model_path[0]) {
-            std::string err;
-            std::lock_guard<std::mutex> lk(A.trainer.model_mu);
-            A.file_ok = A.model->save(A.model_path, A.half, &err);
-            A.file_msg = A.file_ok ? tr(S::Saved) : err;
-        }
-        ImGui::EndDisabled();
-    }
-    EndCard();
+    static EqualRow row;
+    float g = px(16), total = ImGui::GetContentRegionAvail().x;
+    bool two = total > px(700);
+    float cw = two ? std::floor((total - g) * 0.5f) : 0;
+    float fh = ImGui::GetFrameHeight();
 
-    if (BeginCard("load")) {
-        ImGui::SeparatorText(tr(S::LoadModel));
-        ImGui::BeginDisabled(busy());
-        bool go = false;
-        if (has_native_dialogs()) {
-            if (ImGui::Button(tr(S::Browse))) {
-                std::string p = open_file_dialog(DLG_MODEL);
-                if (!p.empty()) { std::snprintf(A.model_path, sizeof A.model_path, "%s", p.c_str()); go = true; }
-            }
-            ImGui::SameLine();
+    begin_card("save", tr(S::SaveModel), two ? row.prev : 0, cw);
+    text_wrapped(tr(S::SaveHelp), C::muted);
+    if (!A.model) text_wrapped(tr(S::NoModel), C::warn, F.small);
+    ImGui::BeginDisabled(!A.model);
+    checkbox(tr(S::Half), &A.half);
+    row.cur = std::max(row.cur, push_to_bottom(two ? row.prev : 0, fh));
+    bool go = button(tr(S::Save), BTN_PRIMARY, IC_SAVE);
+    if (has_native_dialogs()) {
+        ImGui::SameLine();
+        if (button(tr(S::Browse), BTN_SECONDARY, IC_FOLDER)) {
+            std::string p = save_file_dialog();
+            if (!p.empty()) { std::snprintf(A.model_path, sizeof A.model_path, "%s", p.c_str()); go = true; }
         }
-        if (PrimaryButton(tr(S::Load), ImVec2(140 * A.sc, 0))) go = true;
-        if (go && A.model_path[0] && !busy()) {
-            std::string err;
-            auto m = Model::load(A.model_path, &err);
-            A.file_ok = (bool)m;
-            A.file_msg = m ? tr(S::LoadedModel) : err;
-            if (m) {
-                A.model = m;
-                A.spec = m->spec;
-                reset_generation();
-                A.feat_in.clear();
-                if (model_matches_data() && A.data.kind == DATA_TEXT) A.data.encode_with(m->vocab);
-            }
-        }
-        ImGui::EndDisabled();
-        if (busy()) Muted(tr(S::Busy));
     }
-    EndCard();
+    if (go && A.model && A.model_path[0]) {
+        std::string err;
+        std::lock_guard<std::mutex> lk(A.trainer.model_mu);
+        A.file_ok = A.model->save(A.model_path, A.half, &err);
+        A.file_msg = A.file_ok ? tr(S::Saved) : err;
+    }
+    ImGui::EndDisabled();
+    end_card();
+
+    if (two) ImGui::SameLine(0, g);
+    else gap();
+    begin_card("load", tr(S::LoadModel), two ? row.prev : 0, two ? total - cw - g : 0);
+    text_wrapped(tr(S::LoadHelp), C::muted);
+    if (busy()) text_wrapped(tr(S::Busy), C::warn, F.small);
+    ImGui::BeginDisabled(busy());
+    row.cur = std::max(row.cur, push_to_bottom(two ? row.prev : 0, fh));
+    bool load = button(tr(S::Load), BTN_PRIMARY, IC_UPLOAD);
+    if (has_native_dialogs()) {
+        ImGui::SameLine();
+        if (button(tr(S::Browse), BTN_SECONDARY, IC_FOLDER)) {
+            std::string p = open_file_dialog(DLG_MODEL);
+            if (!p.empty()) { std::snprintf(A.model_path, sizeof A.model_path, "%s", p.c_str()); load = true; }
+        }
+    }
+    if (load && A.model_path[0] && !busy()) {
+        std::string err;
+        auto m = Model::load(A.model_path, &err);
+        A.file_ok = (bool)m;
+        A.file_msg = m ? tr(S::LoadedModel) : err;
+        if (m) {
+            A.model = m;
+            A.spec = m->spec;
+            reset_generation();
+            A.feat_in.clear();
+            if (model_matches_data() && A.data.kind == DATA_TEXT) A.data.encode_with(m->vocab);
+        }
+    }
+    ImGui::EndDisabled();
+    end_card();
+    row.next();
 
     if (!A.file_msg.empty()) {
-        if (A.file_ok) ImGui::TextColored(kGood, "%s", A.file_msg.c_str());
-        else {
-            char b[512];
-            std::snprintf(b, sizeof b, tr(S::Failed), A.file_msg.c_str());
-            ImGui::TextColored(kBad, "%s", b);
-        }
+        gap();
+        if (A.file_ok) banner(A.file_msg.c_str(), C::good, IC_CHECK);
+        else banner(strf(tr(S::Failed), A.file_msg.c_str()).c_str(), C::bad, IC_WARN);
     }
 }
 
@@ -1429,9 +1719,7 @@ void run_plugin(int i) {
     for (auto& a : split_args(A.plugin_args[i].data())) cmd.push_back(a);
     if (A.runner.start(cmd, env)) {
         A.plugin_running = i;
-        char b[512];
-        std::snprintf(b, sizeof b, tr(S::PluginRunning), p.title(get_language()).c_str());
-        A.plugin_msg = b;
+        A.plugin_msg = strf(tr(S::PluginRunning), p.title(get_language()).c_str());
         A.plugin_ok = true;
     }
 }
@@ -1444,13 +1732,11 @@ void poll_plugin() {
     int i = A.plugin_running;
     A.plugin_running = -1;
     std::string name = i >= 0 && i < (int)A.plugins.size() ? A.plugins[i].title(get_language()) : "?";
-    char b[2400];
     A.plugin_ok = code == 0;
-    if (code == -2) std::snprintf(b, sizeof b, tr(S::PluginCancelled), name.c_str());
-    else if (code == -1) std::snprintf(b, sizeof b, "%s", tr(S::PluginNoStart));
-    else if (code != 0) std::snprintf(b, sizeof b, tr(S::PluginFailed), name.c_str(), code);
-    else std::snprintf(b, sizeof b, tr(S::PluginDone), name.c_str());
-    A.plugin_msg = b;
+    if (code == -2) A.plugin_msg = strf(tr(S::PluginCancelled), name.c_str());
+    else if (code == -1) A.plugin_msg = tr(S::PluginNoStart);
+    else if (code != 0) A.plugin_msg = strf(tr(S::PluginFailed), name.c_str(), code);
+    else A.plugin_msg = strf(tr(S::PluginDone), name.c_str());
     if (code != 0) return;
 
     fs::path out = upath(A.plugin_out_dir);
@@ -1460,11 +1746,9 @@ void poll_plugin() {
         if (!fs::exists(dp, ec)) continue;
         int kind = std::strcmp(f, "data.txt") == 0 ? 0 : 1;
         if (load_data_impl(dp.u8string(), kind, -1)) {
-            std::snprintf(b, sizeof b, tr(S::PluginData), dp.u8string().c_str());
-            A.plugin_msg += std::string("\n") + b;
+            A.plugin_msg += "\n" + strf(tr(S::PluginData), dp.u8string().c_str());
         } else {
-            std::snprintf(b, sizeof b, tr(S::Failed), A.data_msg.c_str());
-            A.plugin_msg += std::string("\n") + b;
+            A.plugin_msg += "\n" + strf(tr(S::Failed), A.data_msg.c_str());
             A.plugin_ok = false;
         }
         break;
@@ -1473,139 +1757,242 @@ void poll_plugin() {
     if (read_file_text(out / "tests.txt", tests)) {
         set_tests(tests);
         A.results.clear();
-        std::snprintf(b, sizeof b, tr(S::PluginTests), (int)current_tests().size());
-        A.plugin_msg += std::string("\n") + b;
+        A.plugin_msg += "\n" + strf(tr(S::PluginTests), (int)current_tests().size());
     }
 }
 
 void page_plugins() {
-    Title(tr(S::NavPlugins));
-    Muted(tr(S::PluginsHelp));
-    ImGui::Dummy(ImVec2(0, 4 * A.sc));
     if (!A.plugins_scanned) {
         scan_all_plugins();
         A.python.start();
     }
-    char b[2400];
-
-    if (BeginCard("python")) {
-        ImGui::AlignTextToFramePadding();
-        if (A.python.searching()) {
-            ImGui::TextColored(kMuted, "%s", tr(S::PythonChecking));
-        } else if (A.python.found()) {
-            std::snprintf(b, sizeof b, tr(S::PythonFound), A.python.version().c_str());
-            ImGui::TextColored(kGood, "%s", b);
-        } else {
-            ImGui::PushStyleColor(ImGuiCol_Text, kBad);
-            ImGui::TextWrapped("%s", tr(S::PythonMissing));
-            ImGui::PopStyleColor();
-        }
-        if (!A.python.searching() && !A.python.found()) {
-            if (ImGui::Button(tr(S::CheckAgain))) A.python.start();
-        }
-    }
-    EndCard();
-
-    if (ImGui::Button(tr(S::OpenPlugins))) {
+    float sp = ImGui::GetStyle().ItemSpacing.x;
+    header(tr(S::NavPlugins), tr(S::PluginsHelp), button_width(tr(S::OpenPlugins), IC_FOLDER) + sp + button_width(tr(S::RefreshList), IC_REFRESH));
+    if (button(tr(S::OpenPlugins), BTN_SECONDARY, IC_FOLDER)) {
         std::error_code ec;
         std::filesystem::create_directories(upath(user_plugins_dir()), ec);
         open_folder(user_plugins_dir());
     }
     ImGui::SameLine();
-    if (ImGui::Button(tr(S::RefreshList))) scan_all_plugins();
-    ImGui::TextColored(kMuted, "%s", tr(S::PluginDirs));
-    for (auto& d : plugin_dirs()) ImGui::TextColored(kMuted, "    %s", d.c_str());
-    ImGui::Dummy(ImVec2(0, 4 * A.sc));
+    if (button(tr(S::RefreshList), BTN_GHOST, IC_REFRESH)) scan_all_plugins();
+    header_end();
 
-    if (A.plugins.empty()) Muted(tr(S::NoPlugins));
+    if (A.python.searching()) banner(tr(S::PythonChecking), C::muted, IC_INFO);
+    else if (A.python.found()) banner(strf(tr(S::PythonFound), A.python.version().c_str()).c_str(), C::good, IC_CHECK);
+    else {
+        banner(tr(S::PythonMissing), C::bad, IC_WARN);
+        if (button(tr(S::CheckAgain), BTN_SECONDARY, IC_REFRESH)) A.python.start();
+    }
+    std::vector<std::string> dirs = plugin_dirs();
+    {
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        std::string s = strf(tr(S::PluginFolders), (int)dirs.size());
+        ImFont* sf = F.small ? F.small : ImGui::GetFont();
+        float tw = text_size(sf, s.c_str()).x;
+        ImGui::Dummy(ImVec2(tw + px(22), sf->FontSize));
+        bool hov = ImGui::IsItemHovered();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddText(sf, sf->FontSize, p, col(hov ? C::text : C::muted), s.c_str());
+        icon(dl, IC_INFO, ImVec2(p.x + tw + px(12), p.y + sf->FontSize * 0.5f), px(13), col(hov ? C::text : C::subtle));
+        std::string all;
+        for (auto& d : dirs) all += (all.empty() ? "" : "\n") + d;
+        tooltip(all.c_str());
+    }
+    if (busy()) banner(tr(S::PluginBusy), C::warn, IC_INFO);
+    gap(4);
+
+    if (A.plugins.empty()) text_wrapped(tr(S::NoPlugins), C::muted);
     bool can_run = A.python.found() && !busy() && !A.runner.running();
-    if (busy()) ImGui::TextColored(kEmberHi, "%s", tr(S::PluginBusy));
     int lang = get_language();
+    float g = px(16);
+    int cols = fit_columns(px(440), 2, g);
+    float cw = column_width(cols, g), fh = ImGui::GetFrameHeight();
+    static std::vector<EqualRow> rows;
+    rows.resize((A.plugins.size() + cols - 1) / std::max(1, cols) + 1);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(g, g));
     for (int i = 0; i < (int)A.plugins.size(); ++i) {
         const Plugin& p = A.plugins[i];
+        EqualRow& row = rows[i / cols];
+        if (i % cols) ImGui::SameLine(0, g);
         ImGui::PushID(i);
-        if (BeginCard("plugin")) {
-            ImGui::TextColored(kEmberHi, "%s", p.title(lang).c_str());
-            ImGui::SameLine();
-            ImGui::TextColored(kMuted, "%s", p.file.c_str());
-            if (!p.description(lang).empty()) {
-                ImGui::PushTextWrapPos(0);
-                ImGui::TextWrapped("%s", p.description(lang).c_str());
-                ImGui::PopTextWrapPos();
-            }
-            ImGui::SetNextItemWidth(-200 * A.sc);
-            ImGui::InputTextWithHint("##args", tr(S::Arguments), A.plugin_args[i].data(), A.plugin_args[i].size());
-            ImGui::SameLine();
-            if (A.plugin_running == i && A.runner.running()) {
-                if (ImGui::Button(tr(S::Stop), ImVec2(120 * A.sc, 0))) A.runner.cancel();
-            } else {
-                ImGui::BeginDisabled(!can_run);
-                if (PrimaryButton(tr(S::Run), ImVec2(120 * A.sc, 0))) run_plugin(i);
-                ImGui::EndDisabled();
-            }
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(px(10), px(10)));
+        begin_card("plugin", nullptr, row.prev, cw);
+        {
+            FontScope f(F.bold);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(p.title(lang).c_str());
         }
-        EndCard();
+        ImGui::SameLine(0, px(10));
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (fh - (F.small_bold ? F.small_bold->FontSize : 13.f) - px(8)) * 0.5f);
+        badge(p.file.c_str(), C::muted, false);
+        if (!p.description(lang).empty()) text_wrapped(p.description(lang).c_str(), C::muted);
+        row.cur = std::max(row.cur, push_to_bottom(row.prev, fh));
+        float bw = std::max(button_width(tr(S::Run), IC_PLAY), button_width(tr(S::Stop), IC_STOP));
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - bw - px(10));
+        ImGui::InputTextWithHint("##args", tr(S::Arguments), A.plugin_args[i].data(), A.plugin_args[i].size());
+        ImGui::SameLine();
+        if (A.plugin_running == i && A.runner.running()) {
+            if (button(tr(S::Stop), BTN_DANGER, IC_STOP, bw)) A.runner.cancel();
+        } else {
+            ImGui::BeginDisabled(!can_run);
+            if (button(tr(S::Run), BTN_PRIMARY, IC_PLAY, bw)) run_plugin(i);
+            ImGui::EndDisabled();
+        }
+        end_card();
+        ImGui::PopStyleVar();
         ImGui::PopID();
+        if (i % cols == cols - 1 || i + 1 == (int)A.plugins.size()) row.next();
     }
+    ImGui::PopStyleVar();
 
     if (!A.plugin_msg.empty()) {
-        ImGui::PushStyleColor(ImGuiCol_Text, A.runner.running() ? kEmberHi : A.plugin_ok ? kGood : kBad);
-        ImGui::TextWrapped("%s", A.plugin_msg.c_str());
-        ImGui::PopStyleColor();
+        gap();
+        banner(A.plugin_msg.c_str(), A.runner.running() ? C::accent : A.plugin_ok ? C::good : C::bad,
+               A.runner.running() ? IC_CLOCK : A.plugin_ok ? IC_CHECK : IC_WARN);
     }
     std::string out = A.runner.output();
     if (out.empty()) return;
-    ImGui::SeparatorText(tr(S::PluginOutput));
-    if (ImGui::SmallButton(tr(S::Clear))) A.runner.clear_output();
-    ImGui::BeginChild("##pout", ImVec2(0, std::max(160 * A.sc, ImGui::GetContentRegionAvail().y)), ImGuiChildFlags_Borders,
-                      ImGuiWindowFlags_HorizontalScrollbar);
-    bool at_end = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4;
-    ImGui::TextUnformatted(out.data(), out.data() + out.size());
-    if (at_end) ImGui::SetScrollHereY(1.f);
+    gap();
+    float rest = ImGui::GetContentRegionAvail().y;
+    begin_card("pout");
+    {
+        FontScope f(F.bold);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(tr(S::PluginOutput));
+    }
+    ImGui::SameLine(ImGui::GetWindowWidth() - px(20) - button_width(tr(S::Clear), IC_X));
+    if (button(tr(S::Clear), BTN_GHOST, IC_X)) A.runner.clear_output();
+    float inner = std::max(px(180), rest - ImGui::GetCursorPosY() - card_padding_y() - px(2));
+    if (begin_inset("##pout", inner, true)) {
+        FontScope f(F.mono);
+        bool at_end = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4;
+        ImGui::TextUnformatted(out.data(), out.data() + out.size());
+        if (at_end) ImGui::SetScrollHereY(1.f);
+    }
     ImGui::EndChild();
+    end_card();
 }
 
-void apply_theme(float sc) {
-    ImGuiStyle& st = ImGui::GetStyle();
-    st = ImGuiStyle();
-    ImGui::StyleColorsDark();
-    st.WindowRounding = 0; st.ChildRounding = 10; st.FrameRounding = 6; st.GrabRounding = 6; st.PopupRounding = 6;
-    st.WindowPadding = ImVec2(22, 18); st.FramePadding = ImVec2(10, 6); st.ItemSpacing = ImVec2(10, 8);
-    st.WindowBorderSize = 0; st.ChildBorderSize = 1; st.ScrollbarSize = 13;
-    st.ScaleAllSizes(sc);
-    ImVec4* c = st.Colors;
-    c[ImGuiCol_Text] = ImVec4(0.95f, 0.93f, 0.90f, 1);
-    c[ImGuiCol_WindowBg] = ImVec4(0.086f, 0.074f, 0.066f, 1);
-    c[ImGuiCol_ChildBg] = ImVec4(0, 0, 0, 0);
-    c[ImGuiCol_PopupBg] = ImVec4(0.12f, 0.105f, 0.095f, 1);
-    c[ImGuiCol_Border] = ImVec4(0.25f, 0.22f, 0.20f, 1);
-    c[ImGuiCol_FrameBg] = ImVec4(0.17f, 0.15f, 0.135f, 1);
-    c[ImGuiCol_FrameBgHovered] = ImVec4(0.23f, 0.20f, 0.18f, 1);
-    c[ImGuiCol_FrameBgActive] = ImVec4(0.28f, 0.23f, 0.20f, 1);
-    c[ImGuiCol_Button] = ImVec4(0.22f, 0.19f, 0.17f, 1);
-    c[ImGuiCol_ButtonHovered] = ImVec4(0.32f, 0.26f, 0.22f, 1);
-    c[ImGuiCol_ButtonActive] = ImVec4(0.40f, 0.30f, 0.22f, 1);
-    c[ImGuiCol_Header] = ImVec4(0.90f, 0.40f, 0.06f, 0.35f);
-    c[ImGuiCol_HeaderHovered] = ImVec4(0.90f, 0.40f, 0.06f, 0.50f);
-    c[ImGuiCol_HeaderActive] = ImVec4(0.90f, 0.40f, 0.06f, 0.70f);
-    c[ImGuiCol_CheckMark] = kEmber;
-    c[ImGuiCol_SliderGrab] = kEmber;
-    c[ImGuiCol_SliderGrabActive] = kEmberHi;
-    c[ImGuiCol_Separator] = ImVec4(0.25f, 0.22f, 0.20f, 1);
-    c[ImGuiCol_TableHeaderBg] = ImVec4(0.17f, 0.15f, 0.135f, 1);
-    c[ImGuiCol_TableBorderStrong] = c[ImGuiCol_TableBorderLight] = ImVec4(0.25f, 0.22f, 0.20f, 1);
-    c[ImGuiCol_TableRowBgAlt] = ImVec4(1, 1, 1, 0.025f);
-    c[ImGuiCol_ScrollbarBg] = ImVec4(0, 0, 0, 0);
-    c[ImGuiCol_TextSelectedBg] = ImVec4(0.90f, 0.40f, 0.06f, 0.45f);
+// ---------------------------------------------------------------- sidebar
+
+void sidebar(ImVec2 pos, float w, float h) {
+    ImGuiWindowFlags wf = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                          ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoScrollWithMouse;
+    ImGui::SetNextWindowPos(pos);
+    ImGui::SetNextWindowSize(ImVec2(w, h));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, C::sidebar);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(px(14), px(18)));
+    ImGui::Begin("##sidebar", nullptr, wf);
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->PushClipRectFullScreen();
+    dl->AddLine(ImVec2(pos.x + w - 0.5f, pos.y), ImVec2(pos.x + w - 0.5f, pos.y + h), col(C::border));
+    dl->PopClipRect();
+
+    // brand
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    float lz = px(36);
+    draw_logo(dl, ImVec2(p.x + px(4), p.y), lz);
+    ImFont* bf = F.bold ? F.bold : ImGui::GetFont();
+    ImFont* sf = F.small ? F.small : ImGui::GetFont();
+    float tx = p.x + px(4) + lz + px(12);
+    float ty = p.y + (lz - bf->FontSize - sf->FontSize - px(1)) * 0.5f;
+    dl->AddText(bf, bf->FontSize, ImVec2(tx, ty), col(C::text), "Kor Studio");
+    dl->AddText(sf, sf->FontSize, ImVec2(tx, ty + bf->FontSize + px(1)), col(C::subtle), "v" KOR_VERSION);
+    ImGui::Dummy(ImVec2(0, lz));
+    gap(14);
+
+    {
+        ImFont* lf = F.small_bold ? F.small_bold : ImGui::GetFont();
+        ImVec2 q = ImGui::GetCursorScreenPos();
+        dl->AddText(lf, lf->FontSize, ImVec2(q.x + px(10), q.y), col(C::subtle), tr(S::Workspace));
+        ImGui::Dummy(ImVec2(0, lf->FontSize));
+    }
+
+    TrainStats st = A.trainer.stats();
+    static const S nav[] = {S::NavHome, S::NavData, S::NavModel, S::NavTrain, S::NavTest, S::NavFiles, S::NavPlugins};
+    static const Icon icons[] = {IC_HOME, IC_DATA, IC_MODEL, IC_TRAIN, IC_CHAT, IC_FILES, IC_PLUGIN};
+    static_assert(sizeof(nav) / sizeof(nav[0]) == PAGE_COUNT, "one label per page");
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(px(8), px(3)));
+    for (int i = 0; i < PAGE_COUNT; ++i) {
+        int status = 0;
+        if (i == PAGE_DATA && A.data.kind != DATA_NONE) status = 1;
+        if (i == PAGE_MODEL && A.model) status = 1;
+        if (i == PAGE_TRAIN) status = busy() ? 2 : st.state == TS_DONE ? 1 : 0;
+        if (i == PAGE_PLUGINS && A.runner.running()) status = 2;
+        ImGui::PushID(i);
+        if (nav_item(tr(nav[i]), icons[i], A.page == i, status)) A.page = i;
+        ImGui::PopID();
+    }
+    ImGui::PopStyleVar();
+
+    // ---- bottom: training card and language
+    float fh = ImGui::GetFrameHeight();
+    bool show_train = st.total > 0 && st.state != TS_IDLE;
+    float card_h = px(12) * 2 + (F.small_bold ? F.small_bold->FontSize : 13.f) + px(8) + px(4) + px(8) + sf->FontSize;
+    float block = fh + px(14) + px(16) + (show_train ? card_h + px(14) : 0);
+    float y = std::max(ImGui::GetCursorPosY() + px(10), ImGui::GetWindowHeight() - px(18) - block);
+    ImGui::SetCursorPosY(y);
+    if (show_train) {
+        ImVec2 c = ImGui::GetCursorScreenPos();
+        float cw = ImGui::GetContentRegionAvail().x;
+        if (ImGui::InvisibleButton("##traincard", ImVec2(cw, card_h))) A.page = PAGE_TRAIN;
+        bool hov = ImGui::IsItemHovered();
+        if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        dl->AddRectFilled(c, ImVec2(c.x + cw, c.y + card_h), col(hov ? C::surface2 : C::surface), px(10));
+        dl->AddRect(c, ImVec2(c.x + cw, c.y + card_h), col(C::border), px(10));
+        ImFont* lf = F.small_bold ? F.small_bold : ImGui::GetFont();
+        const ImVec4& sc_ = state_color(st.state);
+        float x = c.x + px(12), yy = c.y + px(12);
+        ImVec2 dc(x + px(3), yy + lf->FontSize * 0.5f);
+        if (st.state == TS_RUNNING) {
+            float k = 0.5f + 0.5f * std::sin((float)ImGui::GetTime() * 5.f);
+            dl->AddCircleFilled(dc, px(3) + px(3) * k, col(sc_, 0.3f * (1.f - k)));
+        }
+        dl->AddCircleFilled(dc, px(3), col(sc_));
+        dl->AddText(lf, lf->FontSize, ImVec2(x + px(12), yy), col(sc_), state_name(st.state));
+        std::string pct = strf("%.0f%%", 100.0 * st.step / std::max(1, st.total));
+        float pw = text_size(lf, pct.c_str()).x;
+        dl->AddText(lf, lf->FontSize, ImVec2(c.x + cw - px(12) - pw, yy), col(C::text), pct.c_str());
+        yy += lf->FontSize + px(8);
+        float bw = cw - px(24), frac = (float)st.step / std::max(1, st.total);
+        dl->AddRectFilled(ImVec2(x, yy), ImVec2(x + bw, yy + px(4)), col(C::surface3), px(2));
+        dl->AddRectFilled(ImVec2(x, yy), ImVec2(x + std::max(px(4), bw * frac), yy + px(4)), col(st.state == TS_DONE ? C::good : C::accent), px(2));
+        yy += px(4) + px(8);
+        std::string info = strf("%s %.4f", tr(S::Loss), st.loss);
+        if (st.state == TS_RUNNING) info += "   \xC2\xB7   " + fmt_time(st.eta);
+        text_ellipsis(dl, sf, ImVec2(x, yy), bw, info.c_str(), col(C::muted));
+        gap(4);
+    }
+    {
+        ImVec2 q = ImGui::GetCursorScreenPos();
+        float lw = ImGui::GetContentRegionAvail().x;
+        dl->AddLine(ImVec2(q.x - px(14), q.y), ImVec2(q.x + lw + px(14), q.y), col(C::border));
+        ImGui::Dummy(ImVec2(0, px(4)));
+    }
+    {
+        ImVec2 q = ImGui::GetCursorScreenPos();
+        icon(dl, IC_GLOBE, ImVec2(q.x + px(10), q.y + fh * 0.5f), px(16), col(C::muted));
+        ImGui::Dummy(ImVec2(px(24), fh));
+        ImGui::SameLine(0, px(6));
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (begin_combo("##lang", language_name(get_language()))) {
+            for (int l = 0; l < LANG_COUNT; ++l)
+                if (ImGui::Selectable(language_name(l), l == get_language())) set_language(l);
+            ImGui::EndCombo();
+        }
+    }
+    ImGui::End();
 }
 
 }  // namespace
 
 // -------------------------------------------------------------------- API
 
-void init(float ui_scale, ImFont* title_font) {
-    A.sc = ui_scale;
-    A.title_font = title_font;
+void init(float ui_scale) {
+    load_fonts(ui_scale);
+    apply_style();
     A.sys = detect_system();
     A.cfg.threads = recommended_threads(A.sys);
     int lang = system_language();
@@ -1615,7 +2002,6 @@ void init(float ui_scale, ImFont* title_font) {
     while (in >> key >> value)
         if (key == "lang") lang = value;
     set_language(lang);
-    apply_theme(ui_scale);
 }
 
 void shutdown() {
@@ -1637,71 +2023,24 @@ bool load_data(const char* path) {
 
 void start_training() { begin_training(); }
 
-void set_train_tab(int tab) { A.want_tab = tab; }
+void set_train_tab(int tab) { A.train_tab = std::max(0, std::min(2, tab)); }
 
 void frame() {
+    pump_events();
+    poll_plugin();
     const ImGuiViewport* vp = ImGui::GetMainViewport();
-    float sbw = 232 * A.sc;
+    float sbw = px(236);
+    sidebar(vp->WorkPos, sbw, vp->WorkSize.y);
+
     ImGuiWindowFlags wf = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
                           ImGuiWindowFlags_NoBringToFrontOnFocus;
-
-    // ---- sidebar
-    ImGui::SetNextWindowPos(vp->WorkPos);
-    ImGui::SetNextWindowSize(ImVec2(sbw, vp->WorkSize.y));
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.066f, 0.056f, 0.050f, 1));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14 * A.sc, 16 * A.sc));
-    ImGui::Begin("##sidebar", nullptr, wf);
-    {
-        ImVec2 p = ImGui::GetCursorScreenPos();
-        float sz = 44 * A.sc;
-        draw_logo(ImGui::GetWindowDrawList(), p, sz);
-        ImGui::SetCursorScreenPos(ImVec2(p.x + sz + 12 * A.sc, p.y + 2 * A.sc));
-        ImGui::BeginGroup();
-        ImGui::TextUnformatted("Kor Studio");
-        ImGui::TextColored(kMuted, "v%s", KOR_VERSION);
-        ImGui::EndGroup();
-        ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + sz + 20 * A.sc));
-
-        static const S nav[] = {S::NavHome, S::NavData, S::NavModel, S::NavTrain, S::NavTest, S::NavFiles, S::NavPlugins};
-        static_assert(sizeof(nav) / sizeof(nav[0]) == PAGE_COUNT, "one label per page");
-        ImGui::PushStyleVar(ImGuiStyleVar_SelectableTextAlign, ImVec2(0.f, 0.5f));
-        for (int i = 0; i < PAGE_COUNT; ++i) {
-            ImGui::PushID(i);
-            ImVec2 q = ImGui::GetCursorScreenPos();
-            std::string label = std::string("        ") + tr(nav[i]);
-            if (ImGui::Selectable(label.c_str(), A.page == i, 0, ImVec2(0, 34 * A.sc))) A.page = i;
-            ImU32 dot = A.page == i ? ImGui::GetColorU32(kEmber) : IM_COL32(90, 80, 72, 255);
-            ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(q.x + 12 * A.sc, q.y + 17 * A.sc), 4 * A.sc, dot);
-            ImGui::PopID();
-        }
-        ImGui::PopStyleVar();
-
-        if (busy()) {
-            TrainStats st = A.trainer.stats();
-            ImGui::Dummy(ImVec2(0, 10 * A.sc));
-            ImGui::TextColored(kEmberHi, "%s", tr(A.trainer.paused() ? S::StPaused : S::StRunning));
-            ImGui::PushStyleColor(ImGuiCol_PlotHistogram, kEmber);
-            ImGui::ProgressBar(st.total > 0 ? (float)st.step / st.total : 0.f, ImVec2(-1, 8 * A.sc), "");
-            ImGui::PopStyleColor();
-        }
-
-        ImGui::SetCursorPosY(ImGui::GetWindowHeight() - 76 * A.sc);
-        ImGui::TextColored(kMuted, "%s", tr(S::Language));
-        ImGui::SetNextItemWidth(-1);
-        if (ImGui::BeginCombo("##lang", language_name(get_language()))) {
-            for (int l = 0; l < LANG_COUNT; ++l)
-                if (ImGui::Selectable(language_name(l), l == get_language())) set_language(l);
-            ImGui::EndCombo();
-        }
-    }
-    ImGui::End();
-    ImGui::PopStyleVar();
-    ImGui::PopStyleColor();
-
-    // ---- content
+    wf &= ~ImGuiWindowFlags_NoScrollbar;
     ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + sbw, vp->WorkPos.y));
     ImGui::SetNextWindowSize(ImVec2(vp->WorkSize.x - sbw, vp->WorkSize.y));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(px(32), px(28)));
     ImGui::Begin("##content", nullptr, wf);
+    ImGui::PopStyleVar();
+    ImGui::PushID(A.page);
     switch (A.page) {
         case PAGE_HOME: page_home(); break;
         case PAGE_DATA: page_data(); break;
@@ -1711,8 +2050,8 @@ void frame() {
         case PAGE_FILES: page_files(); break;
         case PAGE_PLUGINS: page_plugins(); break;
     }
-    pump_events();
-    poll_plugin();
+    ImGui::PopID();
+    gap(4);
     if (A.page != PAGE_TEST) pump_generation();
     ImGui::End();
 }
