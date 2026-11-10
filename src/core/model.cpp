@@ -350,6 +350,32 @@ std::vector<int> Model::encode(const std::string& text) const {
     return ids;
 }
 
+static std::string trim_ws(const std::string& s) {
+    size_t a = s.find_first_not_of(" \t\r\n"), b = s.find_last_not_of(" \t\r\n");
+    return a == std::string::npos ? "" : s.substr(a, b - a + 1);
+}
+
+ProbeResult run_probe(Model& m, const Probe& p) {
+    ProbeResult res;
+    if (m.spec.kind != MODEL_GPT) return res;
+    std::vector<int> ids = m.encode(p.prompt);
+    if (ids.empty()) return res;
+    int newline = -1;
+    for (size_t i = 0; i < m.vocab.size(); ++i)
+        if (m.vocab[i] == "\n") newline = (int)i;
+    int max_len = std::min(160, (int)utf8_chars(p.expected).size() * 2 + 16);
+    Rng rng(1);
+    for (int i = 0; i < max_len; ++i) {
+        int t = m.next_token(ids, 0.f, rng);  // temperature 0: always the most likely character
+        if (t == newline) break;
+        ids.push_back(t);
+        res.answer += m.vocab[t];
+    }
+    res.answer = trim_ws(res.answer);
+    res.pass = !res.answer.empty() && res.answer == trim_ws(p.expected);
+    return res;
+}
+
 // ----------------------------------------------------------- checkpoints
 //
 // File layout (little endian):

@@ -2,6 +2,7 @@ build/
 build-*/
 *.kor
 *.tmp
+__pycache__/
 .vscode/
 .vs/
 CMakeUserPresets.json

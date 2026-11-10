@@ -70,9 +70,9 @@ static bool save_bmp(const char* path, int w, int h) {
 
 int main(int argc, char** argv) {
     // Optional scripting flags, mainly for producing screenshots:
-    //   --lang en|tr|ru  --page N  --data <file>  --train  --shot <out.bmp>  --delay <seconds>
+    //   --lang en|tr|ru  --page N  --tab N  --data <file>  --train  --shot <out.bmp>  --delay <seconds>
     std::string shot, data;
-    int page = -1, lang = -1;
+    int page = -1, lang = -1, tab = -1;
     bool train = false;
     double delay = 1.0;
     for (int i = 1; i < argc; ++i) {
@@ -80,6 +80,7 @@ int main(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--shot")) shot = next();
         else if (!std::strcmp(argv[i], "--data")) data = next();
         else if (!std::strcmp(argv[i], "--page")) page = std::atoi(next());
+        else if (!std::strcmp(argv[i], "--tab")) tab = std::atoi(next());
         else if (!std::strcmp(argv[i], "--delay")) delay = std::atof(next());
         else if (!std::strcmp(argv[i], "--train")) train = true;
         else if (!std::strcmp(argv[i], "--lang")) {
@@ -128,6 +129,7 @@ int main(int argc, char** argv) {
     if (!data.empty()) app::load_data(data.c_str());
     if (train) app::start_training();
     if (page >= 0) app::set_page(page);
+    if (tab >= 0) app::set_train_tab(tab);
 
     auto t0 = std::chrono::steady_clock::now();
     while (!glfwWindowShouldClose(window)) {

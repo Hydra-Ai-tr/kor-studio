@@ -38,6 +38,15 @@ struct Dataset {
     // Re-encodes raw text with a fixed vocabulary (for fine-tuning).
     void encode_with(const std::vector<std::string>& fixed_vocab);
 
+    // Detects "Tag: text" dialogue data where two speakers alternate, e.g.
+    // q_tag = "User: ", a_tag = "Bot: ". Returns false for ordinary text.
+    bool dialogue_tags(std::string& q_tag, std::string& a_tag) const;
+    // Up to n distinct question/answer pairs from dialogue data (tags removed),
+    // in a fixed shuffled order. Questions with conflicting answers are skipped.
+    std::vector<std::pair<std::string, std::string>> dialogue_pairs(int n) const;
+    // dialogue_pairs() turned into question tests.
+    std::vector<Probe> auto_probes(int n) const;
+
     size_t train_items() const;
     size_t val_items() const;
     // Fills a random mini-batch. T is only used for text.
@@ -46,6 +55,15 @@ struct Dataset {
 private:
     void split_text();
 };
+
+// Builds a question test. With dialogue tags the prompt is
+// q_tag + question + "\n" + a_tag, otherwise the question itself.
+Probe make_probe(const std::string& question, const std::string& expected, const std::string& q_tag, const std::string& a_tag);
+// Parses question tests written one per line as "question => expected answer".
+// Empty lines and lines starting with '#' are ignored.
+std::vector<Probe> parse_tests(const std::string& text, const std::string& q_tag, const std::string& a_tag);
+// The inverse of parse_tests() for a list of question/answer pairs.
+std::string format_tests(const std::vector<std::pair<std::string, std::string>>& pairs);
 
 // Writes a small synthetic 3-class spiral dataset (CSV) for demos.
 bool write_spiral_csv(const std::string& path, int per_class = 300);

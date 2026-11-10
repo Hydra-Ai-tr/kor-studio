@@ -99,6 +99,18 @@ private:
     Batch infer;
 };
 
+// A question test for text models: the model continues `prompt` (greedy,
+// up to the end of the line) and the result is compared with `expected`.
+// `question` is the human-readable form shown in logs and reports.
+struct Probe {
+    std::string prompt, expected, question;
+};
+struct ProbeResult {
+    std::string answer;
+    bool pass = false;
+};
+ProbeResult run_probe(Model& m, const Probe& p);
+
 uint16_t float_to_half(float f);
 float half_to_float(uint16_t h);
 // Splits UTF-8 text into code points (as strings); drops '\r'.

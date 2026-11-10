@@ -18,7 +18,13 @@ işlemcide eğitilir.
   (sınıflandırıcı ya da regresyon modeli eğitir) yükle. Görev otomatik algılanır.
 - **Model** – ağı görsel olarak tasarla ya da *Sistemime göre otomatik ayarla* düğmesine bas;
   Kor belleğine, işlemcine ve verine uygun boyutu seçsin.
-- **Eğitim** – canlı kayıp eğrileri, doğrulama, doğruluk, hız, kalan süre, duraklat/sürdür/durdur.
+- **Eğitim** – canlı kayıp eğrileri, doğrulama, doğruluk, hız, kalan süre, duraklat/sürdür/durdur,
+  erken durdurma ve dosyaya da kaydedilen bir eğitim logu.
+- **Soru testleri** – önce eğit, sonra sor: `soru => beklenen cevap` satırları yaz (diyalog
+  verisinde otomatik doldurulur). Model eğitim sırasında sınanır, en çok soruyu bilen ağırlıklar
+  korunur ve istenirse bütün cevaplar doğru olunca eğitim kendiliğinden durur.
+- **Eklentiler** – veri hazırlayan veya üreten, test yazan ve modeli sınayan Python betikleri
+  ([docs/plugins.md](plugins.md)). Üç eklenti hazır gelir.
 - **Deneme** – eğitim sürerken bile metin üret veya tahmin yap.
 - **Kaydet / Yükle** – modeller açık [`.kor` biçiminde](kor-format.md) saklanır.
 - **Üç dil** – Türkçe, İngilizce ve Rusça; çalışırken değiştirilebilir.
@@ -35,7 +41,7 @@ işlemcide eğitilir.
 
 ### Dürüstçe: ne beklemeli
 
-Kor Studio v0.1 eğitimi **işlemcide** yapar. Küçük modeller içindir: tablo ağları ve birkaç milyon
+Kor Studio v0.2 eğitimi **işlemcide** yapar. Küçük modeller içindir: tablo ağları ve birkaç milyon
 parametreye kadar karakter düzeyinde transformer'lar; bunlar bir dizüstünde saniyeler ya da
 dakikalar içinde eğitilir. ChatGPT boyutunda bir modeli dizüstünde eğitmez; bunu hiçbir program
 yapamaz. Ekran kartı desteği yol haritasındadır.
@@ -49,6 +55,15 @@ GLFW ve Dear ImGui, CMake tarafından otomatik indirilir.
 cmake -S . -B build -G Ninja
 cmake --build build
 ./build/bin/kor-studio
+```
+
+### Komut satırı
+
+```bash
+kor-cli train examples/diyalog_tr.txt --target 1 --log egitim.log --out sohbet.kor
+                                         # diyalog: bütün soru testleri geçince dur
+kor-cli test sohbet.kor testler.txt --data examples/diyalog_tr.txt
+kor-cli generate sohbet.kor "Kullanıcı: Merhaba" --len 200
 ```
 
 ## Lisans

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(KorStudio VERSION 0.1.0 LANGUAGES C CXX)
+project(KorStudio VERSION 0.2.0 LANGUAGES C CXX)
 
 option(KOR_BUILD_GUI "Build the Kor Studio desktop application" ON)
 
@@ -27,6 +27,7 @@ add_library(korcore STATIC
   src/core/trainer.cpp
   src/core/sysinfo.cpp)
 target_include_directories(korcore PUBLIC src)
+target_compile_definitions(korcore PUBLIC KOR_VERSION="${PROJECT_VERSION}")
 if(NOT MSVC)
   # Warnings for our own code only (PUBLIC reaches kor-cli and kor-studio, not third-party libraries).
   target_compile_options(korcore PUBLIC -Wall -Wextra)
@@ -54,6 +55,9 @@ target_link_libraries(korcore PUBLIC Threads::Threads)
 
 add_executable(kor-cli src/cli/main.cpp)
 target_link_libraries(kor-cli PRIVATE korcore)
+if(WIN32)
+  target_link_libraries(kor-cli PRIVATE shell32)
+endif()
 
 if(MINGW)
   # Ship self-contained executables (no libstdc++/winpthread DLLs needed).
@@ -98,7 +102,8 @@ if(KOR_BUILD_GUI)
     src/app/main.cpp
     src/app/ui.cpp
     src/app/i18n.cpp
-    src/app/platform.cpp)
+    src/app/platform.cpp
+    src/app/plugins.cpp)
   if(WIN32)
     list(APPEND KOR_APP_SOURCES assets/kor.rc)
   endif()
@@ -113,8 +118,12 @@ if(KOR_BUILD_GUI)
   if(MINGW)
     target_link_options(kor-studio PRIVATE -static)
   endif()
-  # Put the example datasets next to the executable.
+  # Plugins call kor-cli, so build it together with the app.
+  add_dependencies(kor-studio kor-cli)
+  # Put the example datasets and the bundled plugins next to the executable.
   add_custom_command(TARGET kor-studio POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
-            ${CMAKE_SOURCE_DIR}/examples $<TARGET_FILE_DIR:kor-studio>/examples)
+            ${CMAKE_SOURCE_DIR}/examples $<TARGET_FILE_DIR:kor-studio>/examples
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_SOURCE_DIR}/plugins $<TARGET_FILE_DIR:kor-studio>/plugins)
 endif()

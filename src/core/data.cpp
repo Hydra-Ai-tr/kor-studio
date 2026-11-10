@@ -59,6 +59,102 @@ void Dataset::encode_with(const std::vector<std::string>& fixed) {
     split_text();
 }
 
+// -------------------------------------------------------------- dialogue
+
+static std::vector<std::string> split_lines(const std::string& s) {
+    std::vector<std::string> lines;
+    std::istringstream in(s);
+    std::string l;
+    while (std::getline(in, l)) {
+        if (!l.empty() && l.back() == '\r') l.pop_back();
+        lines.push_back(l);
+    }
+    return lines;
+}
+
+static std::string line_tag(const std::string& l) {
+    size_t p = l.find(": ");
+    return p == std::string::npos || p == 0 || p > 24 ? "" : l.substr(0, p + 2);
+}
+
+bool Dataset::dialogue_tags(std::string& q_tag, std::string& a_tag) const {
+    if (kind != DATA_TEXT) return false;
+    std::vector<std::string> lines = split_lines(raw);
+    std::map<std::pair<std::string, std::string>, int> count;
+    for (size_t i = 0; i + 1 < lines.size(); ++i) {
+        std::string a = line_tag(lines[i]), b = line_tag(lines[i + 1]);
+        if (!a.empty() && !b.empty() && a != b) ++count[{a, b}];
+    }
+    int best = 0, second = 0;
+    for (auto& kv : count) {
+        if (kv.second > best) { second = best; best = kv.second; q_tag = kv.first.first; a_tag = kv.first.second; }
+        else if (kv.second > second) second = kv.second;
+    }
+    // "Q then A" must be clearly more common than "A then Q" would be by chance.
+    return best >= 8 && best >= (int)lines.size() / 8;
+}
+
+std::vector<std::pair<std::string, std::string>> Dataset::dialogue_pairs(int n) const {
+    std::vector<std::pair<std::string, std::string>> out;
+    std::string qt, at;
+    if (!dialogue_tags(qt, at)) return out;
+    std::vector<std::string> lines = split_lines(raw);
+    std::map<std::string, std::string> pairs;  // question -> expected ("" = ambiguous)
+    for (size_t i = 0; i + 1 < lines.size(); ++i) {
+        if (lines[i].compare(0, qt.size(), qt) != 0 || lines[i + 1].compare(0, at.size(), at) != 0) continue;
+        std::string question = lines[i].substr(qt.size()), expected = lines[i + 1].substr(at.size());
+        auto it = pairs.find(question);
+        if (it == pairs.end()) pairs[question] = expected;
+        else if (it->second != expected) it->second.clear();  // same question, different answers
+    }
+    for (auto& kv : pairs)
+        if (!kv.second.empty()) out.push_back(kv);
+    Rng rng(123);
+    for (int i = (int)out.size() - 1; i > 0; --i) std::swap(out[i], out[rng.below(i + 1)]);
+    if ((int)out.size() > n) out.resize(n);
+    return out;
+}
+
+std::vector<Probe> Dataset::auto_probes(int n) const {
+    std::vector<Probe> out;
+    std::string qt, at;
+    if (!dialogue_tags(qt, at)) return out;
+    for (auto& qa : dialogue_pairs(n)) out.push_back(make_probe(qa.first, qa.second, qt, at));
+    return out;
+}
+
+static std::string trim(const std::string& s) {
+    size_t a = s.find_first_not_of(" \t\r\n"), b = s.find_last_not_of(" \t\r\n");
+    return a == std::string::npos ? "" : s.substr(a, b - a + 1);
+}
+
+Probe make_probe(const std::string& question, const std::string& expected, const std::string& q_tag, const std::string& a_tag) {
+    Probe p;
+    p.question = trim(question);
+    p.expected = trim(expected);
+    p.prompt = q_tag.empty() && a_tag.empty() ? p.question : q_tag + p.question + "\n" + a_tag;
+    return p;
+}
+
+std::vector<Probe> parse_tests(const std::string& text, const std::string& q_tag, const std::string& a_tag) {
+    std::vector<Probe> out;
+    for (const std::string& line : split_lines(text)) {
+        std::string l = trim(line);
+        if (l.empty() || l[0] == '#') continue;
+        size_t sep = l.find("=>");
+        if (sep == std::string::npos) continue;
+        Probe p = make_probe(l.substr(0, sep), l.substr(sep + 2), q_tag, a_tag);
+        if (!p.question.empty() && !p.expected.empty()) out.push_back(p);
+    }
+    return out;
+}
+
+std::string format_tests(const std::vector<std::pair<std::string, std::string>>& pairs) {
+    std::string s;
+    for (auto& qa : pairs) s += qa.first + " => " + qa.second + "\n";
+    return s;
+}
+
 // ----------------------------------------------------------------- table
 
 static std::vector<std::string> split_csv(const std::string& line, char delim) {

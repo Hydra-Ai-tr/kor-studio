@@ -1,4 +1,5 @@
-// kor-cli: headless companion to Kor Studio (system info, training, self-test).
+// kor-cli: headless companion to Kor Studio (system info, training, self-test,
+// generation and question tests). Also used by Python plugins.
 #include "../core/kernels.h"
 #include "../core/parallel.h"
 #include "../core/sysinfo.h"
@@ -6,11 +7,64 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <thread>
+#include <vector>
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <shellapi.h>
+#endif
 
 using namespace kor;
+
+// Command-line arguments as UTF-8 (on Windows argv uses the ANSI code page).
+static std::vector<std::string> utf8_args(int argc, char** argv) {
+    std::vector<std::string> args;
+#if defined(_WIN32)
+    int n = 0;
+    if (wchar_t** w = CommandLineToArgvW(GetCommandLineW(), &n)) {
+        for (int i = 0; i < n; ++i) {
+            int len = WideCharToMultiByte(CP_UTF8, 0, w[i], -1, nullptr, 0, nullptr, nullptr);
+            std::string s(len > 0 ? (size_t)len - 1 : 0, '\0');
+            if (len > 1) WideCharToMultiByte(CP_UTF8, 0, w[i], -1, &s[0], len, nullptr, nullptr);
+            args.push_back(s);
+        }
+        LocalFree(w);
+        return args;
+    }
+#endif
+    for (int i = 0; i < argc; ++i) args.push_back(argv[i]);
+    return args;
+}
+
+static bool read_text(const std::string& path, std::string& out) {
+    std::ifstream in(upath(path), std::ios::binary);
+    if (!in) return false;
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    out = ss.str();
+    return true;
+}
+
+// The value after a flag, or "" when the flag is absent.
+static std::string flag(const std::vector<std::string>& a, const char* name, const char* def = "") {
+    for (size_t i = 0; i + 1 < a.size(); ++i)
+        if (a[i] == name) return a[i + 1];
+    return def;
+}
+static bool has_flag(const std::vector<std::string>& a, const char* name) {
+    for (auto& s : a)
+        if (s == name) return true;
+    return false;
+}
 
 static void print_sysinfo() {
     SysInfo s = detect_system();
@@ -131,15 +185,20 @@ static int selftest() {
     return fails ? 1 : 0;
 }
 
-static int train(int argc, char** argv) {
-    std::string path = argv[2], out;
-    int steps = 0, kind = 0;
-    for (int i = 3; i < argc; ++i) {
-        if (!std::strcmp(argv[i], "--steps") && i + 1 < argc) steps = std::atoi(argv[++i]);
-        else if (!std::strcmp(argv[i], "--out") && i + 1 < argc) out = argv[++i];
-        else if (!std::strcmp(argv[i], "--table")) kind = DATA_TABLE;
-        else if (!std::strcmp(argv[i], "--text")) kind = DATA_TEXT;
-    }
+// Question tests from a file, using the dialogue tags of `data` if it has them.
+static bool load_tests(const std::string& path, const Dataset* data, std::vector<Probe>& out) {
+    std::string text, qt, at;
+    if (!read_text(path, text)) return false;
+    if (data) data->dialogue_tags(qt, at);
+    out = parse_tests(text, qt, at);
+    return true;
+}
+
+static int train(const std::vector<std::string>& a) {
+    std::string path = a[2], out = flag(a, "--out"), tests = flag(a, "--tests"), log_path = flag(a, "--log");
+    int steps = std::atoi(flag(a, "--steps", "0").c_str()), patience = std::atoi(flag(a, "--patience", "0").c_str());
+    float target = (float)std::atof(flag(a, "--target", "0").c_str());
+    int kind = has_flag(a, "--table") ? DATA_TABLE : has_flag(a, "--text") ? DATA_TEXT : 0;
     if (!kind) {
         std::string ext = path.size() > 4 ? path.substr(path.size() - 4) : "";
         kind = (ext == ".csv" || ext == ".tsv") ? DATA_TABLE : DATA_TEXT;
@@ -157,19 +216,66 @@ static int train(int argc, char** argv) {
     auto model = std::make_shared<Model>(plan.spec);
     if (kind == DATA_TEXT) model->vocab = data.vocab;
     else { model->vocab = data.labels; model->norm_mean = data.mean; model->norm_std = data.stdv; }
+    if (kind == DATA_TEXT) {
+        if (!tests.empty()) {
+            if (!load_tests(tests, &data, plan.cfg.probes)) { std::printf("error: cannot read %s\n", tests.c_str()); return 1; }
+            std::printf("%zu question tests from %s\n", plan.cfg.probes.size(), tests.c_str());
+        } else {
+            plan.cfg.probes = data.auto_probes(12);  // dialogue data: test with questions from the data
+            if (!plan.cfg.probes.empty()) std::printf("dialogue data detected: %zu question tests\n", plan.cfg.probes.size());
+        }
+        plan.cfg.probe_every = std::max(1, plan.cfg.steps / 10);
+        plan.cfg.probe_target = std::max(0.f, std::min(1.f, target));
+    }
+    plan.cfg.patience = patience;
+    std::ofstream log;
+    if (!log_path.empty()) {
+        log.open(upath(log_path), std::ios::binary);
+        if (!log) { std::printf("error: cannot write %s\n", log_path.c_str()); return 1; }
+    }
+    auto say = [&](const char* fmt, auto... args) {
+        char b[2048];
+        std::snprintf(b, sizeof b, fmt, args...);
+        std::fputs(b, stdout);
+        if (log) log << b;
+    };
     Trainer tr;
     if (!tr.start(model, &data, plan.cfg)) { std::printf("error: %s\n", tr.stats().error.c_str()); return 1; }
-    size_t shown = 0;
+    std::vector<TrainEvent> events;
+    auto print_events = [&] {
+        events.clear();
+        tr.drain_events(events);
+        for (auto& e : events) {
+            if (e.kind == EV_START) {
+                say("start: %lld trainable parameters, %lld threads, kernels %s\n", e.n1, e.n2, e.text.c_str());
+            } else if (e.kind == EV_EVAL) {
+                say("step %5d  loss %.4f  val %.4f", e.step, e.loss, e.val_loss);
+                if (e.val_acc >= 0) say("  acc %.1f%%", e.val_acc * 100);
+                say(e.n1 ? "  *best\n" : "\n");
+            } else if (e.kind == EV_PROBES) {
+                say("step %5d  question tests %lld/%lld   e.g. %s\n", e.step, e.n1, e.n2, e.text.c_str());
+            } else if (e.kind == EV_EARLY_STOP) {
+                say("step %5d  early stop: no improvement for %lld evaluations\n", e.step, e.n1);
+            } else if (e.kind == EV_TARGET) {
+                say("step %5d  question test target reached (%lld/%lld), stopping\n", e.step, e.n1, e.n2);
+            } else if (e.kind == EV_RESTORED) {
+                if (e.n2 > 0) say("restored the weights from step %d, which passed the most question tests (%lld/%lld)\n", e.step, e.n1, e.n2);
+                else say("restored best weights from step %d (val %.4f)\n", e.step, e.val_loss);
+            } else if (e.kind == EV_DONE || e.kind == EV_STOPPED) {
+                say("%s at step %d after %.1fs\n", e.kind == EV_DONE ? "finished" : "stopped", e.step, e.time);
+            } else if (e.kind == EV_ERROR) {
+                say("error: %s\n", e.text.c_str());
+            }
+        }
+        std::fflush(stdout);
+        if (log) log.flush();
+    };
     while (tr.running()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
-        TrainStats st = tr.stats();
-        for (; shown < st.val_hist.size(); ++shown)
-            std::printf("step %5d  val loss %.4f\n", st.val_steps[shown], st.val_hist[shown]);
-        std::fflush(stdout);
+        print_events();
     }
+    print_events();
     TrainStats st = tr.stats();
-    for (; shown < st.val_hist.size(); ++shown)
-        std::printf("step %5d  val loss %.4f\n", st.val_steps[shown], st.val_hist[shown]);
     if (st.state == TS_ERROR) { std::printf("error: %s\n", st.error.c_str()); return 1; }
     std::printf("done in %.1fs: train loss %.4f, val loss %.4f", st.elapsed, st.loss, st.val_loss);
     if (st.val_acc >= 0) std::printf(", val accuracy %.1f%%", st.val_acc * 100);
@@ -192,20 +298,82 @@ static int train(int argc, char** argv) {
     return 0;
 }
 
+static std::shared_ptr<Model> load_text_model(const std::string& path) {
+    std::string err;
+    auto m = Model::load(path, &err);
+    if (!m) std::printf("error: %s\n", err.c_str());
+    else if (m->spec.kind != MODEL_GPT) { std::printf("error: %s is not a text model\n", path.c_str()); m.reset(); }
+    return m;
+}
+
+// kor-cli generate <model.kor> <prompt> [--len N] [--temp T] [--line]
+static int generate(const std::vector<std::string>& a) {
+    auto m = load_text_model(a[2]);
+    if (!m) return 1;
+    std::string prompt = a.size() > 3 && a[3].compare(0, 2, "--") != 0 ? a[3] : "";
+    int len = std::max(1, std::atoi(flag(a, "--len", "200").c_str()));
+    float temp = (float)std::atof(flag(a, "--temp", "0.8").c_str());
+    bool line = has_flag(a, "--line");
+    Rng rng((uint64_t)std::chrono::steady_clock::now().time_since_epoch().count());
+    std::vector<int> ids = m->encode(prompt);
+    if (ids.empty()) ids.push_back(rng.below(std::max(1, m->spec.vocab)));
+    std::string out;
+    for (int i = 0; i < len; ++i) {
+        int t = m->next_token(ids, temp, rng);
+        if (line && m->vocab[t] == "\n") break;
+        ids.push_back(t);
+        out += m->vocab[t];
+    }
+    std::printf("%s%s\n", line ? "" : prompt.c_str(), out.c_str());
+    return 0;
+}
+
+// kor-cli test <model.kor> <tests.txt> [--data <text>] [--tsv]
+static int test(const std::vector<std::string>& a) {
+    auto m = load_text_model(a[2]);
+    if (!m) return 1;
+    Dataset data;
+    std::string data_path = flag(a, "--data"), err;
+    if (!data_path.empty() && !data.load_text(data_path, &err)) { std::printf("error: %s: %s\n", data_path.c_str(), err.c_str()); return 1; }
+    std::vector<Probe> probes;
+    if (!load_tests(a[3], data_path.empty() ? nullptr : &data, probes)) { std::printf("error: cannot read %s\n", a[3].c_str()); return 1; }
+    bool tsv = has_flag(a, "--tsv");
+    int pass = 0;
+    for (auto& p : probes) {
+        ProbeResult r = run_probe(*m, p);
+        pass += r.pass;
+        if (tsv) std::printf("%s\t%s\t%s\t%s\n", r.pass ? "PASS" : "FAIL", p.question.c_str(), p.expected.c_str(), r.answer.c_str());
+        else std::printf("%s  %s\n      answer:   %s\n      expected: %s\n", r.pass ? "PASS" : "FAIL", p.question.c_str(), r.answer.c_str(), p.expected.c_str());
+    }
+    if (!tsv) std::printf("passed %d/%zu\n", pass, probes.size());
+    return 0;
+}
+
 int main(int argc, char** argv) {
-    std::string cmd = argc > 1 ? argv[1] : "";
+#if defined(_WIN32)
+    SetConsoleOutputCP(CP_UTF8);
+#endif
+    std::vector<std::string> a = utf8_args(argc, argv);
+    std::string cmd = a.size() > 1 ? a[1] : "";
     if (cmd == "sysinfo") { print_sysinfo(); return 0; }
     if (cmd == "selftest") return selftest();
-    if (cmd == "demo-data" && argc > 2) {
-        bool ok = write_spiral_csv(argv[2]);
-        std::printf(ok ? "wrote %s\n" : "cannot write %s\n", argv[2]);
+    if (cmd == "demo-data" && a.size() > 2) {
+        bool ok = write_spiral_csv(a[2]);
+        std::printf(ok ? "wrote %s\n" : "cannot write %s\n", a[2].c_str());
         return ok ? 0 : 1;
     }
-    if (cmd == "train" && argc > 2) return train(argc, argv);
+    if (cmd == "train" && a.size() > 2) return train(a);
+    if (cmd == "generate" && a.size() > 2) return generate(a);
+    if (cmd == "test" && a.size() > 3) return test(a);
     std::printf("Kor Studio CLI\n"
                 "  kor-cli sysinfo                      show detected hardware\n"
                 "  kor-cli selftest                     verify the training engine\n"
                 "  kor-cli demo-data <out.csv>          write a demo classification dataset\n"
-                "  kor-cli train <data> [--steps N] [--out model.kor] [--text|--table]\n");
+                "  kor-cli train <data> [--steps N] [--patience N] [--tests tests.txt] [--target 0..1]\n"
+                "                [--log train.log] [--out model.kor] [--text|--table]\n"
+                "  kor-cli generate <model.kor> [prompt] [--len N] [--temp T] [--line]\n"
+                "  kor-cli test <model.kor> <tests.txt> [--data <text>] [--tsv]\n"
+                "\n"
+                "Question tests are written one per line as: question => expected answer\n");
     return cmd.empty() ? 0 : 1;
 }

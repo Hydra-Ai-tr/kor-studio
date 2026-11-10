@@ -2,21 +2,30 @@
 
 #include "i18n.h"
 #include "platform.h"
+#include "plugins.h"
 
 #include "../core/kernels.h"
 #include "../core/sysinfo.h"
 
 #include "imgui.h"
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
+
+#ifndef KOR_VERSION
+#define KOR_VERSION "dev"
+#endif
 
 using namespace kor;
 
@@ -61,6 +70,33 @@ struct State {
     bool half = false;
     std::string file_msg;
     bool file_ok = true;
+
+    // training log (also written to a file in <config>/logs)
+    enum Tone { T_NORMAL = 0, T_GOOD, T_BAD, T_ACCENT, T_MUTED };
+    struct LogLine { std::string text; int tone; };
+    std::vector<LogLine> log;
+    std::ofstream log_file;
+    std::string log_path;
+    int want_tab = -1;
+    bool fold_settings = false;
+
+    // question tests ("question => answer" per line)
+    std::string q_tag, a_tag;  // dialogue tags of the loaded text, empty for plain text
+    char tests[32768] = "";
+    std::vector<Probe> run_tests;  // the tests the results below belong to
+    std::vector<ProbeResult> results;
+    int results_step = 0;          // 0 = manual run
+    bool stop_on_pass = false;
+
+    // plugins
+    std::vector<Plugin> plugins;
+    std::vector<std::array<char, 512>> plugin_args;
+    bool plugins_scanned = false;
+    PythonFinder python;
+    PluginRunner runner;
+    int plugin_running = -1;
+    std::string plugin_out_dir, plugin_msg;
+    bool plugin_ok = true;
 };
 State A;
 
@@ -181,6 +217,19 @@ void draw_logo(ImDrawList* dl, ImVec2 p, float sz) {
     }
 }
 
+// Local time, e.g. "2026-11-10 22:05:31" (or "2026-11-10_22-05-31" for file names).
+std::string timestamp(bool for_file) {
+    std::time_t t = std::time(nullptr);
+    std::tm tm = *std::localtime(&t);
+    char b[32];
+    std::strftime(b, sizeof b, for_file ? "%Y-%m-%d_%H-%M-%S" : "%Y-%m-%d %H:%M:%S", &tm);
+    return b;
+}
+
+void Tooltip(const char* s) {
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("%s", s);
+}
+
 std::string find_example(const char* name) {
     namespace fs = std::filesystem;
     fs::path exe = upath(exe_dir());
@@ -190,6 +239,130 @@ std::string find_example(const char* name) {
         if (fs::exists(p, ec)) return fs::weakly_canonical(p, ec).u8string();
     }
     return "";
+}
+
+// ------------------------------------------------------------ training log
+
+std::string logs_dir() { return (upath(config_dir()) / "logs").u8string(); }
+
+void log_line(const std::string& text, int tone = State::T_NORMAL) {
+    A.log.push_back({text, tone});
+    if (A.log_file) {
+        A.log_file << text << "\n";
+        A.log_file.flush();
+    }
+}
+
+template <class... Args>
+void log_fmt(int tone, S fmt, Args... args) {
+    char b[2048];
+    std::snprintf(b, sizeof b, tr(fmt), args...);
+    log_line(b, tone);
+}
+
+void start_log() {
+    namespace fs = std::filesystem;
+    A.log.clear();
+    A.log_file.close();
+    std::error_code ec;
+    fs::create_directories(upath(logs_dir()), ec);
+    A.log_path = (upath(logs_dir()) / ("train-" + timestamp(true) + ".log")).u8string();
+    A.log_file.open(upath(A.log_path), std::ios::binary);
+    const ModelSpec& s = A.model->spec;
+    log_fmt(State::T_ACCENT, S::LogHeader, KOR_VERSION, timestamp(false).c_str());
+    log_fmt(State::T_MUTED, S::LogData, A.data.path.c_str());
+    log_fmt(State::T_MUTED, S::LogModel, tr(s.kind == MODEL_GPT ? S::TextModel : S::TableModel),
+            fmt_count((double)A.model->param_count(false)).c_str(), fmt_count((double)A.model->param_count(true)).c_str());
+    log_fmt(State::T_MUTED, S::LogCfg, A.cfg.steps, A.cfg.batch, A.cfg.accum, (double)A.cfg.lr,
+            A.cfg.optimizer == OPT_SGD ? "SGD" : "AdamW", A.cfg.threads);
+    if (!A.cfg.probes.empty()) log_fmt(State::T_MUTED, S::LogTests, (int)A.cfg.probes.size());
+}
+
+// Moves new training events into the log; called every frame.
+void pump_events() {
+    std::vector<TrainEvent> ev;
+    A.trainer.drain_events(ev);
+    for (const TrainEvent& e : ev) {
+        char b[2048];
+        std::string t = "[" + fmt_time(e.time) + "] ";
+        switch (e.kind) {
+            case EV_START:
+                std::snprintf(b, sizeof b, tr(S::LogStart), fmt_count((double)e.n1).c_str(), (int)e.n2, e.text.c_str());
+                log_line(t + b);
+                break;
+            case EV_EVAL: {
+                std::snprintf(b, sizeof b, tr(S::LogEval), e.step, e.loss, e.val_loss);
+                std::string s = t + b;
+                if (e.val_acc >= 0) { std::snprintf(b, sizeof b, tr(S::LogAcc), e.val_acc * 100); s += b; }
+                if (e.n1) s += tr(S::LogBest);
+                log_line(s, e.n1 ? State::T_GOOD : State::T_NORMAL);
+                break;
+            }
+            case EV_PROBES: {
+                std::snprintf(b, sizeof b, tr(S::LogProbes), e.step, (int)e.n1, (int)e.n2, e.text.c_str());
+                log_line(t + b, State::T_ACCENT);
+                TrainStats st = A.trainer.stats();
+                A.results = st.probe_results;
+                A.results_step = e.step;
+                break;
+            }
+            case EV_EARLY_STOP:
+                std::snprintf(b, sizeof b, tr(S::LogEarly), e.step, (int)e.n1);
+                log_line(t + b, State::T_ACCENT);
+                break;
+            case EV_TARGET:
+                std::snprintf(b, sizeof b, tr(S::LogTarget), e.step, (int)e.n1, (int)e.n2);
+                log_line(t + b, State::T_GOOD);
+                break;
+            case EV_RESTORED:
+                if (e.n2 > 0) std::snprintf(b, sizeof b, tr(S::LogRestoredTests), e.step, (int)e.n1, (int)e.n2);
+                else std::snprintf(b, sizeof b, tr(S::LogRestored), e.step, e.val_loss);
+                log_line(t + b, State::T_ACCENT);
+                break;
+            case EV_DONE:
+                std::snprintf(b, sizeof b, tr(S::LogDone), e.step, fmt_time(e.time).c_str());
+                log_line(t + b, State::T_GOOD);
+                break;
+            case EV_STOPPED:
+                std::snprintf(b, sizeof b, tr(S::LogStopped), e.step);
+                log_line(t + b, State::T_MUTED);
+                break;
+            case EV_ERROR:
+                std::snprintf(b, sizeof b, tr(S::LogError), e.text.c_str());
+                log_line(t + b, State::T_BAD);
+                break;
+        }
+        if (e.kind == EV_DONE || e.kind == EV_STOPPED || e.kind == EV_ERROR) A.log_file.close();
+    }
+}
+
+// --------------------------------------------------------- question tests
+
+std::vector<Probe> current_tests() { return parse_tests(A.tests, A.q_tag, A.a_tag); }
+
+void set_tests(const std::string& text) { std::snprintf(A.tests, sizeof A.tests, "%s", text.c_str()); }
+
+void tests_from_data() {
+    set_tests(format_tests(A.data.dialogue_pairs(12)));
+    A.results.clear();
+}
+
+bool can_run_tests() { return A.model && A.model->spec.kind == MODEL_GPT && !busy(); }
+
+void run_tests_now() {
+    if (!can_run_tests()) return;
+    A.run_tests = current_tests();
+    A.results.clear();
+    A.results_step = 0;
+    int pass = 0;
+    {
+        std::lock_guard<std::mutex> lk(A.trainer.model_mu);
+        for (auto& p : A.run_tests) {
+            A.results.push_back(run_probe(*A.model, p));
+            pass += A.results.back().pass;
+        }
+    }
+    if (!A.run_tests.empty()) log_fmt(State::T_ACCENT, S::LogManual, pass, (int)A.run_tests.size());
 }
 
 // ---------------------------------------------------------------- actions
@@ -213,7 +386,11 @@ void auto_configure() {
     A.sys = detect_system();  // free memory changes over time
     A.plan = autotune(A.sys, A.data);
     A.spec = A.plan.spec;
+    TrainConfig old = A.cfg;
     A.cfg = A.plan.cfg;
+    A.cfg.keep_best = old.keep_best;
+    A.cfg.patience = old.patience;
+    A.cfg.probe_every = std::max(1, A.cfg.steps / 10);
     A.has_plan = true;
 }
 
@@ -260,6 +437,12 @@ bool load_data_impl(const std::string& path, int kind, int target_col) {
     A.data_kind = kind;
     A.data_msg.clear();
     std::snprintf(A.data_path, sizeof A.data_path, "%s", path.c_str());
+    A.q_tag.clear();
+    A.a_tag.clear();
+    if (!A.data.dialogue_tags(A.q_tag, A.a_tag)) { A.q_tag.clear(); A.a_tag.clear(); }
+    if (A.data.kind == DATA_TEXT) tests_from_data();
+    else set_tests("");
+    A.stop_on_pass = !A.q_tag.empty();
     if (model_matches_data()) {
         // Keep the model (fine-tuning): text is re-encoded with its vocabulary.
         if (A.data.kind == DATA_TEXT) A.data.encode_with(A.model->vocab);
@@ -290,7 +473,17 @@ void begin_training() {
     if (!A.model || !model_matches_data()) build_model();
     A.gen_left = 0;
     A.cfg.seed = (uint64_t)std::chrono::steady_clock::now().time_since_epoch().count();
-    A.trainer.start(A.model, &A.data, A.cfg);
+    A.cfg.probes = A.data.kind == DATA_TEXT ? current_tests() : std::vector<Probe>();
+    A.cfg.probe_target = A.stop_on_pass ? 1.f : 0.f;
+    A.run_tests = A.cfg.probes;
+    A.results.clear();
+    start_log();
+    if (!A.trainer.start(A.model, &A.data, A.cfg)) {
+        log_fmt(State::T_BAD, S::LogError, A.trainer.stats().error.c_str());
+        A.log_file.close();
+    } else {
+        A.fold_settings = true;
+    }
 }
 
 std::string settings_file() { return (upath(config_dir()) / "settings.cfg").u8string(); }
@@ -721,6 +914,181 @@ void plot_loss(const TrainStats& st, float height) {
     }
 }
 
+ImVec4 tone_color(int tone) {
+    switch (tone) {
+        case State::T_GOOD: return kGood;
+        case State::T_BAD: return kBad;
+        case State::T_ACCENT: return kEmberHi;
+        case State::T_MUTED: return kMuted;
+    }
+    return ImGui::GetStyleColorVec4(ImGuiCol_Text);
+}
+
+void log_view(float height) {
+    ImGui::BeginDisabled(A.log.empty());
+    if (ImGui::Button(tr(S::CopyLog))) {
+        std::string all;
+        for (auto& l : A.log) all += l.text + "\n";
+        ImGui::SetClipboardText(all.c_str());
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button(tr(S::OpenLogs))) {
+        std::error_code ec;
+        std::filesystem::create_directories(upath(logs_dir()), ec);
+        open_folder(logs_dir());
+    }
+    if (!A.log_path.empty()) {
+        ImGui::SameLine();
+        char b[2400];
+        std::snprintf(b, sizeof b, tr(S::LogFile), A.log_path.c_str());
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(kMuted, "%s", b);
+    }
+    ImGui::BeginChild("##log", ImVec2(0, std::max(120 * A.sc, height - ImGui::GetFrameHeightWithSpacing())), ImGuiChildFlags_Borders,
+                      ImGuiWindowFlags_HorizontalScrollbar);
+    if (A.log.empty()) Muted(tr(S::LogEmpty));
+    bool at_end = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4;
+    ImGuiListClipper clip;
+    clip.Begin((int)A.log.size());
+    while (clip.Step())
+        for (int i = clip.DisplayStart; i < clip.DisplayEnd; ++i)
+            ImGui::TextColored(tone_color(A.log[i].tone), "%s", A.log[i].text.c_str());
+    if (at_end) ImGui::SetScrollHereY(1.f);
+    ImGui::EndChild();
+}
+
+void tests_view(const TrainStats& st) {
+    char b[1024];
+    Muted(tr(S::TestsHelp));
+    if (!A.q_tag.empty()) {
+        std::snprintf(b, sizeof b, tr(S::DialogDetected), A.q_tag.c_str(), A.a_tag.c_str());
+        ImGui::TextColored(kBlue, "%s", b);
+    } else {
+        Muted(tr(S::NoDialog));
+    }
+    bool run = busy();
+    ImGui::BeginDisabled(run);
+    ImGui::InputTextMultiline("##tests", A.tests, sizeof A.tests, ImVec2(-1, 120 * A.sc));
+    ImGui::EndDisabled();
+    std::vector<Probe> tests = current_tests();
+    std::snprintf(b, sizeof b, tr(S::TestsCount), (int)tests.size());
+    ImGui::TextColored(kMuted, "%s", b);
+    if (!A.q_tag.empty()) {
+        ImGui::SameLine();
+        ImGui::BeginDisabled(run);
+        if (ImGui::SmallButton(tr(S::UseDataQuestions))) tests_from_data();
+        ImGui::EndDisabled();
+    }
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!can_run_tests() || tests.empty());
+    if (ImGui::SmallButton(tr(S::RunTestsNow))) run_tests_now();
+    ImGui::EndDisabled();
+    if (tests.empty()) Muted(tr(S::NoTests));
+    else if (!A.model || A.model->spec.kind != MODEL_GPT) Muted(tr(S::NeedTextModel));
+
+    if (A.results.empty()) return;
+    int pass = 0;
+    for (auto& r : A.results) pass += r.pass;
+    ImGui::Dummy(ImVec2(0, 2 * A.sc));
+    std::snprintf(b, sizeof b, tr(S::TestsPassed), pass, (int)A.results.size());
+    if (A.title_font) ImGui::PushFont(A.title_font);
+    ImGui::TextColored(pass == (int)A.results.size() ? kGood : pass > 0 ? kEmberHi : kBad, "%s", b);
+    if (A.title_font) ImGui::PopFont();
+    ImGui::SameLine();
+    ImGui::AlignTextToFramePadding();
+    if (A.results_step > 0) std::snprintf(b, sizeof b, tr(S::ResultsAt), A.results_step);
+    else std::snprintf(b, sizeof b, "%s", tr(S::ResultsManual));
+    ImGui::TextColored(kMuted, "%s", b);
+
+    if (st.probe_hist.size() >= 2 && A.results_step > 0) {
+        std::vector<float> h(st.probe_hist.begin(), st.probe_hist.end());
+        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, kEmber);
+        ImGui::PlotHistogram("##phist", h.data(), (int)h.size(), 0, tr(S::TestsHistory), 0.f, (float)std::max(1, st.probe_total),
+                             ImVec2(-1, 60 * A.sc));
+        ImGui::PopStyleColor();
+    }
+
+    int n = (int)std::min(A.results.size(), A.run_tests.size());
+    ImGuiTableFlags tf = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable;
+    float th = std::max(140 * A.sc, ImGui::GetContentRegionAvail().y - 4 * A.sc);
+    if (ImGui::BeginTable("##results", 4, tf, ImVec2(0, th))) {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn(tr(S::ColQuestion), ImGuiTableColumnFlags_WidthStretch, 1.2f);
+        ImGui::TableSetupColumn(tr(S::ColExpected), ImGuiTableColumnFlags_WidthStretch, 1.f);
+        ImGui::TableSetupColumn(tr(S::ColAnswer), ImGuiTableColumnFlags_WidthStretch, 1.f);
+        ImGui::TableSetupColumn(tr(S::Result), ImGuiTableColumnFlags_WidthFixed, 70 * A.sc);
+        ImGui::TableHeadersRow();
+        for (int i = 0; i < n; ++i) {
+            const ProbeResult& r = A.results[i];
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextWrapped("%s", A.run_tests[i].question.c_str());
+            ImGui::TableNextColumn();
+            ImGui::TextWrapped("%s", A.run_tests[i].expected.c_str());
+            ImGui::TableNextColumn();
+            ImGui::PushStyleColor(ImGuiCol_Text, r.pass ? kGood : kBad);
+            ImGui::TextWrapped("%s", r.answer.empty() ? "-" : r.answer.c_str());
+            ImGui::PopStyleColor();
+            ImGui::TableNextColumn();
+            ImGui::TextColored(r.pass ? kGood : kBad, "%s", tr(r.pass ? S::Pass : S::Fail));
+        }
+        ImGui::EndTable();
+    }
+}
+
+void train_settings(bool run) {
+    ImGui::BeginDisabled(run);
+    float w = (ImGui::GetContentRegionAvail().x - 24 * A.sc) / 2;
+    ImGui::BeginGroup();
+    ImGui::PushItemWidth(170 * A.sc);
+    ImGui::InputInt(tr(S::Steps), &A.cfg.steps, 100, 1000);
+    ImGui::InputInt(tr(S::BatchSize), &A.cfg.batch, 1, 8);
+    ImGui::InputInt(tr(S::Accum), &A.cfg.accum, 1, 2);
+    ImGui::InputInt(tr(S::EvalEvery), &A.cfg.eval_every, 10, 100);
+    ImGui::InputInt(tr(S::Patience), &A.cfg.patience, 1, 5);
+    Tooltip(tr(S::PatienceHelp));
+    ImGui::PopItemWidth();
+    ImGui::EndGroup();
+    ImGui::SameLine(w + 24 * A.sc);
+    ImGui::BeginGroup();
+    ImGui::PushItemWidth(170 * A.sc);
+    ImGui::InputFloat(tr(S::LR), &A.cfg.lr, 0, 0, "%.5f");
+    ImGui::InputFloat(tr(S::WD), &A.cfg.weight_decay, 0, 0, "%.4f");
+    ImGui::SliderInt(tr(S::ThreadsUse), &A.cfg.threads, 1, std::max(1, A.sys.logical));
+    const char* opts[] = {"AdamW", "SGD + momentum"};
+    ImGui::Combo(tr(S::Optimizer), &A.cfg.optimizer, opts, 2);
+    if (A.data.kind == DATA_TEXT) {
+        ImGui::InputInt(tr(S::TestEvery), &A.cfg.probe_every, 50, 500);
+        Tooltip(tr(S::TestEveryHelp));
+    }
+    ImGui::PopItemWidth();
+    ImGui::EndGroup();
+    ImGui::Checkbox(tr(S::KeepBest), &A.cfg.keep_best);
+    Tooltip(tr(S::KeepBestHelp));
+    if (A.data.kind == DATA_TEXT) {
+        ImGui::SameLine(w + 24 * A.sc);
+        ImGui::Checkbox(tr(S::StopOnPass), &A.stop_on_pass);
+    }
+    A.cfg.patience = std::max(0, std::min(1000, A.cfg.patience));
+    A.cfg.probe_every = std::max(0, A.cfg.probe_every);
+    A.cfg.steps = std::max(1, std::min(10000000, A.cfg.steps));
+    A.cfg.batch = std::max(1, std::min(4096, A.cfg.batch));
+    A.cfg.accum = std::max(1, std::min(256, A.cfg.accum));
+    A.cfg.eval_every = std::max(1, A.cfg.eval_every);
+    A.cfg.lr = std::max(1e-7f, std::min(1.f, A.cfg.lr));
+    A.cfg.weight_decay = std::max(0.f, std::min(1.f, A.cfg.weight_decay));
+    A.cfg.threads = std::max(1, std::min(std::max(1, A.sys.logical), A.cfg.threads));
+    A.cfg.warmup = std::min(100, A.cfg.steps / 10);
+    ImGui::EndDisabled();
+    const ModelSpec& ms = A.model && model_matches_data() ? A.model->spec : A.spec;
+    double mb = (double)estimate_train_bytes(ms, A.cfg.batch) / (1024.0 * 1024.0);
+    char eff[96], b[256];
+    std::snprintf(eff, sizeof eff, tr(S::EffBatch), A.cfg.batch * A.cfg.accum);
+    std::snprintf(b, sizeof b, "%s   |   %s: %s", eff, tr(S::EstRam), fmt_mb(mb).c_str());
+    ImGui::TextColored(kMuted, "%s", b);
+}
+
 void page_train() {
     Title(tr(S::NavTrain));
     if (A.data.kind == DATA_NONE) { need_data_notice(); return; }
@@ -729,42 +1097,12 @@ void page_train() {
     char b[256];
 
     if (BeginCard("cfg")) {
-        ImGui::SeparatorText(tr(S::Settings));
-        ImGui::BeginDisabled(run);
-        float w = (ImGui::GetContentRegionAvail().x - 24 * A.sc) / 2;
-        ImGui::BeginGroup();
-        ImGui::PushItemWidth(170 * A.sc);
-        ImGui::InputInt(tr(S::Steps), &A.cfg.steps, 100, 1000);
-        ImGui::InputInt(tr(S::BatchSize), &A.cfg.batch, 1, 8);
-        ImGui::InputInt(tr(S::Accum), &A.cfg.accum, 1, 2);
-        ImGui::InputInt(tr(S::EvalEvery), &A.cfg.eval_every, 10, 100);
-        ImGui::PopItemWidth();
-        ImGui::EndGroup();
-        ImGui::SameLine(w + 24 * A.sc);
-        ImGui::BeginGroup();
-        ImGui::PushItemWidth(170 * A.sc);
-        ImGui::InputFloat(tr(S::LR), &A.cfg.lr, 0, 0, "%.5f");
-        ImGui::InputFloat(tr(S::WD), &A.cfg.weight_decay, 0, 0, "%.4f");
-        ImGui::SliderInt(tr(S::ThreadsUse), &A.cfg.threads, 1, std::max(1, A.sys.logical));
-        const char* opts[] = {"AdamW", "SGD + momentum"};
-        ImGui::Combo(tr(S::Optimizer), &A.cfg.optimizer, opts, 2);
-        ImGui::PopItemWidth();
-        ImGui::EndGroup();
-        A.cfg.steps = std::max(1, std::min(10000000, A.cfg.steps));
-        A.cfg.batch = std::max(1, std::min(4096, A.cfg.batch));
-        A.cfg.accum = std::max(1, std::min(256, A.cfg.accum));
-        A.cfg.eval_every = std::max(1, A.cfg.eval_every);
-        A.cfg.lr = std::max(1e-7f, std::min(1.f, A.cfg.lr));
-        A.cfg.weight_decay = std::max(0.f, std::min(1.f, A.cfg.weight_decay));
-        A.cfg.threads = std::max(1, std::min(std::max(1, A.sys.logical), A.cfg.threads));
-        A.cfg.warmup = std::min(100, A.cfg.steps / 10);
-        ImGui::EndDisabled();
-        const ModelSpec& ms = A.model && model_matches_data() ? A.model->spec : A.spec;
-        double mb = (double)estimate_train_bytes(ms, A.cfg.batch) / (1024.0 * 1024.0);
-        char eff[96];
-        std::snprintf(eff, sizeof eff, tr(S::EffBatch), A.cfg.batch * A.cfg.accum);
-        std::snprintf(b, sizeof b, "%s   |   %s: %s", eff, tr(S::EstRam), fmt_mb(mb).c_str());
-        ImGui::TextColored(kMuted, "%s", b);
+        // Folded while training so the chart, log and tests get the room.
+        if (A.fold_settings) {
+            ImGui::SetNextItemOpen(false);
+            A.fold_settings = false;
+        }
+        if (ImGui::CollapsingHeader(tr(S::Settings), ImGuiTreeNodeFlags_DefaultOpen)) train_settings(run);
     }
     EndCard();
 
@@ -813,7 +1151,25 @@ void page_train() {
         ImGui::EndTable();
     }
     ImGui::Dummy(ImVec2(0, 4 * A.sc));
-    plot_loss(st, std::max(180 * A.sc, ImGui::GetContentRegionAvail().y - 8 * A.sc));
+
+    if (ImGui::BeginTabBar("##traintabs")) {
+        auto flags = [](int tab) { return A.want_tab == tab ? ImGuiTabItemFlags_SetSelected : 0; };
+        float h = std::max(220 * A.sc, ImGui::GetContentRegionAvail().y - 40 * A.sc);
+        if (ImGui::BeginTabItem(tr(S::TabChart), nullptr, flags(0))) {
+            plot_loss(st, std::max(180 * A.sc, ImGui::GetContentRegionAvail().y - 8 * A.sc));
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem(tr(S::TabLog), nullptr, flags(1))) {
+            log_view(h);
+            ImGui::EndTabItem();
+        }
+        if (A.data.kind == DATA_TEXT && ImGui::BeginTabItem(tr(S::TabTests), nullptr, flags(2))) {
+            tests_view(st);
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
+    A.want_tab = -1;
 }
 
 // Generates a few characters per frame so the interface never blocks; uses
@@ -980,6 +1336,226 @@ void page_files() {
     }
 }
 
+// ---------------------------------------------------------------- plugins
+
+std::string user_plugins_dir() { return (upath(config_dir()) / "plugins").u8string(); }
+
+// The bundled plugins next to the program (or in the source tree), then the user's own folder.
+std::vector<std::string> plugin_dirs() {
+    namespace fs = std::filesystem;
+    std::vector<std::string> dirs;
+    fs::path exe = upath(exe_dir());
+    for (const fs::path& base : {exe / "plugins", exe / ".." / "plugins", exe / ".." / ".." / "plugins"}) {
+        std::error_code ec;
+        if (fs::is_directory(base, ec)) {
+            dirs.push_back(fs::weakly_canonical(base, ec).u8string());
+            break;
+        }
+    }
+    dirs.push_back(user_plugins_dir());
+    return dirs;
+}
+
+void scan_all_plugins() {
+    A.plugins = scan_plugins(plugin_dirs());
+    A.plugin_args.assign(A.plugins.size(), {});
+    for (size_t i = 0; i < A.plugins.size(); ++i)
+        std::snprintf(A.plugin_args[i].data(), A.plugin_args[i].size(), "%s", A.plugins[i].args.c_str());
+    A.plugins_scanned = true;
+}
+
+bool read_file_text(const std::filesystem::path& p, std::string& out) {
+    std::ifstream in(p, std::ios::binary);
+    if (!in) return false;
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    out = ss.str();
+    return true;
+}
+
+void run_plugin(int i) {
+    namespace fs = std::filesystem;
+    if (busy() || A.runner.running() || !A.python.found() || i < 0 || i >= (int)A.plugins.size()) return;
+    const Plugin& p = A.plugins[i];
+    fs::path out = upath(config_dir()) / "plugin-runs" / (upath(p.path).stem().u8string() + "-" + timestamp(true));
+    std::error_code ec;
+    fs::create_directories(out, ec);
+    A.plugin_out_dir = out.u8string();
+
+    // Inputs: the current dataset, model and question tests.
+    std::string model_file;
+    if (A.model) {
+        std::string err;
+        std::lock_guard<std::mutex> lk(A.trainer.model_mu);
+        if (A.model->save((out / "input-model.kor").u8string(), false, &err)) model_file = (out / "input-model.kor").u8string();
+    }
+    std::string tests_file = (out / "input-tests.txt").u8string();
+    { std::ofstream t(upath(tests_file), std::ios::binary); t << A.tests; }
+#if defined(_WIN32)
+    const char* cli_name = "kor-cli.exe";
+    const char sep = ';';
+#else
+    const char* cli_name = "kor-cli";
+    const char sep = ':';
+#endif
+    fs::path cli = upath(exe_dir()) / cli_name;
+    std::string pypath;
+    for (auto& d : plugin_dirs()) pypath += (pypath.empty() ? "" : std::string(1, sep)) + d;
+    static const char* const lang_codes[LANG_COUNT] = {"en", "tr", "ru"};
+    std::vector<std::pair<std::string, std::string>> env = {
+        {"KOR_OUT", A.plugin_out_dir},
+        {"KOR_DATA", A.data.kind != DATA_NONE ? A.data.path : ""},
+        {"KOR_MODEL", model_file},
+        {"KOR_TESTS", tests_file},
+        {"KOR_CLI", fs::exists(cli, ec) ? cli.u8string() : ""},
+        {"KOR_LANG", lang_codes[get_language()]},
+        {"PYTHONPATH", pypath},
+        {"PYTHONIOENCODING", "utf-8"},
+        {"PYTHONUNBUFFERED", "1"},
+    };
+    std::vector<std::string> cmd = A.python.command();
+    cmd.push_back("-X");
+    cmd.push_back("utf8");
+    cmd.push_back(p.path);
+    for (auto& a : split_args(A.plugin_args[i].data())) cmd.push_back(a);
+    if (A.runner.start(cmd, env)) {
+        A.plugin_running = i;
+        char b[512];
+        std::snprintf(b, sizeof b, tr(S::PluginRunning), p.title(get_language()).c_str());
+        A.plugin_msg = b;
+        A.plugin_ok = true;
+    }
+}
+
+// Picks up a finished plugin run and loads what it produced; called every frame.
+void poll_plugin() {
+    namespace fs = std::filesystem;
+    int code = 0;
+    if (!A.runner.take_finished(code)) return;
+    int i = A.plugin_running;
+    A.plugin_running = -1;
+    std::string name = i >= 0 && i < (int)A.plugins.size() ? A.plugins[i].title(get_language()) : "?";
+    char b[2400];
+    A.plugin_ok = code == 0;
+    if (code == -2) std::snprintf(b, sizeof b, tr(S::PluginCancelled), name.c_str());
+    else if (code == -1) std::snprintf(b, sizeof b, "%s", tr(S::PluginNoStart));
+    else if (code != 0) std::snprintf(b, sizeof b, tr(S::PluginFailed), name.c_str(), code);
+    else std::snprintf(b, sizeof b, tr(S::PluginDone), name.c_str());
+    A.plugin_msg = b;
+    if (code != 0) return;
+
+    fs::path out = upath(A.plugin_out_dir);
+    std::error_code ec;
+    for (const char* f : {"data.txt", "data.csv", "data.tsv"}) {
+        fs::path dp = out / f;
+        if (!fs::exists(dp, ec)) continue;
+        int kind = std::strcmp(f, "data.txt") == 0 ? 0 : 1;
+        if (load_data_impl(dp.u8string(), kind, -1)) {
+            std::snprintf(b, sizeof b, tr(S::PluginData), dp.u8string().c_str());
+            A.plugin_msg += std::string("\n") + b;
+        } else {
+            std::snprintf(b, sizeof b, tr(S::Failed), A.data_msg.c_str());
+            A.plugin_msg += std::string("\n") + b;
+            A.plugin_ok = false;
+        }
+        break;
+    }
+    std::string tests;
+    if (read_file_text(out / "tests.txt", tests)) {
+        set_tests(tests);
+        A.results.clear();
+        std::snprintf(b, sizeof b, tr(S::PluginTests), (int)current_tests().size());
+        A.plugin_msg += std::string("\n") + b;
+    }
+}
+
+void page_plugins() {
+    Title(tr(S::NavPlugins));
+    Muted(tr(S::PluginsHelp));
+    ImGui::Dummy(ImVec2(0, 4 * A.sc));
+    if (!A.plugins_scanned) {
+        scan_all_plugins();
+        A.python.start();
+    }
+    char b[2400];
+
+    if (BeginCard("python")) {
+        ImGui::AlignTextToFramePadding();
+        if (A.python.searching()) {
+            ImGui::TextColored(kMuted, "%s", tr(S::PythonChecking));
+        } else if (A.python.found()) {
+            std::snprintf(b, sizeof b, tr(S::PythonFound), A.python.version().c_str());
+            ImGui::TextColored(kGood, "%s", b);
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Text, kBad);
+            ImGui::TextWrapped("%s", tr(S::PythonMissing));
+            ImGui::PopStyleColor();
+        }
+        if (!A.python.searching() && !A.python.found()) {
+            if (ImGui::Button(tr(S::CheckAgain))) A.python.start();
+        }
+    }
+    EndCard();
+
+    if (ImGui::Button(tr(S::OpenPlugins))) {
+        std::error_code ec;
+        std::filesystem::create_directories(upath(user_plugins_dir()), ec);
+        open_folder(user_plugins_dir());
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(tr(S::RefreshList))) scan_all_plugins();
+    ImGui::TextColored(kMuted, "%s", tr(S::PluginDirs));
+    for (auto& d : plugin_dirs()) ImGui::TextColored(kMuted, "    %s", d.c_str());
+    ImGui::Dummy(ImVec2(0, 4 * A.sc));
+
+    if (A.plugins.empty()) Muted(tr(S::NoPlugins));
+    bool can_run = A.python.found() && !busy() && !A.runner.running();
+    if (busy()) ImGui::TextColored(kEmberHi, "%s", tr(S::PluginBusy));
+    int lang = get_language();
+    for (int i = 0; i < (int)A.plugins.size(); ++i) {
+        const Plugin& p = A.plugins[i];
+        ImGui::PushID(i);
+        if (BeginCard("plugin")) {
+            ImGui::TextColored(kEmberHi, "%s", p.title(lang).c_str());
+            ImGui::SameLine();
+            ImGui::TextColored(kMuted, "%s", p.file.c_str());
+            if (!p.description(lang).empty()) {
+                ImGui::PushTextWrapPos(0);
+                ImGui::TextWrapped("%s", p.description(lang).c_str());
+                ImGui::PopTextWrapPos();
+            }
+            ImGui::SetNextItemWidth(-200 * A.sc);
+            ImGui::InputTextWithHint("##args", tr(S::Arguments), A.plugin_args[i].data(), A.plugin_args[i].size());
+            ImGui::SameLine();
+            if (A.plugin_running == i && A.runner.running()) {
+                if (ImGui::Button(tr(S::Stop), ImVec2(120 * A.sc, 0))) A.runner.cancel();
+            } else {
+                ImGui::BeginDisabled(!can_run);
+                if (PrimaryButton(tr(S::Run), ImVec2(120 * A.sc, 0))) run_plugin(i);
+                ImGui::EndDisabled();
+            }
+        }
+        EndCard();
+        ImGui::PopID();
+    }
+
+    if (!A.plugin_msg.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, A.runner.running() ? kEmberHi : A.plugin_ok ? kGood : kBad);
+        ImGui::TextWrapped("%s", A.plugin_msg.c_str());
+        ImGui::PopStyleColor();
+    }
+    std::string out = A.runner.output();
+    if (out.empty()) return;
+    ImGui::SeparatorText(tr(S::PluginOutput));
+    if (ImGui::SmallButton(tr(S::Clear))) A.runner.clear_output();
+    ImGui::BeginChild("##pout", ImVec2(0, std::max(160 * A.sc, ImGui::GetContentRegionAvail().y)), ImGuiChildFlags_Borders,
+                      ImGuiWindowFlags_HorizontalScrollbar);
+    bool at_end = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4;
+    ImGui::TextUnformatted(out.data(), out.data() + out.size());
+    if (at_end) ImGui::SetScrollHereY(1.f);
+    ImGui::EndChild();
+}
+
 void apply_theme(float sc) {
     ImGuiStyle& st = ImGui::GetStyle();
     st = ImGuiStyle();
@@ -1034,6 +1610,7 @@ void init(float ui_scale, ImFont* title_font) {
 }
 
 void shutdown() {
+    A.runner.cancel();
     A.trainer.stop();
     std::ofstream out(upath(settings_file()));
     out << "lang " << get_language() << "\n";
@@ -1050,6 +1627,8 @@ bool load_data(const char* path) {
 }
 
 void start_training() { begin_training(); }
+
+void set_train_tab(int tab) { A.want_tab = tab; }
 
 void frame() {
     const ImGuiViewport* vp = ImGui::GetMainViewport();
@@ -1070,11 +1649,12 @@ void frame() {
         ImGui::SetCursorScreenPos(ImVec2(p.x + sz + 12 * A.sc, p.y + 2 * A.sc));
         ImGui::BeginGroup();
         ImGui::TextUnformatted("Kor Studio");
-        ImGui::TextColored(kMuted, "v0.1.0");
+        ImGui::TextColored(kMuted, "v%s", KOR_VERSION);
         ImGui::EndGroup();
         ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + sz + 20 * A.sc));
 
-        static const S nav[PAGE_COUNT] = {S::NavHome, S::NavData, S::NavModel, S::NavTrain, S::NavTest, S::NavFiles};
+        static const S nav[] = {S::NavHome, S::NavData, S::NavModel, S::NavTrain, S::NavTest, S::NavFiles, S::NavPlugins};
+        static_assert(sizeof(nav) / sizeof(nav[0]) == PAGE_COUNT, "one label per page");
         ImGui::PushStyleVar(ImGuiStyleVar_SelectableTextAlign, ImVec2(0.f, 0.5f));
         for (int i = 0; i < PAGE_COUNT; ++i) {
             ImGui::PushID(i);
@@ -1120,7 +1700,10 @@ void frame() {
         case PAGE_TRAIN: page_train(); break;
         case PAGE_TEST: page_test(); break;
         case PAGE_FILES: page_files(); break;
+        case PAGE_PLUGINS: page_plugins(); break;
     }
+    pump_events();
+    poll_plugin();
     if (A.page != PAGE_TEST) pump_generation();
     ImGui::End();
 }

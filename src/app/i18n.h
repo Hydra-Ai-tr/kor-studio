@@ -136,7 +136,78 @@
     X(Failed, "Failed: %s", "Başarısız: %s", "Не удалось: %s") \
     X(FilesHelp, "Models are stored in the open .kor format, documented in the repository.", "Modeller, depoda belgelenen açık .kor biçiminde saklanır.", "Модели хранятся в открытом формате .kor, описанном в репозитории.") \
     X(TextModel, "Text model (transformer)", "Metin modeli (transformer)", "Текстовая модель (трансформер)") \
-    X(TableModel, "Table model (MLP)", "Tablo modeli (MLP)", "Табличная модель (MLP)")
+    X(TableModel, "Table model (MLP)", "Tablo modeli (MLP)", "Табличная модель (MLP)") \
+    X(NavPlugins, "Plugins", "Eklentiler", "Плагины") \
+    X(KeepBest, "Keep the best weights", "En iyi ağırlıkları koru", "Сохранять лучшие веса") \
+    X(KeepBestHelp, "When training ends, the model returns to the weights that had the lowest validation loss.", "Eğitim bitince model, doğrulama kaybının en düşük olduğu ağırlıklara geri döner.", "По окончании обучения модель возвращается к весам с наименьшей ошибкой проверки.") \
+    X(Patience, "Early stop after (checks)", "Erken durdurma (kontrol)", "Ранняя остановка (проверок)") \
+    X(PatienceHelp, "Stop when the validation loss has not improved for this many checks in a row. 0 = never stop early.", "Doğrulama kaybı art arda bu kadar kontrolde iyileşmezse eğitimi durdur. 0 = erken durdurma yok.", "Остановить, если ошибка проверки не улучшалась столько проверок подряд. 0 = не останавливать.") \
+    X(TestEvery, "Question tests every (steps)", "Soru testi aralığı (adım)", "Вопросы каждые (шагов)") \
+    X(TestEveryHelp, "How often the model is quizzed during training. 0 = only at the end.", "Modelin eğitim sırasında ne sıklıkla sınanacağı. 0 = sadece sonda.", "Как часто модель проверяется вопросами во время обучения. 0 = только в конце.") \
+    X(StopOnPass, "Stop when all question tests pass", "Tüm soru testleri geçince dur", "Остановить, когда все вопросы пройдены") \
+    X(TabChart, "Chart", "Grafik", "График") \
+    X(TabLog, "Log", "Log", "Журнал") \
+    X(TabTests, "Question tests", "Soru testleri", "Проверка вопросами") \
+    X(LogEmpty, "The training log will appear here when you start training.", "Eğitimi başlattığında eğitim logu burada görünecek.", "Журнал обучения появится здесь после запуска обучения.") \
+    X(LogHeader, "Kor Studio %s - training log, %s", "Kor Studio %s - eğitim logu, %s", "Kor Studio %s — журнал обучения, %s") \
+    X(LogData, "Data: %s", "Veri: %s", "Данные: %s") \
+    X(LogModel, "Model: %s, %s parameters (%s trainable)", "Model: %s, %s parametre (%s eğitilebilir)", "Модель: %s, параметров %s (обучаемых %s)") \
+    X(LogCfg, "Settings: %d steps, batch %d x %d, learning rate %g, %s, %d threads", "Ayarlar: %d adım, batch %d x %d, öğrenme oranı %g, %s, %d iş parçacığı", "Настройки: шагов %d, батч %d x %d, скорость обучения %g, %s, потоков %d") \
+    X(LogTests, "Question tests: %d", "Soru testi: %d", "Проверочных вопросов: %d") \
+    X(LogStart, "Training started: %s trainable parameters, %d threads, %s kernels", "Eğitim başladı: %s eğitilebilir parametre, %d iş parçacığı, %s çekirdekleri", "Обучение началось: обучаемых параметров %s, потоков %d, ядра %s") \
+    X(LogEval, "step %d   loss %.4f   validation %.4f", "adım %d   kayıp %.4f   doğrulama %.4f", "шаг %d   ошибка %.4f   проверка %.4f") \
+    X(LogAcc, "   accuracy %.1f%%", "   doğruluk %%%.1f", "   точность %.1f%%") \
+    X(LogBest, "   (best so far)", "   (şimdiye kadarki en iyi)", "   (лучшая пока)") \
+    X(LogProbes, "step %d   question tests passed: %d/%d   e.g. %s", "adım %d   geçen soru testi: %d/%d   örnek: %s", "шаг %d   пройдено вопросов: %d/%d   напр. %s") \
+    X(LogEarly, "step %d   early stop: validation did not improve in %d checks", "adım %d   erken durdurma: doğrulama %d kontroldür iyileşmedi", "шаг %d   ранняя остановка: проверка не улучшалась %d раз") \
+    X(LogTarget, "step %d   all question tests reached the target (%d/%d) - training stopped", "adım %d   soru testleri hedefe ulaştı (%d/%d) - eğitim durduruldu", "шаг %d   вопросы достигли цели (%d/%d) — обучение остановлено") \
+    X(LogRestored, "Returned to the best weights from step %d (validation %.4f)", "%d. adımdaki en iyi ağırlıklara dönüldü (doğrulama %.4f)", "Возврат к лучшим весам шага %d (проверка %.4f)") \
+    X(LogRestoredTests, "Returned to the weights from step %d, which passed the most question tests (%d/%d)", "En çok soru testini geçen %d. adımdaki ağırlıklara dönüldü (%d/%d)", "Возврат к весам шага %d, прошедшим больше всего вопросов (%d/%d)") \
+    X(LogDone, "Finished at step %d after %s", "%d. adımda tamamlandı, süre %s", "Завершено на шаге %d за %s") \
+    X(LogStopped, "Stopped at step %d", "%d. adımda durduruldu", "Остановлено на шаге %d") \
+    X(LogError, "Error: %s", "Hata: %s", "Ошибка: %s") \
+    X(LogManual, "Manual question test: %d/%d passed", "Elle soru testi: %d/%d geçti", "Ручная проверка вопросами: пройдено %d/%d") \
+    X(LogFile, "Saved to %s", "Kaydedildiği yer: %s", "Сохраняется в %s") \
+    X(CopyLog, "Copy", "Kopyala", "Копировать") \
+    X(OpenLogs, "Open logs folder", "Log klasörünü aç", "Открыть папку журналов") \
+    X(TestsHelp, "Train, then quiz: write one test per line as  question => expected answer. During training and once at the end the model answers every question; a test passes when the answer matches exactly.", "Önce eğit, sonra sına: her satıra bir test yaz:  soru => beklenen cevap. Eğitim sırasında ve sonunda model her soruyu cevaplar; cevap birebir aynıysa test geçer.", "Обучить, затем проверить: по одному тесту в строке:  вопрос => ожидаемый ответ. Во время обучения и в конце модель отвечает на каждый вопрос; тест пройден, если ответ совпадает точно.") \
+    X(DialogDetected, "Dialogue data: each question is asked as \"%s...\" and the answer is read after \"%s\".", "Diyalog verisi: her soru \"%s...\" olarak sorulur, cevap \"%s\" sonrasından okunur.", "Диалоговые данные: вопрос задаётся как \"%s...\", ответ читается после \"%s\".") \
+    X(NoDialog, "Plain text: the model continues each question and the rest of the line is compared.", "Düz metin: model her soruyu devam ettirir ve satırın geri kalanı karşılaştırılır.", "Обычный текст: модель продолжает вопрос, и остаток строки сравнивается.") \
+    X(UseDataQuestions, "Take questions from the data", "Soruları veriden al", "Взять вопросы из данных") \
+    X(RunTestsNow, "Run tests now", "Testleri şimdi çalıştır", "Проверить сейчас") \
+    X(TestsCount, "%d tests", "%d test", "тестов: %d") \
+    X(TestsPassed, "Passed: %d / %d", "Geçen: %d / %d", "Пройдено: %d / %d") \
+    X(TestsHistory, "Passed tests over time", "Zaman içinde geçen testler", "Пройденные тесты со временем") \
+    X(ResultsAt, "Results at step %d", "%d. adımdaki sonuçlar", "Результаты на шаге %d") \
+    X(ResultsManual, "Results of the manual run", "Elle çalıştırmanın sonuçları", "Результаты ручной проверки") \
+    X(ColQuestion, "Question", "Soru", "Вопрос") \
+    X(ColExpected, "Expected", "Beklenen", "Ожидается") \
+    X(ColAnswer, "Model's answer", "Modelin cevabı", "Ответ модели") \
+    X(Pass, "pass", "geçti", "да") \
+    X(Fail, "fail", "kaldı", "нет") \
+    X(NoTests, "No tests yet. Add lines such as:  What is the capital of Italy? => Rome", "Henüz test yok. Şöyle satırlar ekle:  İtalya'nın başkenti neresi? => Roma", "Тестов пока нет. Добавьте строки вида:  Столица Италии? => Рим") \
+    X(NeedTextModel, "Build or train a text model to run the tests.", "Testleri çalıştırmak için bir metin modeli oluştur veya eğit.", "Создайте или обучите текстовую модель, чтобы запустить тесты.") \
+    X(PluginsHelp, "Plugins are Python scripts that work together with Kor Studio. They can prepare or generate training data, write question tests and quiz a trained model. The format is described in docs/plugins.md.", "Eklentiler, Kor Studio ile birlikte çalışan Python betikleridir. Eğitim verisi hazırlayabilir veya üretebilir, soru testleri yazabilir ve eğitilmiş bir modeli sınayabilirler. Biçimi docs/plugins.md dosyasında anlatılır.", "Плагины — это скрипты на Python, работающие вместе с Kor Studio. Они могут готовить или создавать данные, писать проверочные вопросы и проверять обученную модель. Формат описан в docs/plugins.md.") \
+    X(PythonChecking, "Looking for Python...", "Python aranıyor...", "Поиск Python...") \
+    X(PythonFound, "%s is ready", "%s hazır", "%s готов") \
+    X(PythonMissing, "Python 3 was not found. Install it from python.org (tick \"Add python.exe to PATH\"), then press Check again.", "Python 3 bulunamadı. python.org adresinden kur (\"Add python.exe to PATH\" kutusunu işaretle), sonra Tekrar dene'ye bas.", "Python 3 не найден. Установите его с python.org (отметьте \"Add python.exe to PATH\") и нажмите «Проверить снова».") \
+    X(CheckAgain, "Check again", "Tekrar dene", "Проверить снова") \
+    X(OpenPlugins, "Open my plugins folder", "Eklenti klasörümü aç", "Открыть мою папку плагинов") \
+    X(RefreshList, "Refresh list", "Listeyi yenile", "Обновить список") \
+    X(PluginDirs, "Plugins are read from:", "Eklentilerin okunduğu klasörler:", "Плагины загружаются из:") \
+    X(NoPlugins, "No plugins found.", "Eklenti bulunamadı.", "Плагины не найдены.") \
+    X(Arguments, "Arguments", "Argümanlar", "Аргументы") \
+    X(Run, "Run", "Çalıştır", "Запустить") \
+    X(PluginRunning, "Running %s...", "%s çalışıyor...", "Выполняется %s...") \
+    X(PluginDone, "%s finished.", "%s tamamlandı.", "%s завершён.") \
+    X(PluginFailed, "%s failed (exit code %d).", "%s başarısız oldu (çıkış kodu %d).", "%s завершился с ошибкой (код %d).") \
+    X(PluginCancelled, "%s was stopped.", "%s durduruldu.", "%s остановлен.") \
+    X(PluginNoStart, "Python could not be started.", "Python başlatılamadı.", "Не удалось запустить Python.") \
+    X(PluginData, "New dataset from the plugin is loaded: %s", "Eklentinin ürettiği yeni veri yüklendi: %s", "Загружены новые данные от плагина: %s") \
+    X(PluginTests, "The plugin wrote %d question tests (Training > Question tests).", "Eklenti %d soru testi yazdı (Eğitim > Soru testleri).", "Плагин записал проверочных вопросов: %d (Обучение > Проверка вопросами).") \
+    X(PluginBusy, "Stop training before running a plugin.", "Eklenti çalıştırmadan önce eğitimi durdur.", "Остановите обучение перед запуском плагина.") \
+    X(PluginOutput, "Output", "Çıktı", "Вывод") \
+    X(Clear, "Clear", "Temizle", "Очистить")
 
 enum class S {
 #define X(id, en, tr, ru) id,

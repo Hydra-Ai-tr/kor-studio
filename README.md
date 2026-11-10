@@ -17,7 +17,13 @@ underneath, and it tunes itself to your computer, so small models train on an or
   (trains a classifier or a regressor). The task is detected automatically.
 - **Model** – design a network visually (layer list for tables, transformer sliders for text) or
   press *Auto-configure* and let Kor pick a size that fits your RAM, CPU and dataset.
-- **Training** – live loss curves, validation, accuracy, speed, ETA, pause/resume/stop.
+- **Training** – live loss curves, validation, accuracy, speed, ETA, pause/resume/stop, early
+  stopping, and a training log that is also saved to a file.
+- **Question tests** – train, then ask: write `question => expected answer` lines (filled in
+  automatically for dialogue data). The model is quizzed during training, keeps the weights that
+  answered the most questions, and can stop as soon as every answer is right.
+- **Plugins** – Python scripts that prepare or generate data, write tests and quiz models
+  ([docs/plugins.md](docs/plugins.md)). Three are included.
 - **Playground** – generate text or run predictions, even while training is in progress.
 - **Save / Load** – models are stored in the open [`.kor` format](docs/kor-format.md).
 - **Three languages** – English, Turkish and Russian, switchable at runtime.
@@ -35,7 +41,7 @@ underneath, and it tunes itself to your computer, so small models train on an or
 
 ### What to expect (honestly)
 
-Kor Studio v0.1 trains on the **CPU**. It is meant for small models: tabular networks and
+Kor Studio v0.2 trains on the **CPU**. It is meant for small models: tabular networks and
 character-level transformers up to a few million parameters, which train in seconds to minutes on
 a laptop. It will not train a ChatGPT-sized model on a laptop; nothing can. A GPU backend is on the
 roadmap, and the light-training techniques above apply there too.
@@ -61,7 +67,13 @@ kor-cli sysinfo                          # detected hardware
 kor-cli selftest                         # gradient checks for every layer
 kor-cli train examples/spiral.csv        # auto-configured training
 kor-cli train my_text.txt --steps 2000 --out model.kor
+kor-cli train examples/diyalog_tr.txt --target 1 --log train.log --out chat.kor
+                                         # dialogue: stop when every question test passes
+kor-cli test chat.kor tests.txt --data examples/diyalog_tr.txt
+kor-cli generate chat.kor "Kullanıcı: Merhaba" --len 200
 ```
+
+Other options: `--patience N` (early stop), `--tests file` (your own question tests).
 
 ## Project layout
 
@@ -69,6 +81,7 @@ kor-cli train my_text.txt --steps 2000 --out model.kor
 src/core/   training engine: tensors, layers, transformer, optimizer, trainer, auto-tuner
 src/app/    desktop application (Dear ImGui) and translations (i18n.h)
 src/cli/    kor-cli
+plugins/    bundled Python plugins and the kor.py helper module
 examples/   small demo datasets
 assets/     logo and icon      docs/  file format, translated READMEs
 ```

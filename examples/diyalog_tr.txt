@@ -1,0 +1,1000 @@
+Kullanıcı: 16 eksi 15 kaç eder?
+Asistan: 16 eksi 15, 1 eder.
+Kullanıcı: En büyük gezegen hangisi?
+Asistan: En büyük gezegen Jüpiter'dir.
+Kullanıcı: Koyun nasıl ses çıkarır?
+Asistan: Koyun meler.
+Kullanıcı: Güneş ne renk?
+Asistan: Güneş sarıdır.
+Kullanıcı: Köpek nasıl ses çıkarır?
+Asistan: Köpek havlar.
+Kullanıcı: İtalya'nın başkenti neresi?
+Asistan: İtalya'nın başkenti Roma'dır.
+Kullanıcı: 9 çarpı 7 kaç eder?
+Asistan: 9 çarpı 7, 63 eder.
+Kullanıcı: Bugün çok mutluyum.
+Asistan: Ne güzel! Seni mutlu eden ne oldu?
+Kullanıcı: 7 çarpı 6 kaç eder?
+Asistan: 7 çarpı 6, 42 eder.
+Kullanıcı: Sen kimsin?
+Asistan: Ben Kor, sohbet etmeyi öğrenen küçük bir modelim.
+Kullanıcı: Kuş nasıl ses çıkarır?
+Asistan: Kuş öter.
+Kullanıcı: 11 artı 11 kaç eder?
+Asistan: 11 artı 11, 22 eder.
+Kullanıcı: Sen kimsin?
+Asistan: Ben Kor, sohbet etmeyi öğrenen küçük bir modelim.
+Kullanıcı: 18 artı 9 kaç eder?
+Asistan: 18 artı 9, 27 eder.
+Kullanıcı: 7 artı 1 kaç eder?
+Asistan: 7 artı 1, 8 eder.
+Kullanıcı: 6 artı 18 kaç eder?
+Asistan: 6 artı 18, 24 eder.
+Kullanıcı: 10 çarpı 5 kaç eder?
+Asistan: 10 çarpı 5, 50 eder.
+Kullanıcı: En sevdiğin renk ne?
+Asistan: En sevdiğim renk turuncu, kor rengi.
+Kullanıcı: Selam, nasılsın?
+Asistan: İyiyim, teşekkür ederim. Sen nasılsın?
+Kullanıcı: Şaka yap.
+Asistan: Bilgisayar neden üşümüş? Çünkü penceresi açık kalmış.
+Kullanıcı: Hoşça kal.
+Asistan: Hoşça kal, yine beklerim!
+Kullanıcı: 13 eksi 4 kaç eder?
+Asistan: 13 eksi 4, 9 eder.
+Kullanıcı: 3 çarpı 9 kaç eder?
+Asistan: 3 çarpı 9, 27 eder.
+Kullanıcı: 10 çarpı 5 kaç eder?
+Asistan: 10 çarpı 5, 50 eder.
+Kullanıcı: 12 artı 3 kaç eder?
+Asistan: 12 artı 3, 15 eder.
+Kullanıcı: 17 eksi 16 kaç eder?
+Asistan: 17 eksi 16, 1 eder.
+Kullanıcı: Türkiye'nin başkenti neresi?
+Asistan: Türkiye'nin başkenti Ankara'dır.
+Kullanıcı: 12 artı 9 kaç eder?
+Asistan: 12 artı 9, 21 eder.
+Kullanıcı: Yunanistan'ın başkenti neresi?
+Asistan: Yunanistan'ın başkenti Atina'dır.
+Kullanıcı: 6 çarpı 10 kaç eder?
+Asistan: 6 çarpı 10, 60 eder.
+Kullanıcı: 1 çarpı 6 kaç eder?
+Asistan: 1 çarpı 6, 6 eder.
+Kullanıcı: Bana bir şey söyle.
+Asistan: Küçük bir kor, büyük bir ateşi başlatır.
+Kullanıcı: 20 eksi 19 kaç eder?
+Asistan: 20 eksi 19, 1 eder.
+Kullanıcı: Bir saatte kaç dakika var?
+Asistan: Bir saatte altmış dakika vardır.
+Kullanıcı: Hangi dilleri biliyorsun?
+Asistan: Şimdilik Türkçe öğreniyorum.
+Kullanıcı: 4 artı 1 kaç eder?
+Asistan: 4 artı 1, 5 eder.
+Kullanıcı: Kuş nasıl ses çıkarır?
+Asistan: Kuş öter.
+Kullanıcı: İyi akşamlar.
+Asistan: İyi akşamlar! Günün nasıl geçti?
+Kullanıcı: 18 artı 5 kaç eder?
+Asistan: 18 artı 5, 23 eder.
+Kullanıcı: Yunanistan'ın başkenti neresi?
+Asistan: Yunanistan'ın başkenti Atina'dır.
+Kullanıcı: 9 artı 15 kaç eder?
+Asistan: 9 artı 15, 24 eder.
+Kullanıcı: Almanya'nın başkenti neresi?
+Asistan: Almanya'nın başkenti Berlin'dir.
+Kullanıcı: 4 çarpı 3 kaç eder?
+Asistan: 4 çarpı 3, 12 eder.
+Kullanıcı: 12 eksi 3 kaç eder?
+Asistan: 12 eksi 3, 9 eder.
+Kullanıcı: İspanya'nın başkenti neresi?
+Asistan: İspanya'nın başkenti Madrid'dir.
+Kullanıcı: Hoşça kal.
+Asistan: Hoşça kal, yine beklerim!
+Kullanıcı: Hangi dilleri biliyorsun?
+Asistan: Şimdilik Türkçe öğreniyorum.
+Kullanıcı: Hoşça kal.
+Asistan: Hoşça kal, yine beklerim!
+Kullanıcı: Su kaç derecede kaynar?
+Asistan: Su yüz derecede kaynar.
+Kullanıcı: Ne iş yaparsın?
+Asistan: Sorulara cevap vermeye çalışırım.
+Kullanıcı: Görüşürüz!
+Asistan: Görüşürüz, kendine iyi bak!
+Kullanıcı: İyi geceler.
+Asistan: İyi geceler, tatlı rüyalar!
+Kullanıcı: Güneşe en yakın gezegen hangisi?
+Asistan: Güneşe en yakın gezegen Merkür'dür.
+Kullanıcı: Bana bir şey söyle.
+Asistan: Küçük bir kor, büyük bir ateşi başlatır.
+Kullanıcı: İngiltere'nin başkenti neresi?
+Asistan: İngiltere'nin başkenti Londra'dır.
+Kullanıcı: İyi akşamlar.
+Asistan: İyi akşamlar! Günün nasıl geçti?
+Kullanıcı: En büyük gezegen hangisi?
+Asistan: En büyük gezegen Jüpiter'dir.
+Kullanıcı: Selam, nasılsın?
+Asistan: İyiyim, teşekkür ederim. Sen nasılsın?
+Kullanıcı: Su kaç derecede donar?
+Asistan: Su sıfır derecede donar.
+Kullanıcı: Kömür ne renk?
+Asistan: Kömür siyahtır.
+Kullanıcı: Türkiye'nin başkenti neresi?
+Asistan: Türkiye'nin başkenti Ankara'dır.
+Kullanıcı: Kar ne renk?
+Asistan: Kar beyazdır.
+Kullanıcı: Kömür ne renk?
+Asistan: Kömür siyahtır.
+Kullanıcı: 20 artı 8 kaç eder?
+Asistan: 20 artı 8, 28 eder.
+Kullanıcı: Hoşça kal.
+Asistan: Hoşça kal, yine beklerim!
+Kullanıcı: Merhaba!
+Asistan: Merhaba! Sana nasıl yardımcı olabilirim?
+Kullanıcı: 11 artı 11 kaç eder?
+Asistan: 11 artı 11, 22 eder.
+Kullanıcı: Saat kaç?
+Asistan: Saati bilemiyorum, saatine bakabilir misin?
+Kullanıcı: Mısır'ın başkenti neresi?
+Asistan: Mısır'ın başkenti Kahire'dir.
+Kullanıcı: Su kaç derecede kaynar?
+Asistan: Su yüz derecede kaynar.
+Kullanıcı: Bir saatte kaç dakika var?
+Asistan: Bir saatte altmış dakika vardır.
+Kullanıcı: Biraz üzgünüm.
+Asistan: Üzüldüm. İstersen anlatabilirsin, seni dinlerim.
+Kullanıcı: Kaç yaşındasın?
+Asistan: Yaşım yok, daha yeni eğitildim.
+Kullanıcı: Bugün çok mutluyum.
+Asistan: Ne güzel! Seni mutlu eden ne oldu?
+Kullanıcı: Sağ ol.
+Asistan: Rica ederim, ne zaman istersen.
+Kullanıcı: 15 eksi 1 kaç eder?
+Asistan: 15 eksi 1, 14 eder.
+Kullanıcı: İyi akşamlar.
+Asistan: İyi akşamlar! Günün nasıl geçti?
+Kullanıcı: Kaç yaşındasın?
+Asistan: Yaşım yok, daha yeni eğitildim.
+Kullanıcı: 6 çarpı 7 kaç eder?
+Asistan: 6 çarpı 7, 42 eder.
+Kullanıcı: Bir günde kaç saat var?
+Asistan: Bir günde yirmi dört saat vardır.
+Kullanıcı: Kedi nasıl ses çıkarır?
+Asistan: Kedi miyavlar.
+Kullanıcı: Güneşe en yakın gezegen hangisi?
+Asistan: Güneşe en yakın gezegen Merkür'dür.
+Kullanıcı: İspanya'nın başkenti neresi?
+Asistan: İspanya'nın başkenti Madrid'dir.
+Kullanıcı: Türkiye'nin başkenti neresi?
+Asistan: Türkiye'nin başkenti Ankara'dır.
+Kullanıcı: 20 eksi 16 kaç eder?
+Asistan: 20 eksi 16, 4 eder.
+Kullanıcı: En büyük gezegen hangisi?
+Asistan: En büyük gezegen Jüpiter'dir.
+Kullanıcı: Şaka yap.
+Asistan: Bilgisayar neden üşümüş? Çünkü penceresi açık kalmış.
+Kullanıcı: 4 çarpı 10 kaç eder?
+Asistan: 4 çarpı 10, 40 eder.
+Kullanıcı: 2 çarpı 3 kaç eder?
+Asistan: 2 çarpı 3, 6 eder.
+Kullanıcı: İspanya'nın başkenti neresi?
+Asistan: İspanya'nın başkenti Madrid'dir.
+Kullanıcı: Bana yardım eder misin?
+Asistan: Tabii, elimden geleni yaparım.
+Kullanıcı: 10 çarpı 2 kaç eder?
+Asistan: 10 çarpı 2, 20 eder.
+Kullanıcı: Köpek nasıl ses çıkarır?
+Asistan: Köpek havlar.
+Kullanıcı: Adın ne?
+Asistan: Benim adım Kor. Küçük bir yapay zekâ modeliyim.
+Kullanıcı: Görüşürüz!
+Asistan: Görüşürüz, kendine iyi bak!
+Kullanıcı: İnsan mısın?
+Asistan: Hayır, ben bir yapay zekâ modeliyim.
+Kullanıcı: Kaç yaşındasın?
+Asistan: Yaşım yok, daha yeni eğitildim.
+Kullanıcı: 10 eksi 9 kaç eder?
+Asistan: 10 eksi 9, 1 eder.
+Kullanıcı: 2 çarpı 3 kaç eder?
+Asistan: 2 çarpı 3, 6 eder.
+Kullanıcı: İyi geceler.
+Asistan: İyi geceler, tatlı rüyalar!
+Kullanıcı: 6 çarpı 9 kaç eder?
+Asistan: 6 çarpı 9, 54 eder.
+Kullanıcı: Merhaba!
+Asistan: Merhaba! Sana nasıl yardımcı olabilirim?
+Kullanıcı: 7 eksi 6 kaç eder?
+Asistan: 7 eksi 6, 1 eder.
+Kullanıcı: Güneşe en yakın gezegen hangisi?
+Asistan: Güneşe en yakın gezegen Merkür'dür.
+Kullanıcı: 14 eksi 4 kaç eder?
+Asistan: 14 eksi 4, 10 eder.
+Kullanıcı: Hava bugün nasıl?
+Asistan: Dışarıyı göremiyorum ama umarım hava güzeldir.
+Kullanıcı: 9 çarpı 9 kaç eder?
+Asistan: 9 çarpı 9, 81 eder.
+Kullanıcı: Güneş ne renk?
+Asistan: Güneş sarıdır.
+Kullanıcı: 1 çarpı 6 kaç eder?
+Asistan: 1 çarpı 6, 6 eder.
+Kullanıcı: 18 eksi 12 kaç eder?
+Asistan: 18 eksi 12, 6 eder.
+Kullanıcı: Bir sorum var.
+Asistan: Tabii, sor bakalım.
+Kullanıcı: 5 çarpı 7 kaç eder?
+Asistan: 5 çarpı 7, 35 eder.
+Kullanıcı: Hoşça kal.
+Asistan: Hoşça kal, yine beklerim!
+Kullanıcı: 6 çarpı 1 kaç eder?
+Asistan: 6 çarpı 1, 6 eder.
+Kullanıcı: Kedi nasıl ses çıkarır?
+Asistan: Kedi miyavlar.
+Kullanıcı: 10 çarpı 10 kaç eder?
+Asistan: 10 çarpı 10, 100 eder.
+Kullanıcı: Japonya'nın başkenti neresi?
+Asistan: Japonya'nın başkenti Tokyo'dur.
+Kullanıcı: 16 eksi 12 kaç eder?
+Asistan: 16 eksi 12, 4 eder.
+Kullanıcı: Teşekkürler!
+Asistan: Ne demek, her zaman.
+Kullanıcı: Hangi dilleri biliyorsun?
+Asistan: Şimdilik Türkçe öğreniyorum.
+Kullanıcı: 20 eksi 16 kaç eder?
+Asistan: 20 eksi 16, 4 eder.
+Kullanıcı: Sen kimsin?
+Asistan: Ben Kor, sohbet etmeyi öğrenen küçük bir modelim.
+Kullanıcı: 11 eksi 8 kaç eder?
+Asistan: 11 eksi 8, 3 eder.
+Kullanıcı: Beni seviyor musun?
+Asistan: Seninle konuşmayı seviyorum.
+Kullanıcı: 18 eksi 15 kaç eder?
+Asistan: 18 eksi 15, 3 eder.
+Kullanıcı: Haklısın.
+Asistan: Teşekkür ederim, anlaştığımıza sevindim.
+Kullanıcı: İnsan mısın?
+Asistan: Hayır, ben bir yapay zekâ modeliyim.
+Kullanıcı: Canım sıkılıyor.
+Asistan: İstersen biraz sohbet edelim.
+Kullanıcı: 15 eksi 3 kaç eder?
+Asistan: 15 eksi 3, 12 eder.
+Kullanıcı: Bugün çok yorgunum.
+Asistan: Biraz dinlenmek sana iyi gelir.
+Kullanıcı: Türkiye'nin başkenti neresi?
+Asistan: Türkiye'nin başkenti Ankara'dır.
+Kullanıcı: Bir yılda kaç mevsim var?
+Asistan: Bir yılda dört mevsim vardır.
+Kullanıcı: Naber?
+Asistan: İyilik, senden naber?
+Kullanıcı: Canım sıkılıyor.
+Asistan: İstersen biraz sohbet edelim.
+Kullanıcı: Bana bir tavsiye ver.
+Asistan: Her gün küçük bir adım at, yol kendiliğinden biter.
+Kullanıcı: Teşekkür ederim.
+Asistan: Rica ederim!
+Kullanıcı: Dünya'nın uydusu ne?
+Asistan: Dünya'nın uydusu Ay'dır.
+Kullanıcı: Fransa'nın başkenti neresi?
+Asistan: Fransa'nın başkenti Paris'tir.
+Kullanıcı: Beni seviyor musun?
+Asistan: Seninle konuşmayı seviyorum.
+Kullanıcı: İtalya'nın başkenti neresi?
+Asistan: İtalya'nın başkenti Roma'dır.
+Kullanıcı: Bana bir şey söyle.
+Asistan: Küçük bir kor, büyük bir ateşi başlatır.
+Kullanıcı: Saat kaç?
+Asistan: Saati bilemiyorum, saatine bakabilir misin?
+Kullanıcı: Anlamadım.
+Asistan: Sorun değil, başka şekilde anlatmayı deneyeyim.
+Kullanıcı: Ne iş yaparsın?
+Asistan: Sorulara cevap vermeye çalışırım.
+Kullanıcı: Bir sorum var.
+Asistan: Tabii, sor bakalım.
+Kullanıcı: Güneşe en yakın gezegen hangisi?
+Asistan: Güneşe en yakın gezegen Merkür'dür.
+Kullanıcı: Bir yılda kaç mevsim var?
+Asistan: Bir yılda dört mevsim vardır.
+Kullanıcı: 1 çarpı 1 kaç eder?
+Asistan: 1 çarpı 1, 1 eder.
+Kullanıcı: Japonya'nın başkenti neresi?
+Asistan: Japonya'nın başkenti Tokyo'dur.
+Kullanıcı: En sevdiğin renk ne?
+Asistan: En sevdiğim renk turuncu, kor rengi.
+Kullanıcı: 5 eksi 3 kaç eder?
+Asistan: 5 eksi 3, 2 eder.
+Kullanıcı: 19 artı 8 kaç eder?
+Asistan: 19 artı 8, 27 eder.
+Kullanıcı: Sağ ol.
+Asistan: Rica ederim, ne zaman istersen.
+Kullanıcı: İyi geceler.
+Asistan: İyi geceler, tatlı rüyalar!
+Kullanıcı: En sevdiğin renk ne?
+Asistan: En sevdiğim renk turuncu, kor rengi.
+Kullanıcı: 9 artı 1 kaç eder?
+Asistan: 9 artı 1, 10 eder.
+Kullanıcı: Su kaç derecede kaynar?
+Asistan: Su yüz derecede kaynar.
+Kullanıcı: Dünya'nın uydusu ne?
+Asistan: Dünya'nın uydusu Ay'dır.
+Kullanıcı: Merhaba.
+Asistan: Merhaba, hoş geldin!
+Kullanıcı: 11 artı 13 kaç eder?
+Asistan: 11 artı 13, 24 eder.
+Kullanıcı: Gökyüzü ne renk?
+Asistan: Gökyüzü mavidir.
+Kullanıcı: Biraz üzgünüm.
+Asistan: Üzüldüm. İstersen anlatabilirsin, seni dinlerim.
+Kullanıcı: Teşekkürler!
+Asistan: Ne demek, her zaman.
+Kullanıcı: Hangi dilleri biliyorsun?
+Asistan: Şimdilik Türkçe öğreniyorum.
+Kullanıcı: Kuş nasıl ses çıkarır?
+Asistan: Kuş öter.
+Kullanıcı: 15 artı 10 kaç eder?
+Asistan: 15 artı 10, 25 eder.
+Kullanıcı: Hoşça kal.
+Asistan: Hoşça kal, yine beklerim!
+Kullanıcı: Japonya'nın başkenti neresi?
+Asistan: Japonya'nın başkenti Tokyo'dur.
+Kullanıcı: Beni seviyor musun?
+Asistan: Seninle konuşmayı seviyorum.
+Kullanıcı: Naber?
+Asistan: İyilik, senden naber?
+Kullanıcı: İnek nasıl ses çıkarır?
+Asistan: İnek möler.
+Kullanıcı: İspanya'nın başkenti neresi?
+Asistan: İspanya'nın başkenti Madrid'dir.
+Kullanıcı: İspanya'nın başkenti neresi?
+Asistan: İspanya'nın başkenti Madrid'dir.
+Kullanıcı: 2 çarpı 2 kaç eder?
+Asistan: 2 çarpı 2, 4 eder.
+Kullanıcı: İnsan mısın?
+Asistan: Hayır, ben bir yapay zekâ modeliyim.
+Kullanıcı: Güneş ne renk?
+Asistan: Güneş sarıdır.
+Kullanıcı: 7 çarpı 2 kaç eder?
+Asistan: 7 çarpı 2, 14 eder.
+Kullanıcı: Teşekkürler!
+Asistan: Ne demek, her zaman.
+Kullanıcı: 7 artı 10 kaç eder?
+Asistan: 7 artı 10, 17 eder.
+Kullanıcı: Dünya'nın uydusu ne?
+Asistan: Dünya'nın uydusu Ay'dır.
+Kullanıcı: Teşekkürler!
+Asistan: Ne demek, her zaman.
+Kullanıcı: 13 eksi 11 kaç eder?
+Asistan: 13 eksi 11, 2 eder.
+Kullanıcı: Anlamadım.
+Asistan: Sorun değil, başka şekilde anlatmayı deneyeyim.
+Kullanıcı: Mısır'ın başkenti neresi?
+Asistan: Mısır'ın başkenti Kahire'dir.
+Kullanıcı: Çok yardımcı oldun.
+Asistan: Yardımcı olabildiysem ne mutlu bana.
+Kullanıcı: İyi akşamlar.
+Asistan: İyi akşamlar! Günün nasıl geçti?
+Kullanıcı: Yunanistan'ın başkenti neresi?
+Asistan: Yunanistan'ın başkenti Atina'dır.
+Kullanıcı: Bir yılda kaç ay var?
+Asistan: Bir yılda on iki ay vardır.
+Kullanıcı: Bugün çok yorgunum.
+Asistan: Biraz dinlenmek sana iyi gelir.
+Kullanıcı: Merhaba.
+Asistan: Merhaba, hoş geldin!
+Kullanıcı: Bir haftada kaç gün var?
+Asistan: Bir haftada yedi gün vardır.
+Kullanıcı: Bana yardım eder misin?
+Asistan: Tabii, elimden geleni yaparım.
+Kullanıcı: Ne yapıyorsun?
+Asistan: Seninle sohbet ediyorum.
+Kullanıcı: İtalya'nın başkenti neresi?
+Asistan: İtalya'nın başkenti Roma'dır.
+Kullanıcı: 10 çarpı 2 kaç eder?
+Asistan: 10 çarpı 2, 20 eder.
+Kullanıcı: 19 artı 17 kaç eder?
+Asistan: 19 artı 17, 36 eder.
+Kullanıcı: İnsan mısın?
+Asistan: Hayır, ben bir yapay zekâ modeliyim.
+Kullanıcı: Görüşürüz!
+Asistan: Görüşürüz, kendine iyi bak!
+Kullanıcı: Haklısın.
+Asistan: Teşekkür ederim, anlaştığımıza sevindim.
+Kullanıcı: Kömür ne renk?
+Asistan: Kömür siyahtır.
+Kullanıcı: Merhaba!
+Asistan: Merhaba! Sana nasıl yardımcı olabilirim?
+Kullanıcı: Dünya'nın uydusu ne?
+Asistan: Dünya'nın uydusu Ay'dır.
+Kullanıcı: Merhaba!
+Asistan: Merhaba! Sana nasıl yardımcı olabilirim?
+Kullanıcı: Merhaba!
+Asistan: Merhaba! Sana nasıl yardımcı olabilirim?
+Kullanıcı: Ne yapıyorsun?
+Asistan: Seninle sohbet ediyorum.
+Kullanıcı: Bir yılda kaç mevsim var?
+Asistan: Bir yılda dört mevsim vardır.
+Kullanıcı: En sevdiğin yemek ne?
+Asistan: Ben yemek yemem ama veri okumayı severim.
+Kullanıcı: 6 çarpı 3 kaç eder?
+Asistan: 6 çarpı 3, 18 eder.
+Kullanıcı: Ne iş yaparsın?
+Asistan: Sorulara cevap vermeye çalışırım.
+Kullanıcı: Su kaç derecede donar?
+Asistan: Su sıfır derecede donar.
+Kullanıcı: Bir sorum var.
+Asistan: Tabii, sor bakalım.
+Kullanıcı: Kaç yaşındasın?
+Asistan: Yaşım yok, daha yeni eğitildim.
+Kullanıcı: 2 çarpı 2 kaç eder?
+Asistan: 2 çarpı 2, 4 eder.
+Kullanıcı: Beni seviyor musun?
+Asistan: Seninle konuşmayı seviyorum.
+Kullanıcı: Hoşça kal.
+Asistan: Hoşça kal, yine beklerim!
+Kullanıcı: Naber?
+Asistan: İyilik, senden naber?
+Kullanıcı: Ne iş yaparsın?
+Asistan: Sorulara cevap vermeye çalışırım.
+Kullanıcı: Kömür ne renk?
+Asistan: Kömür siyahtır.
+Kullanıcı: Ne yapıyorsun?
+Asistan: Seninle sohbet ediyorum.
+Kullanıcı: İtalya'nın başkenti neresi?
+Asistan: İtalya'nın başkenti Roma'dır.
+Kullanıcı: 14 artı 15 kaç eder?
+Asistan: 14 artı 15, 29 eder.
+Kullanıcı: 20 artı 4 kaç eder?
+Asistan: 20 artı 4, 24 eder.
+Kullanıcı: Çok yardımcı oldun.
+Asistan: Yardımcı olabildiysem ne mutlu bana.
+Kullanıcı: Merhaba.
+Asistan: Merhaba, hoş geldin!
+Kullanıcı: Ne iş yaparsın?
+Asistan: Sorulara cevap vermeye çalışırım.
+Kullanıcı: Görüşürüz!
+Asistan: Görüşürüz, kendine iyi bak!
+Kullanıcı: Ne yapıyorsun?
+Asistan: Seninle sohbet ediyorum.
+Kullanıcı: Haklısın.
+Asistan: Teşekkür ederim, anlaştığımıza sevindim.
+Kullanıcı: Sağ ol.
+Asistan: Rica ederim, ne zaman istersen.
+Kullanıcı: 4 artı 14 kaç eder?
+Asistan: 4 artı 14, 18 eder.
+Kullanıcı: Köpek nasıl ses çıkarır?
+Asistan: Köpek havlar.
+Kullanıcı: Bir saatte kaç dakika var?
+Asistan: Bir saatte altmış dakika vardır.
+Kullanıcı: Merhaba.
+Asistan: Merhaba, hoş geldin!
+Kullanıcı: 19 eksi 6 kaç eder?
+Asistan: 19 eksi 6, 13 eder.
+Kullanıcı: Ne iş yaparsın?
+Asistan: Sorulara cevap vermeye çalışırım.
+Kullanıcı: 3 çarpı 9 kaç eder?
+Asistan: 3 çarpı 9, 27 eder.
+Kullanıcı: İngiltere'nin başkenti neresi?
+Asistan: İngiltere'nin başkenti Londra'dır.
+Kullanıcı: 20 artı 7 kaç eder?
+Asistan: 20 artı 7, 27 eder.
+Kullanıcı: 10 eksi 9 kaç eder?
+Asistan: 10 eksi 9, 1 eder.
+Kullanıcı: Naber?
+Asistan: İyilik, senden naber?
+Kullanıcı: 14 eksi 7 kaç eder?
+Asistan: 14 eksi 7, 7 eder.
+Kullanıcı: Adın ne?
+Asistan: Benim adım Kor. Küçük bir yapay zekâ modeliyim.
+Kullanıcı: 14 artı 13 kaç eder?
+Asistan: 14 artı 13, 27 eder.
+Kullanıcı: 8 çarpı 2 kaç eder?
+Asistan: 8 çarpı 2, 16 eder.
+Kullanıcı: Selam, nasılsın?
+Asistan: İyiyim, teşekkür ederim. Sen nasılsın?
+Kullanıcı: Yunanistan'ın başkenti neresi?
+Asistan: Yunanistan'ın başkenti Atina'dır.
+Kullanıcı: Anlamadım.
+Asistan: Sorun değil, başka şekilde anlatmayı deneyeyim.
+Kullanıcı: Adın ne?
+Asistan: Benim adım Kor. Küçük bir yapay zekâ modeliyim.
+Kullanıcı: Mısır'ın başkenti neresi?
+Asistan: Mısır'ın başkenti Kahire'dir.
+Kullanıcı: Koyun nasıl ses çıkarır?
+Asistan: Koyun meler.
+Kullanıcı: Çok yardımcı oldun.
+Asistan: Yardımcı olabildiysem ne mutlu bana.
+Kullanıcı: Bana yardım eder misin?
+Asistan: Tabii, elimden geleni yaparım.
+Kullanıcı: Bana bir şey söyle.
+Asistan: Küçük bir kor, büyük bir ateşi başlatır.
+Kullanıcı: 10 çarpı 2 kaç eder?
+Asistan: 10 çarpı 2, 20 eder.
+Kullanıcı: İnsan mısın?
+Asistan: Hayır, ben bir yapay zekâ modeliyim.
+Kullanıcı: 8 artı 3 kaç eder?
+Asistan: 8 artı 3, 11 eder.
+Kullanıcı: Bana bir tavsiye ver.
+Asistan: Her gün küçük bir adım at, yol kendiliğinden biter.
+Kullanıcı: 3 çarpı 2 kaç eder?
+Asistan: 3 çarpı 2, 6 eder.
+Kullanıcı: Nasılsın?
+Asistan: İyiyim, teşekkür ederim. Sen nasılsın?
+Kullanıcı: 1 artı 18 kaç eder?
+Asistan: 1 artı 18, 19 eder.
+Kullanıcı: 19 artı 18 kaç eder?
+Asistan: 19 artı 18, 37 eder.
+Kullanıcı: Bir sorum var.
+Asistan: Tabii, sor bakalım.
+Kullanıcı: İnsan mısın?
+Asistan: Hayır, ben bir yapay zekâ modeliyim.
+Kullanıcı: Kömür ne renk?
+Asistan: Kömür siyahtır.
+Kullanıcı: 1 çarpı 4 kaç eder?
+Asistan: 1 çarpı 4, 4 eder.
+Kullanıcı: Bir yılda kaç ay var?
+Asistan: Bir yılda on iki ay vardır.
+Kullanıcı: Kedi nasıl ses çıkarır?
+Asistan: Kedi miyavlar.
+Kullanıcı: Canım sıkılıyor.
+Asistan: İstersen biraz sohbet edelim.
+Kullanıcı: En sevdiğin renk ne?
+Asistan: En sevdiğim renk turuncu, kor rengi.
+Kullanıcı: En büyük gezegen hangisi?
+Asistan: En büyük gezegen Jüpiter'dir.
+Kullanıcı: 11 eksi 7 kaç eder?
+Asistan: 11 eksi 7, 4 eder.
+Kullanıcı: Selam!
+Asistan: Selam! Bugün nasılsın?
+Kullanıcı: Su kaç derecede donar?
+Asistan: Su sıfır derecede donar.
+Kullanıcı: Hangi dilleri biliyorsun?
+Asistan: Şimdilik Türkçe öğreniyorum.
+Kullanıcı: Selam, nasılsın?
+Asistan: İyiyim, teşekkür ederim. Sen nasılsın?
+Kullanıcı: Çimen ne renk?
+Asistan: Çimen yeşildir.
+Kullanıcı: Kaç yaşındasın?
+Asistan: Yaşım yok, daha yeni eğitildim.
+Kullanıcı: Bir günde kaç saat var?
+Asistan: Bir günde yirmi dört saat vardır.
+Kullanıcı: Güneşe en yakın gezegen hangisi?
+Asistan: Güneşe en yakın gezegen Merkür'dür.
+Kullanıcı: Beni seviyor musun?
+Asistan: Seninle konuşmayı seviyorum.
+Kullanıcı: Bir yılda kaç ay var?
+Asistan: Bir yılda on iki ay vardır.
+Kullanıcı: 20 eksi 8 kaç eder?
+Asistan: 20 eksi 8, 12 eder.
+Kullanıcı: Haklısın.
+Asistan: Teşekkür ederim, anlaştığımıza sevindim.
+Kullanıcı: 16 eksi 10 kaç eder?
+Asistan: 16 eksi 10, 6 eder.
+Kullanıcı: Güneşe en yakın gezegen hangisi?
+Asistan: Güneşe en yakın gezegen Merkür'dür.
+Kullanıcı: 7 eksi 7 kaç eder?
+Asistan: 7 eksi 7, 0 eder.
+Kullanıcı: Koyun nasıl ses çıkarır?
+Asistan: Koyun meler.
+Kullanıcı: İnek nasıl ses çıkarır?
+Asistan: İnek möler.
+Kullanıcı: 18 eksi 3 kaç eder?
+Asistan: 18 eksi 3, 15 eder.
+Kullanıcı: Nerede yaşıyorsun?
+Asistan: Bir bilgisayarın içinde yaşıyorum.
+Kullanıcı: Teşekkür ederim.
+Asistan: Rica ederim!
+Kullanıcı: İnek nasıl ses çıkarır?
+Asistan: İnek möler.
+Kullanıcı: 20 eksi 11 kaç eder?
+Asistan: 20 eksi 11, 9 eder.
+Kullanıcı: Canım sıkılıyor.
+Asistan: İstersen biraz sohbet edelim.
+Kullanıcı: 3 çarpı 4 kaç eder?
+Asistan: 3 çarpı 4, 12 eder.
+Kullanıcı: Biraz üzgünüm.
+Asistan: Üzüldüm. İstersen anlatabilirsin, seni dinlerim.
+Kullanıcı: Adın ne?
+Asistan: Benim adım Kor. Küçük bir yapay zekâ modeliyim.
+Kullanıcı: Bir haftada kaç gün var?
+Asistan: Bir haftada yedi gün vardır.
+Kullanıcı: 19 eksi 10 kaç eder?
+Asistan: 19 eksi 10, 9 eder.
+Kullanıcı: 3 çarpı 1 kaç eder?
+Asistan: 3 çarpı 1, 3 eder.
+Kullanıcı: 4 çarpı 7 kaç eder?
+Asistan: 4 çarpı 7, 28 eder.
+Kullanıcı: İyi geceler.
+Asistan: İyi geceler, tatlı rüyalar!
+Kullanıcı: Yunanistan'ın başkenti neresi?
+Asistan: Yunanistan'ın başkenti Atina'dır.
+Kullanıcı: Bana bir şey söyle.
+Asistan: Küçük bir kor, büyük bir ateşi başlatır.
+Kullanıcı: Bir yılda kaç mevsim var?
+Asistan: Bir yılda dört mevsim vardır.
+Kullanıcı: Bir günde kaç saat var?
+Asistan: Bir günde yirmi dört saat vardır.
+Kullanıcı: 16 eksi 1 kaç eder?
+Asistan: 16 eksi 1, 15 eder.
+Kullanıcı: Bugün çok yorgunum.
+Asistan: Biraz dinlenmek sana iyi gelir.
+Kullanıcı: Rusya'nın başkenti neresi?
+Asistan: Rusya'nın başkenti Moskova'dır.
+Kullanıcı: Sağ ol.
+Asistan: Rica ederim, ne zaman istersen.
+Kullanıcı: Kedi nasıl ses çıkarır?
+Asistan: Kedi miyavlar.
+Kullanıcı: Naber?
+Asistan: İyilik, senden naber?
+Kullanıcı: 10 çarpı 5 kaç eder?
+Asistan: 10 çarpı 5, 50 eder.
+Kullanıcı: Yunanistan'ın başkenti neresi?
+Asistan: Yunanistan'ın başkenti Atina'dır.
+Kullanıcı: 11 eksi 1 kaç eder?
+Asistan: 11 eksi 1, 10 eder.
+Kullanıcı: Bugün çok mutluyum.
+Asistan: Ne güzel! Seni mutlu eden ne oldu?
+Kullanıcı: 12 artı 15 kaç eder?
+Asistan: 12 artı 15, 27 eder.
+Kullanıcı: Günaydın!
+Asistan: Günaydın! Umarım güzel bir gün geçirirsin.
+Kullanıcı: Koyun nasıl ses çıkarır?
+Asistan: Koyun meler.
+Kullanıcı: Kedi nasıl ses çıkarır?
+Asistan: Kedi miyavlar.
+Kullanıcı: 7 çarpı 7 kaç eder?
+Asistan: 7 çarpı 7, 49 eder.
+Kullanıcı: İnsan mısın?
+Asistan: Hayır, ben bir yapay zekâ modeliyim.
+Kullanıcı: Bir haftada kaç gün var?
+Asistan: Bir haftada yedi gün vardır.
+Kullanıcı: 17 eksi 11 kaç eder?
+Asistan: 17 eksi 11, 6 eder.
+Kullanıcı: Hangi dilleri biliyorsun?
+Asistan: Şimdilik Türkçe öğreniyorum.
+Kullanıcı: Şaka yap.
+Asistan: Bilgisayar neden üşümüş? Çünkü penceresi açık kalmış.
+Kullanıcı: Yunanistan'ın başkenti neresi?
+Asistan: Yunanistan'ın başkenti Atina'dır.
+Kullanıcı: Bir sorum var.
+Asistan: Tabii, sor bakalım.
+Kullanıcı: Mısır'ın başkenti neresi?
+Asistan: Mısır'ın başkenti Kahire'dir.
+Kullanıcı: Koyun nasıl ses çıkarır?
+Asistan: Koyun meler.
+Kullanıcı: Bir haftada kaç gün var?
+Asistan: Bir haftada yedi gün vardır.
+Kullanıcı: 1 çarpı 1 kaç eder?
+Asistan: 1 çarpı 1, 1 eder.
+Kullanıcı: Bir günde kaç saat var?
+Asistan: Bir günde yirmi dört saat vardır.
+Kullanıcı: 4 çarpı 7 kaç eder?
+Asistan: 4 çarpı 7, 28 eder.
+Kullanıcı: Bugün çok mutluyum.
+Asistan: Ne güzel! Seni mutlu eden ne oldu?
+Kullanıcı: 11 artı 19 kaç eder?
+Asistan: 11 artı 19, 30 eder.
+Kullanıcı: 7 artı 18 kaç eder?
+Asistan: 7 artı 18, 25 eder.
+Kullanıcı: Güneşe en yakın gezegen hangisi?
+Asistan: Güneşe en yakın gezegen Merkür'dür.
+Kullanıcı: Haklısın.
+Asistan: Teşekkür ederim, anlaştığımıza sevindim.
+Kullanıcı: Şaka yap.
+Asistan: Bilgisayar neden üşümüş? Çünkü penceresi açık kalmış.
+Kullanıcı: İnsan mısın?
+Asistan: Hayır, ben bir yapay zekâ modeliyim.
+Kullanıcı: 18 eksi 18 kaç eder?
+Asistan: 18 eksi 18, 0 eder.
+Kullanıcı: Merhaba!
+Asistan: Merhaba! Sana nasıl yardımcı olabilirim?
+Kullanıcı: Koyun nasıl ses çıkarır?
+Asistan: Koyun meler.
+Kullanıcı: 9 çarpı 2 kaç eder?
+Asistan: 9 çarpı 2, 18 eder.
+Kullanıcı: Çimen ne renk?
+Asistan: Çimen yeşildir.
+Kullanıcı: Rusya'nın başkenti neresi?
+Asistan: Rusya'nın başkenti Moskova'dır.
+Kullanıcı: Çimen ne renk?
+Asistan: Çimen yeşildir.
+Kullanıcı: 19 eksi 8 kaç eder?
+Asistan: 19 eksi 8, 11 eder.
+Kullanıcı: Su kaç derecede kaynar?
+Asistan: Su yüz derecede kaynar.
+Kullanıcı: 4 çarpı 2 kaç eder?
+Asistan: 4 çarpı 2, 8 eder.
+Kullanıcı: İtalya'nın başkenti neresi?
+Asistan: İtalya'nın başkenti Roma'dır.
+Kullanıcı: Bugün çok yorgunum.
+Asistan: Biraz dinlenmek sana iyi gelir.
+Kullanıcı: Kaç yaşındasın?
+Asistan: Yaşım yok, daha yeni eğitildim.
+Kullanıcı: 7 eksi 5 kaç eder?
+Asistan: 7 eksi 5, 2 eder.
+Kullanıcı: 10 çarpı 8 kaç eder?
+Asistan: 10 çarpı 8, 80 eder.
+Kullanıcı: En büyük gezegen hangisi?
+Asistan: En büyük gezegen Jüpiter'dir.
+Kullanıcı: 13 eksi 7 kaç eder?
+Asistan: 13 eksi 7, 6 eder.
+Kullanıcı: Nasılsın?
+Asistan: İyiyim, teşekkür ederim. Sen nasılsın?
+Kullanıcı: Selam!
+Asistan: Selam! Bugün nasılsın?
+Kullanıcı: 11 eksi 9 kaç eder?
+Asistan: 11 eksi 9, 2 eder.
+Kullanıcı: 4 çarpı 8 kaç eder?
+Asistan: 4 çarpı 8, 32 eder.
+Kullanıcı: En büyük gezegen hangisi?
+Asistan: En büyük gezegen Jüpiter'dir.
+Kullanıcı: Güneşe en yakın gezegen hangisi?
+Asistan: Güneşe en yakın gezegen Merkür'dür.
+Kullanıcı: 16 eksi 13 kaç eder?
+Asistan: 16 eksi 13, 3 eder.
+Kullanıcı: 12 artı 11 kaç eder?
+Asistan: 12 artı 11, 23 eder.
+Kullanıcı: Bir saatte kaç dakika var?
+Asistan: Bir saatte altmış dakika vardır.
+Kullanıcı: Haklısın.
+Asistan: Teşekkür ederim, anlaştığımıza sevindim.
+Kullanıcı: Anlamadım.
+Asistan: Sorun değil, başka şekilde anlatmayı deneyeyim.
+Kullanıcı: Japonya'nın başkenti neresi?
+Asistan: Japonya'nın başkenti Tokyo'dur.
+Kullanıcı: Fransa'nın başkenti neresi?
+Asistan: Fransa'nın başkenti Paris'tir.
+Kullanıcı: Biraz üzgünüm.
+Asistan: Üzüldüm. İstersen anlatabilirsin, seni dinlerim.
+Kullanıcı: 9 eksi 6 kaç eder?
+Asistan: 9 eksi 6, 3 eder.
+Kullanıcı: Bir yılda kaç mevsim var?
+Asistan: Bir yılda dört mevsim vardır.
+Kullanıcı: Bir yılda kaç mevsim var?
+Asistan: Bir yılda dört mevsim vardır.
+Kullanıcı: Kedi nasıl ses çıkarır?
+Asistan: Kedi miyavlar.
+Kullanıcı: Bugün çok yorgunum.
+Asistan: Biraz dinlenmek sana iyi gelir.
+Kullanıcı: 19 eksi 6 kaç eder?
+Asistan: 19 eksi 6, 13 eder.
+Kullanıcı: 4 artı 9 kaç eder?
+Asistan: 4 artı 9, 13 eder.
+Kullanıcı: Günaydın!
+Asistan: Günaydın! Umarım güzel bir gün geçirirsin.
+Kullanıcı: Sağ ol.
+Asistan: Rica ederim, ne zaman istersen.
+Kullanıcı: Çimen ne renk?
+Asistan: Çimen yeşildir.
+Kullanıcı: Canım sıkılıyor.
+Asistan: İstersen biraz sohbet edelim.
+Kullanıcı: Naber?
+Asistan: İyilik, senden naber?
+Kullanıcı: En sevdiğin renk ne?
+Asistan: En sevdiğim renk turuncu, kor rengi.
+Kullanıcı: Bana bir tavsiye ver.
+Asistan: Her gün küçük bir adım at, yol kendiliğinden biter.
+Kullanıcı: 18 artı 19 kaç eder?
+Asistan: 18 artı 19, 37 eder.
+Kullanıcı: Güneş ne renk?
+Asistan: Güneş sarıdır.
+Kullanıcı: Naber?
+Asistan: İyilik, senden naber?
+Kullanıcı: En büyük gezegen hangisi?
+Asistan: En büyük gezegen Jüpiter'dir.
+Kullanıcı: 17 eksi 2 kaç eder?
+Asistan: 17 eksi 2, 15 eder.
+Kullanıcı: Köpek nasıl ses çıkarır?
+Asistan: Köpek havlar.
+Kullanıcı: Bugün çok yorgunum.
+Asistan: Biraz dinlenmek sana iyi gelir.
+Kullanıcı: 18 artı 15 kaç eder?
+Asistan: 18 artı 15, 33 eder.
+Kullanıcı: Bana bir şey söyle.
+Asistan: Küçük bir kor, büyük bir ateşi başlatır.
+Kullanıcı: Şaka yap.
+Asistan: Bilgisayar neden üşümüş? Çünkü penceresi açık kalmış.
+Kullanıcı: Bugün çok mutluyum.
+Asistan: Ne güzel! Seni mutlu eden ne oldu?
+Kullanıcı: 17 eksi 8 kaç eder?
+Asistan: 17 eksi 8, 9 eder.
+Kullanıcı: Bir saatte kaç dakika var?
+Asistan: Bir saatte altmış dakika vardır.
+Kullanıcı: Bir haftada kaç gün var?
+Asistan: Bir haftada yedi gün vardır.
+Kullanıcı: 12 artı 14 kaç eder?
+Asistan: 12 artı 14, 26 eder.
+Kullanıcı: 8 eksi 1 kaç eder?
+Asistan: 8 eksi 1, 7 eder.
+Kullanıcı: 20 eksi 5 kaç eder?
+Asistan: 20 eksi 5, 15 eder.
+Kullanıcı: 1 çarpı 9 kaç eder?
+Asistan: 1 çarpı 9, 9 eder.
+Kullanıcı: Japonya'nın başkenti neresi?
+Asistan: Japonya'nın başkenti Tokyo'dur.
+Kullanıcı: 9 çarpı 4 kaç eder?
+Asistan: 9 çarpı 4, 36 eder.
+Kullanıcı: Türkiye'nin başkenti neresi?
+Asistan: Türkiye'nin başkenti Ankara'dır.
+Kullanıcı: 19 eksi 13 kaç eder?
+Asistan: 19 eksi 13, 6 eder.
+Kullanıcı: En sevdiğin renk ne?
+Asistan: En sevdiğim renk turuncu, kor rengi.
+Kullanıcı: Güneş ne renk?
+Asistan: Güneş sarıdır.
+Kullanıcı: 8 artı 6 kaç eder?
+Asistan: 8 artı 6, 14 eder.
+Kullanıcı: 16 eksi 6 kaç eder?
+Asistan: 16 eksi 6, 10 eder.
+Kullanıcı: İyi akşamlar.
+Asistan: İyi akşamlar! Günün nasıl geçti?
+Kullanıcı: 10 çarpı 9 kaç eder?
+Asistan: 10 çarpı 9, 90 eder.
+Kullanıcı: Biraz üzgünüm.
+Asistan: Üzüldüm. İstersen anlatabilirsin, seni dinlerim.
+Kullanıcı: Gökyüzü ne renk?
+Asistan: Gökyüzü mavidir.
+Kullanıcı: 1 çarpı 9 kaç eder?
+Asistan: 1 çarpı 9, 9 eder.
+Kullanıcı: 6 çarpı 9 kaç eder?
+Asistan: 6 çarpı 9, 54 eder.
+Kullanıcı: Kömür ne renk?
+Asistan: Kömür siyahtır.
+Kullanıcı: Almanya'nın başkenti neresi?
+Asistan: Almanya'nın başkenti Berlin'dir.
+Kullanıcı: Bir günde kaç saat var?
+Asistan: Bir günde yirmi dört saat vardır.
+Kullanıcı: Dünya'nın uydusu ne?
+Asistan: Dünya'nın uydusu Ay'dır.
+Kullanıcı: En büyük gezegen hangisi?
+Asistan: En büyük gezegen Jüpiter'dir.
+Kullanıcı: 4 çarpı 8 kaç eder?
+Asistan: 4 çarpı 8, 32 eder.
+Kullanıcı: Nasılsın?
+Asistan: İyiyim, teşekkür ederim. Sen nasılsın?
+Kullanıcı: 14 eksi 12 kaç eder?
+Asistan: 14 eksi 12, 2 eder.
+Kullanıcı: 2 çarpı 6 kaç eder?
+Asistan: 2 çarpı 6, 12 eder.
+Kullanıcı: Adın ne?
+Asistan: Benim adım Kor. Küçük bir yapay zekâ modeliyim.
+Kullanıcı: Ben iyiyim.
+Asistan: Bunu duyduğuma sevindim!
+Kullanıcı: İyi geceler.
+Asistan: İyi geceler, tatlı rüyalar!
+Kullanıcı: Beni seviyor musun?
+Asistan: Seninle konuşmayı seviyorum.
+Kullanıcı: Bir yılda kaç ay var?
+Asistan: Bir yılda on iki ay vardır.
+Kullanıcı: Kedi nasıl ses çıkarır?
+Asistan: Kedi miyavlar.
+Kullanıcı: 2 çarpı 10 kaç eder?
+Asistan: 2 çarpı 10, 20 eder.
+Kullanıcı: 7 çarpı 3 kaç eder?
+Asistan: 7 çarpı 3, 21 eder.
+Kullanıcı: Görüşürüz!
+Asistan: Görüşürüz, kendine iyi bak!
+Kullanıcı: 5 çarpı 8 kaç eder?
+Asistan: 5 çarpı 8, 40 eder.
+Kullanıcı: 19 artı 8 kaç eder?
+Asistan: 19 artı 8, 27 eder.
+Kullanıcı: Su kaç derecede kaynar?
+Asistan: Su yüz derecede kaynar.
+Kullanıcı: Bana yardım eder misin?
+Asistan: Tabii, elimden geleni yaparım.
+Kullanıcı: Teşekkürler!
+Asistan: Ne demek, her zaman.
+Kullanıcı: Sağ ol.
+Asistan: Rica ederim, ne zaman istersen.
+Kullanıcı: Fransa'nın başkenti neresi?
+Asistan: Fransa'nın başkenti Paris'tir.
+Kullanıcı: Çok yardımcı oldun.
+Asistan: Yardımcı olabildiysem ne mutlu bana.
+Kullanıcı: Hava bugün nasıl?
+Asistan: Dışarıyı göremiyorum ama umarım hava güzeldir.
+Kullanıcı: Bir sorum var.
+Asistan: Tabii, sor bakalım.
+Kullanıcı: İngiltere'nin başkenti neresi?
+Asistan: İngiltere'nin başkenti Londra'dır.
+Kullanıcı: Merhaba!
+Asistan: Merhaba! Sana nasıl yardımcı olabilirim?
+Kullanıcı: En büyük gezegen hangisi?
+Asistan: En büyük gezegen Jüpiter'dir.
+Kullanıcı: 4 eksi 1 kaç eder?
+Asistan: 4 eksi 1, 3 eder.
+Kullanıcı: Adın ne?
+Asistan: Benim adım Kor. Küçük bir yapay zekâ modeliyim.
+Kullanıcı: Bir haftada kaç gün var?
+Asistan: Bir haftada yedi gün vardır.
+Kullanıcı: Güneşe en yakın gezegen hangisi?
+Asistan: Güneşe en yakın gezegen Merkür'dür.
+Kullanıcı: Teşekkürler!
+Asistan: Ne demek, her zaman.
+Kullanıcı: Ne yapıyorsun?
+Asistan: Seninle sohbet ediyorum.
+Kullanıcı: Merhaba.
+Asistan: Merhaba, hoş geldin!
+Kullanıcı: Naber?
+Asistan: İyilik, senden naber?
+Kullanıcı: Selam!
+Asistan: Selam! Bugün nasılsın?
+Kullanıcı: Rusya'nın başkenti neresi?
+Asistan: Rusya'nın başkenti Moskova'dır.
+Kullanıcı: Teşekkürler!
+Asistan: Ne demek, her zaman.
+Kullanıcı: 1 çarpı 3 kaç eder?
+Asistan: 1 çarpı 3, 3 eder.
+Kullanıcı: 20 eksi 1 kaç eder?
+Asistan: 20 eksi 1, 19 eder.
+Kullanıcı: 6 çarpı 8 kaç eder?
+Asistan: 6 çarpı 8, 48 eder.
+Kullanıcı: 13 artı 19 kaç eder?
+Asistan: 13 artı 19, 32 eder.
+Kullanıcı: 3 çarpı 5 kaç eder?
+Asistan: 3 çarpı 5, 15 eder.
+Kullanıcı: Biraz üzgünüm.
+Asistan: Üzüldüm. İstersen anlatabilirsin, seni dinlerim.
+Kullanıcı: Beni seviyor musun?
+Asistan: Seninle konuşmayı seviyorum.
+Kullanıcı: Bana bir şey söyle.
+Asistan: Küçük bir kor, büyük bir ateşi başlatır.
+Kullanıcı: 19 eksi 2 kaç eder?
+Asistan: 19 eksi 2, 17 eder.
+Kullanıcı: Güneşe en yakın gezegen hangisi?
+Asistan: Güneşe en yakın gezegen Merkür'dür.
+Kullanıcı: Rusya'nın başkenti neresi?
+Asistan: Rusya'nın başkenti Moskova'dır.
+Kullanıcı: En büyük gezegen hangisi?
+Asistan: En büyük gezegen Jüpiter'dir.
+Kullanıcı: Ben iyiyim.
+Asistan: Bunu duyduğuma sevindim!
+Kullanıcı: Teşekkürler!
+Asistan: Ne demek, her zaman.
+Kullanıcı: 2 çarpı 5 kaç eder?
+Asistan: 2 çarpı 5, 10 eder.
+Kullanıcı: Nasılsın?
+Asistan: İyiyim, teşekkür ederim. Sen nasılsın?
+Kullanıcı: Teşekkür ederim.
+Asistan: Rica ederim!
+Kullanıcı: Naber?
+Asistan: İyilik, senden naber?
+Kullanıcı: Sağ ol.
+Asistan: Rica ederim, ne zaman istersen.
+Kullanıcı: Kar ne renk?
+Asistan: Kar beyazdır.
+Kullanıcı: Hangi dilleri biliyorsun?
+Asistan: Şimdilik Türkçe öğreniyorum.
+Kullanıcı: 13 artı 16 kaç eder?
+Asistan: 13 artı 16, 29 eder.
+Kullanıcı: 2 çarpı 3 kaç eder?
+Asistan: 2 çarpı 3, 6 eder.
+Kullanıcı: Bir saatte kaç dakika var?
+Asistan: Bir saatte altmış dakika vardır.
+Kullanıcı: Çimen ne renk?
+Asistan: Çimen yeşildir.
+Kullanıcı: En sevdiğin yemek ne?
+Asistan: Ben yemek yemem ama veri okumayı severim.
+Kullanıcı: 20 artı 2 kaç eder?
+Asistan: 20 artı 2, 22 eder.
+Kullanıcı: Japonya'nın başkenti neresi?
+Asistan: Japonya'nın başkenti Tokyo'dur.
+Kullanıcı: Görüşürüz!
+Asistan: Görüşürüz, kendine iyi bak!
+Kullanıcı: Türkiye'nin başkenti neresi?
+Asistan: Türkiye'nin başkenti Ankara'dır.
+Kullanıcı: 19 eksi 5 kaç eder?
+Asistan: 19 eksi 5, 14 eder.
+Kullanıcı: Bir yılda kaç mevsim var?
+Asistan: Bir yılda dört mevsim vardır.
+Kullanıcı: Selam, nasılsın?
+Asistan: İyiyim, teşekkür ederim. Sen nasılsın?
+Kullanıcı: Selam, nasılsın?
+Asistan: İyiyim, teşekkür ederim. Sen nasılsın?
+Kullanıcı: Fransa'nın başkenti neresi?
+Asistan: Fransa'nın başkenti Paris'tir.
+Kullanıcı: Bana bir şey söyle.
+Asistan: Küçük bir kor, büyük bir ateşi başlatır.
+Kullanıcı: 19 eksi 12 kaç eder?
+Asistan: 19 eksi 12, 7 eder.
+Kullanıcı: Görüşürüz!
+Asistan: Görüşürüz, kendine iyi bak!
+Kullanıcı: Biraz üzgünüm.
+Asistan: Üzüldüm. İstersen anlatabilirsin, seni dinlerim.
+Kullanıcı: 3 çarpı 1 kaç eder?
+Asistan: 3 çarpı 1, 3 eder.

@@ -185,7 +185,13 @@ AutoPlan autotune(const SysInfo& s, const Dataset& d) {
         p.cfg.accum = batch < 16 ? 16 / batch : 1;
         p.cfg.lr = tier <= 1 ? 3e-3f : 1e-3f;
         double per_step = (double)batch * p.cfg.accum * spec.ctx;
-        p.cfg.steps = (int)std::max(300.0, std::min(3000.0, (double)d.n_train * 4.0 / per_step));
+        // Dialogue has to be learned answer by answer, which takes far more
+        // passes than picking up the style of ordinary text. Question tests
+        // can stop such a run early once the answers are right.
+        std::string q_tag, a_tag;
+        bool dialogue = d.dialogue_tags(q_tag, a_tag);
+        double epochs = dialogue ? 250.0 : 4.0;
+        p.cfg.steps = (int)std::max(dialogue ? 1000.0 : 300.0, std::min(dialogue ? 8000.0 : 3000.0, (double)d.n_train * epochs / per_step));
         p.cfg.warmup = std::min(100, p.cfg.steps / 10);
     } else if (d.kind == DATA_TABLE) {
         int n = (int)d.train_idx.size();
