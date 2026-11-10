@@ -1,0 +1,7 @@
+build/
+build-*/
+*.kor
+*.tmp
+.vscode/
+.vs/
+CMakeUserPresets.json

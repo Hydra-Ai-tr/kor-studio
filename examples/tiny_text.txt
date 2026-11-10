@@ -1,0 +1,32 @@
+Küçük bir kor, büyük bir ateşi başlatır.
+Sabırla öğrenen model, az veriden çok şey çıkarır.
+Her adımda biraz daha az hata, her adımda biraz daha çok bilgi.
+Ateş yavaş yanar ama uzun süre ısıtır.
+Öğrenmek, hatayı küçültmenin sabırlı yoludur.
+Küçük adımlar büyük yolları bitirir.
+Model veriyi okur, veri modeli şekillendirir.
+Az kaynakla çok iş yapmak, iyi mühendisliğin işaretidir.
+Bir kıvılcım yeter, yeter ki rüzgâr doğru essin.
+Kor sönmez, yeter ki üstü küllenmesin.
+
+A small ember starts a great fire.
+A patient model learns a lot from a little data.
+Every step a little less error, every step a little more knowledge.
+The fire burns slowly but it warms for a long time.
+Learning is the patient way of making mistakes smaller.
+Small steps finish long roads.
+The model reads the data, and the data shapes the model.
+Doing much with little is the mark of good engineering.
+One spark is enough when the wind blows the right way.
+An ember does not die as long as it is not buried in ash.
+
+Маленький уголёк разжигает большой огонь.
+Терпеливая модель многому учится на малых данных.
+С каждым шагом чуть меньше ошибок, с каждым шагом чуть больше знаний.
+Огонь горит медленно, но греет долго.
+Учиться значит терпеливо уменьшать ошибку.
+Маленькие шаги проходят большие дороги.
+Модель читает данные, а данные формируют модель.
+Делать многое малыми средствами есть признак хорошей инженерии.
+Одной искры достаточно, если ветер дует в нужную сторону.
+Уголёк не гаснет, пока его не засыпало пеплом.

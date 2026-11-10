@@ -1,0 +1,2 @@
+// Application icon. GLFW picks up the resource named GLFW_ICON for the window.
+GLFW_ICON ICON "kor.ico"
