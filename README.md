@@ -10,6 +10,7 @@
 <p align="center">
   <a href="https://github.com/Hydra-Ai-tr/kor-studio/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/Hydra-Ai-tr/kor-studio?color=e8711a"></a>
   <a href="LICENSE"><img alt="PolyForm Noncommercial license" src="https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue"></a>
+  <a href="https://github.com/Hydra-Ai-tr/kor-studio/actions/workflows/build.yml"><img alt="Build" src="https://github.com/Hydra-Ai-tr/kor-studio/actions/workflows/build.yml/badge.svg"></a>
   <img alt="C++17" src="https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus">
   <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-555">
   <img alt="Dependencies" src="https://img.shields.io/badge/ML%20framework-none-success">
@@ -27,7 +28,8 @@
 
 Kor Studio is a free, open-source desktop application for building small neural networks end to
 end: load a dataset, let the app size a model for your machine, watch it train, quiz it, and save
-it. Everything runs locally on an ordinary CPU.
+it. Everything runs locally on an ordinary CPU; a graphics card can speed up text models, but is
+never required.
 
 The engine (`korcore`) is a self-contained C++17 library with its own tensors, layers, automatic
 gradients, optimizers and a GPT-style transformer. It does not depend on PyTorch, TensorFlow or
@@ -62,8 +64,22 @@ code a readable reference for how training actually works.
   (weights, optimizer state, best weights, curves). After a power cut or a closed app the next
   start offers *Continue training*, which picks up at the exact step. Saves go to a temporary
   file first and the previous one is kept as a backup, so a half-written file never breaks a run.
+- **Compare trainings.** Every finished or stopped run is recorded. The *Compare* tab draws the
+  validation (or training) loss curves of several runs on one chart, next to a table of their
+  data, model, steps, time, best loss, accuracy and test results.
+- **Dataset tools.** Import chat datasets in JSON Lines (OpenAI `messages`, ShareGPT, Alpaca,
+  `prompt`/`completion`) as question-answer text, and clean a text before training: tidy spaces,
+  drop empty lines, repeated question-answer pairs and questions without an answer. The tool
+  shows what will change before it writes a cleaned copy; your file stays as it is.
+- **Graphics card (experimental).** Text models can run their large matrix products on an
+  OpenCL GPU. The results are checked against the CPU and both are timed at the start; when the
+  card is missing, wrong or slower, training simply stays on the CPU.
 - **Chat page.** Finished models are saved automatically; pick any `.kor` model and talk to it,
   with temperature, answer length and conversation memory settings.
+- **Local OpenAI-compatible API.** `kor-cli serve` (or *Serve as API* on the chat page) offers a
+  model at `http://127.0.0.1:8080/v1`, so tools written for the OpenAI API can use it.
+- **Update notice.** The app tells you when a new release is out (can be turned off in the
+  settings).
 - **Projects.** A project folder keeps the dataset, its model, the training settings and the
   question tests together; it saves itself when a training finishes and when the app closes.
   The home page shows recent projects, recent activity, model and dataset counts and the live
@@ -103,16 +119,24 @@ code a readable reference for how training actually works.
     <td><img src="docs/screenshots/skills.png" alt="Skill metrics during training"><br><sub><b>Skills</b>: what each skill did, charted live</sub></td>
     <td><img src="docs/screenshots/share.png" alt="Installing plugins from the community list"><br><sub><b>Sharing</b>: install from a link or the community list</sub></td>
   </tr>
+  <tr>
+    <td><img src="docs/screenshots/data.png" alt="Cleaning a dialogue dataset"><br><sub><b>Dataset tools</b>: see what cleaning changes before a copy is written</sub></td>
+    <td></td>
+  </tr>
 </table>
 
 ## Download
 
-**Windows:** download `kor-studio-<version>-windows-x64.zip` from the
-[latest release](https://github.com/Hydra-Ai-tr/kor-studio/releases/latest), extract it, and run
-`kor-studio.exe`. It needs no installer or runtime; Windows 10 or newer is required. Python 3 is
-only needed for plugins.
+**Windows:** from the [latest release](https://github.com/Hydra-Ai-tr/kor-studio/releases/latest)
+download either `kor-studio-<version>-setup.exe` (installs for your user, with a Start menu entry
+and an optional `kor-cli` on the PATH) or the portable `kor-studio-<version>-windows-x64.zip`
+(extract and run `kor-studio.exe`). Windows 10 or newer is required. Python 3 is only needed for
+plugins. The programs are not code-signed yet, so Windows SmartScreen may ask for confirmation
+(*More info* → *Run anyway*).
 
-**Linux and macOS:** build from source (see [Building from source](#building-from-source)).
+**Linux:** releases published by the CI include `kor-studio-<version>-linux-x86_64.tar.gz`
+(built on Ubuntu 22.04). **macOS:** build from source (see
+[Building from source](#building-from-source)).
 
 ## Quick start
 
@@ -222,17 +246,59 @@ kor-cli demo-images pictures && kor-cli train pictures --out img.kor
 kor-cli generate img.kor --count 16 --out new.png           # a sheet of new pictures
 kor-cli demo-sounds melodies && kor-cli train melodies --out snd.kor
 kor-cli generate snd.kor --seconds 3 --out new.wav
+kor-cli data import chats.jsonl --out chats.txt            # JSON Lines chat data to dialogue text
+kor-cli data clean chats.txt                               # tidied copy: chats-clean.txt
+kor-cli serve chat.kor --port 8080                         # OpenAI-compatible API
+kor-cli gpu                                                # check the graphics card against the CPU
+kor-cli train big.txt --gpu --out llm.kor                  # large products on the GPU (experimental)
 ```
 
 Training options: `--steps N`, `--patience N` (early stopping), `--tests file`,
 `--target 0..1` (stop at this pass rate), `--log file`, `--out file`,
 `--text` / `--table` / `--images` / `--audio`, `--subword N`, `--size N` / `--colors N` /
 `--no-mirror` (images), `--rate N` (sound), `--from model.kor [--lora R]` (fine-tuning),
-`--dim/--layers/--heads/--ctx` (model size), `--lr`, `--batch`, `--threads`, `--seed`, `--wd`,
+`--dim/--layers/--heads/--ctx` (model size), `--lr`, `--batch`, `--threads`, `--gpu`, `--seed`, `--wd`,
 `--align 0..1`, `--prompt-weight 0..1`, `--dropout X`, `--ema 0.999`,
 `--resume` / `--fresh` / `--checkpoint file` / `--checkpoint-every 60` / `--no-checkpoint`
 (autosave, by default to `<out>.autosave`),
 `--skill "file.py [args]"` (repeatable), `--python <command>`, `--lang en|tr|ru`.
+
+### Local API
+
+`kor-cli serve model.kor` answers on `http://127.0.0.1:8080/v1` with the OpenAI endpoints
+`/v1/models`, `/v1/chat/completions` and `/v1/completions`, including streaming. Chat messages
+are turned into the model's dialogue format (`Kullanıcı: ` / `Asistan: ` by default, or the
+tags stored in the model). By default only this computer can reach it; `--host 0.0.0.0` opens it
+to the network, where `--api-key KEY` should be used as well.
+
+```bash
+curl http://127.0.0.1:8080/v1/chat/completions -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"Merhaba, nasılsın?"}],"max_tokens":80}'
+```
+
+### Dataset tools
+
+`kor-cli data import` reads JSON Lines (or one JSON array) and writes dialogue text: OpenAI
+`messages` (system messages are skipped), ShareGPT `conversations`, Alpaca
+`instruction`/`input`/`output`, `prompt`/`completion` and `question`/`answer` records become
+question and answer lines, and records with only `text` become paragraphs. Line breaks inside a
+message become spaces, and a dialogue that ends with a question loses that question. In the
+app, loading a `.jsonl` file imports it the same way.
+
+`kor-cli data clean` writes a tidied copy (`--keep-duplicates` and `--keep-empty` turn parts
+off). In dialogue data it removes repeated question-answer pairs and lines that lost their
+partner; in plain text it removes repeated lines of 24 characters or more.
+
+### Graphics card (experimental)
+
+With `--gpu` (or *Graphics card* in the training settings) the large matrix products of the
+transformer run through OpenCL, which comes with the drivers of most graphics cards; nothing
+extra is installed. At the start the GPU results are compared with the CPU and both are timed;
+only products large enough to gain go to the GPU, and any GPU error switches back to the CPU.
+Attention, the optimizer and everything else stay on the CPU, so the gain depends on the model:
+large models gain the most, tiny ones none. `kor-cli gpu` prints the comparison. On an RTX 3050
+Ti Laptop GPU, training-sized products (2048 x 256 x 768) ran 5 to 9 times faster than on the
+CPU, copies included.
 
 ### How images and sound are learned
 
@@ -257,10 +323,17 @@ cmake --build build
 ./build/bin/kor-studio
 ```
 
-- **Linux:** install the GLFW build dependencies first, e.g. `sudo apt install xorg-dev libgl1-mesa-dev`.
+- **Linux:** install the GLFW build dependencies first, e.g.
+  `sudo apt install xorg-dev libgl1-mesa-dev libwayland-dev libxkbcommon-dev wayland-protocols`.
 - **Engine and CLI only:** add `-DKOR_BUILD_GUI=OFF`.
 - **Verify the engine:** `./build/bin/kor-cli selftest` compares every analytic gradient with
   finite differences.
+- **Release packages:** `scripts/package.ps1` (Windows: folder, zip and, with
+  [Inno Setup 6](https://jrsoftware.org/isinfo.php), the installer from `installer/kor-studio.iss`)
+  and `scripts/package.sh` (Linux, macOS: `.tar.gz`). With `KOR_SIGN_PFX` and
+  `KOR_SIGN_PASSWORD` set, the Windows programs and the installer are code-signed.
+- **CI:** [GitHub Actions](.github/workflows/build.yml) builds and tests every push on Windows and
+  Linux; a `v*` tag also packs and publishes the release.
 
 ## Under the hood
 
@@ -271,38 +344,43 @@ cmake --build build
 | LoRA fine-tuning | Adapt a trained model by training a small fraction of its weights |
 | AdamW with warm-up and cosine decay | Stable training without hand-tuning |
 | Runtime SIMD dispatch | AVX2/FMA kernels when available, portable code otherwise |
+| Optional OpenCL offload | Large matrix products on the GPU, checked and timed against the CPU |
 | Half-precision checkpoints | Saved models take half the disk space |
 | Zero-dependency engine | The trainer is one small static library |
 
 ## Scope and limitations
 
-Kor Studio trains on the **CPU** and is designed for small models: tabular networks and
+Kor Studio trains mainly on the **CPU** and is designed for small models: tabular networks and
 transformers up to a few million parameters, which train in seconds to minutes on a laptop.
 Image and sound models are slower: every pixel or sample is a token, so expect tens of minutes
 to hours for good results. It is a tool for learning, experimentation and small, focused models. It will not
-train a large language model. A GPU backend is on the roadmap.
+train a large language model. The GPU support is experimental and covers only the large matrix
+products.
 
 ## Project layout
 
 ```text
 src/core/    training engine: tensors, layers, transformer, optimizers, trainer, auto-tuner
 src/app/     desktop application (Dear ImGui + GLFW), plugin runner, translations (i18n.h)
-src/skills/  bridge between the trainer and Python skills (processes, JSON line protocol)
-src/cli/     kor-cli command-line tool
+src/skills/  bridge between the trainer and Python skills (processes, JSON line protocol), dataset tools
+src/cli/     kor-cli command-line tool and the local API server
 python/kor/  the kor Python library: skills, tool helpers, plugin installer
 plugins/     bundled skills and tools
 community/   the community plugin list
 examples/    small demo datasets
 docs/        file format, plugin guide, translated READMEs, screenshots
 assets/      logo and application icon
+installer/   Windows installer script (Inno Setup)
+scripts/     release packaging
 ```
 
 ## Roadmap
 
-- GPU backend (Vulkan compute) and int8 quantized export
+- Full GPU training (attention and optimizer on the GPU) and int8 quantized export
 - Larger image and sound models (patches instead of single pixels and samples)
 - Convolutional layers
-- More dataset tools: splitting, augmentation, format conversion
+- More dataset tools: splitting and augmentation
+- Code-signed Windows releases
 - More interface languages: add a column to `src/app/i18n.h`
 
 ## Contributing

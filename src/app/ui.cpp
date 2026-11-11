@@ -8,6 +8,7 @@
 #include "../core/kernels.h"
 #include "../core/media.h"
 #include "../core/sysinfo.h"
+#include "../skills/datatools.h"
 #include "../skills/json.h"
 #include "../skills/skill.h"
 
@@ -67,6 +68,11 @@ struct State {
     int data_kind = 0;  // 0 text, 1 table, 2 images, 3 sound
     std::string data_msg;
     bool data_ok = true;
+    std::string data_note;  // what the last import or cleaning did
+    bool want_clean = false;
+    CleanOptions clean_opt;
+    std::string clean_src, clean_out;
+    CleanReport clean_rep;
     bool subword = false;
     int subword_size = 1000;
     int img_size = 16, img_colors = 32;
@@ -180,6 +186,29 @@ struct State {
     int hero_w = 0, hero_h = 0;
     std::string user;
 
+    // the latest release on GitHub, asked for on a worker thread
+    struct UpdateInfo {
+        std::atomic<int> state{0};     // 0 idle, 1 checking, 2 done, 3 failed
+        std::string latest, url, err;  // written before state turns 2 or 3
+    };
+    std::shared_ptr<UpdateInfo> update = std::make_shared<UpdateInfo>();
+    bool update_check = true, update_started = false, update_seen = false;
+    bool use_gpu = false;  // experimental OpenCL matrix products during training
+
+    // finished and stopped trainings (<config>/runs/*.json) for the comparison tab
+    struct RunRecord {
+        std::string file, name, state, arch;
+        std::time_t time = 0;
+        int steps = 0, total = 0, batch = 0, best_step = 0, tests_passed = -1, tests_total = 0;
+        double elapsed = 0, params = 0, speed = 0;
+        float loss = -1, val_loss = -1, best_val = -1, val_acc = -1, lr = 0;
+        std::vector<int> train_steps, val_steps;
+        std::vector<float> train_hist, val_hist;
+        bool selected = false;
+    };
+    std::vector<RunRecord> runs;
+    bool runs_scanned = false;
+
     // numbers for the home page tiles
     std::vector<std::string> recent_data;  // datasets loaded before, newest first
     int dataset_count = 0, train_runs = 0;
@@ -239,6 +268,54 @@ struct State {
 State A;
 
 bool busy() { return A.trainer.running(); }
+
+// ---------------------------------------------------------------- updates
+
+const char* const kReleaseApi = "https://api.github.com/repos/Hydra-Ai-tr/kor-studio/releases/latest";
+const char* const kReleasePage = "https://github.com/Hydra-Ai-tr/kor-studio/releases/";
+
+// True if version `a` ("v1.2.3" or "1.2.3") is newer than `b`.
+bool newer_version(const std::string& a, const std::string& b) {
+    auto parts = [](const std::string& v) {
+        std::array<int, 3> p{0, 0, 0};
+        size_t i = v.find_first_of("0123456789");
+        for (int k = 0; k < 3 && i < v.size(); ++k) {
+            p[k] = std::atoi(v.c_str() + i);
+            i = v.find('.', i);
+            if (i == std::string::npos) break;
+            ++i;
+        }
+        return p;
+    };
+    return parts(a) > parts(b);
+}
+
+void start_update_check() {
+    if (A.update->state == 1) return;
+    auto u = std::make_shared<State::UpdateInfo>();
+    u->state = 1;
+    A.update = u;
+    A.update_seen = false;
+    std::thread([u] {
+        std::string body, err;
+        json::Value v;
+        if (!http_get(kReleaseApi, body, err)) {
+            u->err = err;
+            u->state = 3;
+        } else if (!json::parse(body, v) || v["tag_name"].str().empty()) {
+            u->err = "unexpected reply";
+            u->state = 3;
+        } else {
+            u->latest = v["tag_name"].str();
+            const std::string& page = v["html_url"].str();
+            // only ever open the project's own release pages
+            u->url = page.rfind(kReleasePage, 0) == 0 ? page : std::string(kReleasePage) + "latest";
+            u->state = 2;
+        }
+    }).detach();
+}
+
+bool update_ready() { return A.update->state == 2 && newer_version(A.update->latest, KOR_VERSION); }
 
 // ---------------------------------------------------------------- helpers
 
@@ -509,6 +586,94 @@ void save_finished_model() {
 }
 
 // Moves new training events into the log; called every frame.
+// ------------------------------------------------------------- run records
+
+std::string runs_dir() { return (upath(config_dir()) / "runs").u8string(); }
+
+// Writes a summary and the curves of the run that just ended.
+void save_run_record(const char* state) {
+    TrainStats st = A.trainer.stats();
+    if (st.step <= 0 || !A.save_settings || !A.model) return;
+    json::Writer w;
+    w.begin_object();
+    w.field("name", file_name(A.data.path)).field("state", state).field("time", (long long)std::time(nullptr));
+    w.field("steps", st.step).field("total", st.total).field("elapsed", st.elapsed).field("speed", st.items_per_sec);
+    w.field("params", (double)A.model->param_count(false)).field("batch", A.cfg.batch).field("lr", (double)A.cfg.lr);
+    const ModelSpec& s = A.model->spec;
+    std::string arch = s.kind == MODEL_GPT ? strf("%d x %d, ctx %d", s.nlayer, s.dim, s.ctx) : strf("MLP %d", (int)s.layers.size());
+    if (s.lora_rank > 0) arch += strf(", LoRA %d", s.lora_rank);
+    w.field("arch", arch);
+    w.field("loss", (double)st.loss).field("val_loss", (double)st.val_loss).field("best_val", (double)st.best_val);
+    w.field("best_step", st.best_step).field("val_acc", (double)st.val_acc);
+    w.field("tests_passed", st.probe_pass).field("tests_total", st.probe_total);
+    // at most 400 points of the training curve
+    int n = (int)st.train_hist.size(), stride = std::max(1, (n + 399) / 400);
+    w.key("train").begin_array();
+    for (int i = 0; i < n; i += stride) w.begin_array().value(i + 1).value((double)st.train_hist[i]).end_array();
+    if (n > 0 && (n - 1) % stride) w.begin_array().value(n).value((double)st.train_hist[n - 1]).end_array();
+    w.end_array();
+    w.key("val").begin_array();
+    for (size_t i = 0; i < st.val_hist.size() && i < st.val_steps.size(); ++i)
+        w.begin_array().value(st.val_steps[i]).value((double)st.val_hist[i]).end_array();
+    w.end_array();
+    w.end_object();
+    std::error_code ec;
+    std::filesystem::create_directories(upath(runs_dir()), ec);
+    char stamp[32];
+    std::time_t now = std::time(nullptr);
+    std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", std::localtime(&now));
+    std::ofstream o(upath(runs_dir()) / (std::string(stamp) + ".json"), std::ios::binary);
+    o << w.str();
+    A.runs_scanned = false;
+}
+
+void scan_runs() {
+    A.runs_scanned = true;
+    std::set<std::string> selected;
+    for (auto& r : A.runs)
+        if (r.selected) selected.insert(r.file);
+    A.runs.clear();
+    std::error_code ec;
+    for (std::filesystem::directory_iterator it(upath(runs_dir()), ec), end; !ec && it != end; it.increment(ec)) {
+        if (it->path().extension() != ".json") continue;
+        std::ifstream in(it->path(), std::ios::binary);
+        std::stringstream ss;
+        ss << in.rdbuf();
+        json::Value v;
+        if (!json::parse(ss.str(), v) || v.type != json::Value::OBJ) continue;
+        State::RunRecord r;
+        r.file = it->path().u8string();
+        r.name = v["name"].str();
+        r.state = v["state"].str();
+        r.arch = v["arch"].str();
+        r.time = (std::time_t)v["time"].num();
+        r.steps = (int)v["steps"].num();
+        r.total = (int)v["total"].num();
+        r.batch = (int)v["batch"].num();
+        r.best_step = (int)v["best_step"].num();
+        r.tests_passed = (int)v["tests_passed"].num(-1);
+        r.tests_total = (int)v["tests_total"].num();
+        r.elapsed = v["elapsed"].num();
+        r.params = v["params"].num();
+        r.speed = v["speed"].num();
+        r.loss = (float)v["loss"].num(-1);
+        r.val_loss = (float)v["val_loss"].num(-1);
+        r.best_val = (float)v["best_val"].num(-1);
+        r.val_acc = (float)v["val_acc"].num(-1);
+        r.lr = (float)v["lr"].num();
+        for (const json::Value& p : v["train"].a)
+            if (p.a.size() == 2) { r.train_steps.push_back((int)p.a[0].num()); r.train_hist.push_back((float)p.a[1].num()); }
+        for (const json::Value& p : v["val"].a)
+            if (p.a.size() == 2) { r.val_steps.push_back((int)p.a[0].num()); r.val_hist.push_back((float)p.a[1].num()); }
+        r.selected = selected.count(r.file) > 0;
+        A.runs.push_back(std::move(r));
+    }
+    std::sort(A.runs.begin(), A.runs.end(), [](const State::RunRecord& a, const State::RunRecord& b) { return a.time > b.time; });
+    if (A.runs.size() > 100) A.runs.resize(100);
+    if (selected.empty())
+        for (size_t i = 0; i < A.runs.size() && i < 3; ++i) A.runs[i].selected = true;
+}
+
 void pump_events() {
     std::vector<TrainEvent> ev;
     A.trainer.drain_events(ev);
@@ -603,6 +768,7 @@ void pump_events() {
         }
         if (e.kind == EV_DONE) add_activity(State::ACT_TRAIN_DONE, file_name(A.data.path));
         if (e.kind == EV_STOPPED) add_activity(State::ACT_TRAIN_STOP, file_name(A.data.path));
+        if (e.kind == EV_DONE || e.kind == EV_STOPPED) save_run_record(e.kind == EV_DONE ? "done" : "stopped");
         if (e.kind == EV_DONE && A.save_settings) {
             save_finished_model();
             if (!A.project_dir.empty()) save_open_project();
@@ -806,8 +972,62 @@ bool read_data(Dataset& d, const std::string& path, int kind, int target_col, st
     return d.load_text(path, &err, A.subword ? A.subword_size : 0);
 }
 
+bool read_whole(const std::string& path, std::string& out) {
+    std::ifstream f(upath(path), std::ios::binary);
+    if (!f) return false;
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    out = ss.str();
+    return true;
+}
+
+// A dataset made from another one goes next to it, or into the settings folder
+// when that folder cannot be written.
+std::string write_derived(const std::string& src, const std::string& suffix, const std::string& text) {
+    std::filesystem::path p = upath(src);
+    std::string stem = p.stem().u8string(), tag = upath(suffix).stem().u8string();
+    // cleaning a cleaned copy again replaces it instead of making "-clean-clean"
+    if (stem.size() > tag.size() && stem.compare(stem.size() - tag.size(), tag.size(), tag) == 0) stem.resize(stem.size() - tag.size());
+    std::filesystem::path name = upath(stem + suffix);
+    for (const std::filesystem::path& dir : {p.parent_path(), upath(config_dir()) / "datasets"}) {
+        std::error_code ec;
+        if (!dir.empty()) std::filesystem::create_directories(dir, ec);
+        std::ofstream o(dir / name, std::ios::binary);
+        o << text;
+        o.close();
+        if (o) return (dir / name).u8string();
+    }
+    return "";
+}
+
+bool load_data_impl(const std::string& path, int kind, int target_col);
+
+bool import_data(const std::string& path) {
+    static const char* q_tags[LANG_COUNT] = {"User: ", "Kullanıcı: ", "Пользователь: "};
+    static const char* a_tags[LANG_COUNT] = {"Assistant: ", "Asistan: ", "Ассистент: "};
+    std::string src, out, err;
+    ImportReport r;
+    int l = get_language();
+    if (!read_whole(path, src)) err = "cannot open file";
+    else if (import_jsonl(src, q_tags[l], a_tags[l], out, r, &err)) {
+        std::string dst = write_derived(path, "-import.txt", out);
+        if (dst.empty()) err = strf(tr(S::CantWrite), (upath(path).stem().u8string() + "-import.txt").c_str());
+        else if (load_data_impl(dst, 0, -1)) {
+            A.data_note = strf(tr(S::ImportDone), (int)r.dialogues, r.format.c_str(), file_name(dst).c_str());
+            return true;
+        } else return false;
+    }
+    A.data_ok = false;
+    A.data_msg = err;
+    return false;
+}
+
 bool load_data_impl(const std::string& path, int kind, int target_col) {
     if (busy()) return false;
+    std::string ext = upath(path).extension().u8string();
+    for (char& ch : ext) ch = (char)std::tolower((unsigned char)ch);
+    if (kind == 0 && (ext == ".jsonl" || ext == ".json")) return import_data(path);
+    A.data_note.clear();
     std::string err;
     Dataset d;
     bool ok = read_data(d, path, kind, target_col, err);
@@ -943,6 +1163,7 @@ void begin_training(bool resume = false) {
     A.gen_left = 0;
     if (!resume) A.cfg.seed = (uint64_t)std::chrono::steady_clock::now().time_since_epoch().count();
     A.cfg.resume = resume && autosave;
+    A.cfg.gpu = A.use_gpu;
     A.cfg.checkpoint.clear();
     if (autosave) {
         std::error_code ec;
@@ -1035,6 +1256,7 @@ void resume_training() {
     A.stop_on_pass = num("stop_on_pass", 0) != 0;
     TrainConfig c = info.cfg;
     c.threads = A.cfg.threads;
+    c.gpu = A.use_gpu;
     A.cfg = c;
     A.page = PAGE_TRAIN;
     begin_training(true);
@@ -2338,6 +2560,21 @@ void settings_modal() {
     }
     if (action_row(tr(S::Terminal), IC_TERMINAL)) open_terminal_here();
     gap(10);
+    {
+        FontScope f(F.bold);
+        ImGui::TextUnformatted(tr(S::Updates));
+    }
+    ImGui::Checkbox(tr(S::UpdateAtStart), &A.update_check);
+    int us = A.update->state;
+    if (us == 1) text(tr(S::UpdateChecking), C::muted);
+    else if (us == 3) text_wrapped(strf(tr(S::UpdateFailed), A.update->err.c_str()).c_str(), C::warn, F.small);
+    else if (us == 2 && update_ready()) {
+        text(strf(tr(S::UpdateAvailable), A.update->latest.c_str()).c_str(), C::accent_hi);
+        ImGui::SameLine();
+        if (button(tr(S::UpdateDownload), BTN_PRIMARY)) open_folder(A.update->url);
+    } else if (us == 2) text(tr(S::UpdateLatest), C::good);
+    if (us != 1 && button(tr(S::UpdateNow), BTN_SECONDARY, IC_REFRESH)) start_update_check();
+    gap(10);
     text_wrapped(strf(tr(S::AboutLine), KOR_VERSION).c_str(), C::muted, F.small);
     gap(10);
     if (button("OK", BTN_PRIMARY, IC_CHECK, bw) || ImGui::IsKeyPressed(ImGuiKey_Escape)) ImGui::CloseCurrentPopup();
@@ -2346,9 +2583,77 @@ void settings_modal() {
 
 // ------------------------------------------------------------------- data
 
+void clean_preview() { A.clean_out = clean_text(A.clean_src, A.q_tag, A.a_tag, A.clean_opt, A.clean_rep); }
+
+void clean_modal() {
+    if (A.want_clean) {
+        A.want_clean = false;
+        if (!read_whole(A.data.path, A.clean_src)) {
+            A.data_ok = false;
+            A.data_msg = "cannot open file";
+            return;
+        }
+        clean_preview();
+        ImGui::OpenPopup("##clean");
+    }
+    ImGui::SetNextWindowSize(ImVec2(px(520), 0));
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(px(24), px(22)));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, px(14));
+    bool open = ImGui::BeginPopupModal("##clean", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
+    ImGui::PopStyleVar(2);
+    if (!open) return;
+    {
+        FontScope f(F.h2);
+        ImGui::TextUnformatted(tr(S::CleanData));
+    }
+    std::string stem = upath(A.data.path).stem().u8string();
+    if (stem.size() > 6 && stem.compare(stem.size() - 6, 6, "-clean") == 0) stem.resize(stem.size() - 6);
+    text_wrapped(strf(tr(S::CleanHelp), (stem + "-clean.txt").c_str()).c_str(), C::muted, F.small);
+    gap(8);
+    CleanOptions& o = A.clean_opt;
+    bool changed = ImGui::Checkbox(tr(S::CleanSpaces), &o.trim);
+    o.collapse_spaces = o.trim;
+    changed |= ImGui::Checkbox(tr(S::CleanEmpty), &o.drop_empty);
+    changed |= ImGui::Checkbox(tr(S::CleanDupes), &o.dedupe);
+    tooltip(tr(S::CleanDupesHelp));
+    if (!A.q_tag.empty()) changed |= ImGui::Checkbox(tr(S::CleanBroken), &o.drop_broken);
+    if (changed) clean_preview();
+    gap(8);
+    const CleanReport& r = A.clean_rep;
+    bool nothing = r.duplicates + r.empty + r.broken + r.changed == 0;
+    if (nothing) banner(tr(S::CleanNothing), C::good, IC_CHECK);
+    else
+        banner(strf(tr(S::CleanPreview), (int)r.lines_in, (int)r.lines_out, (int)r.duplicates, (int)r.empty, (int)r.broken, (int)r.changed).c_str(),
+               C::accent_hi, IC_INFO);
+    gap(10);
+    ImGui::BeginDisabled(nothing);
+    bool go = button(tr(S::CleanLoad), BTN_PRIMARY, IC_CHECK);
+    ImGui::EndDisabled();
+    ImGui::SameLine(0, px(10));
+    bool cancel = button(tr(S::CancelBtn), BTN_GHOST) || ImGui::IsKeyPressed(ImGuiKey_Escape);
+    if (go) {
+        CleanReport done = r;
+        std::string dst = write_derived(A.data.path, "-clean.txt", A.clean_out);
+        if (dst.empty()) {
+            A.data_ok = false;
+            A.data_msg = strf(tr(S::CantWrite), (stem + "-clean.txt").c_str());
+        } else if (load_data_impl(dst, 0, -1)) {
+            A.data_note = strf(tr(S::CleanDone), (int)done.duplicates, (int)(done.empty + done.broken), (int)done.changed, file_name(dst).c_str());
+        }
+    }
+    if (go || cancel) {
+        A.clean_src.clear();
+        A.clean_out.clear();
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
 void page_data() {
     header(tr(S::NavData), tr(S::DataHelp));
     header_end();
+    clean_modal();
 
     begin_card("source", tr(S::Source));
     ImGui::BeginDisabled(busy());
@@ -2365,9 +2670,10 @@ void page_data() {
             std::string p = open_file_dialog(DLG_DATA);
             if (!p.empty()) {
                 std::snprintf(A.data_path, sizeof A.data_path, "%s", p.c_str());
-                std::string ext = p.size() > 4 ? p.substr(p.size() - 4) : "";
+                std::string ext = upath(p).extension().u8string();
+                for (char& ch : ext) ch = (char)std::tolower((unsigned char)ch);
                 if (ext == ".csv" || ext == ".tsv") A.data_kind = 1;
-                else if (ext == ".txt") A.data_kind = 0;
+                else if (ext == ".txt" || ext == ".jsonl" || ext == ".json") A.data_kind = 0;
                 else if (is_image_file(p)) A.data_kind = 2;
                 else if (is_wav_file(p)) A.data_kind = 3;
                 if (A.data_kind == 2) p = upath(p).parent_path().u8string();
@@ -2424,7 +2730,27 @@ void page_data() {
     if (button(tr(S::ExampleImages), BTN_GHOST, IC_SPARK)) load_example(2);
     ImGui::SameLine(0, px(4));
     if (button(tr(S::ExampleSounds), BTN_GHOST, IC_SPARK)) load_example(3);
+    if (A.data_kind == 0) {
+        ImGui::AlignTextToFramePadding();
+        text(tr(S::Tools), C::muted);
+        ImGui::SameLine();
+        if (has_native_dialogs()) {
+            if (button(tr(S::ImportJsonl), BTN_GHOST, IC_UPLOAD)) {
+                std::string p = open_file_dialog(DLG_DATA);
+                if (!p.empty()) {
+                    std::snprintf(A.data_path, sizeof A.data_path, "%s", p.c_str());
+                    load_data_impl(p, 0, -1);
+                }
+            }
+            tooltip(tr(S::ImportJsonlHelp));
+            ImGui::SameLine(0, px(4));
+        }
+        ImGui::BeginDisabled(A.data.kind != DATA_TEXT);
+        if (button(tr(S::CleanData), BTN_GHOST, IC_SPARK)) A.want_clean = true;
+        ImGui::EndDisabled();
+    }
     ImGui::EndDisabled();
+    if (A.data_ok && !A.data_note.empty()) banner(A.data_note.c_str(), C::good, IC_CHECK);
     if (A.data.items > 0 && A.data.skipped > 0) banner(strf(tr(S::Skipped), A.data.skipped).c_str(), C::warn, IC_WARN);
     if (busy()) banner(tr(S::Busy), C::warn, IC_INFO);
     if (!A.data_ok && !A.data_msg.empty()) banner(strf(tr(S::Failed), A.data_msg.c_str()).c_str(), C::bad, IC_WARN);
@@ -3272,6 +3598,11 @@ void train_settings(bool run) {
         if (checkbox(tr(S::AlignRows), &align)) A.cfg.align = align ? 0.75f : 0.f;
         tooltip(tr(S::AlignHelp));
     }
+    if (A.data.kind == DATA_TEXT) {
+        ImGui::SameLine(0, px(28));
+        checkbox(tr(S::UseGpu), &A.use_gpu);
+        tooltip(tr(S::UseGpuHelp));
+    }
     A.cfg.patience = std::max(0, std::min(1000, A.cfg.patience));
     A.cfg.probe_every = std::max(0, A.cfg.probe_every);
     A.cfg.steps = std::max(1, std::min(10000000, A.cfg.steps));
@@ -3291,12 +3622,23 @@ void train_settings(bool run) {
     text_wrapped(info.c_str(), C::subtle, F.small);
 }
 
+void compare_view(float h);
+
 void page_train() {
     if (A.data.kind == DATA_NONE) {
         header(tr(S::NavTrain), tr(S::TrainHelp));
         header_end();
         resume_card();
-        if (empty_state(IC_DATA, nullptr, tr(S::NoData), tr(S::GoData)) == 1) A.page = PAGE_DATA;
+        if (!A.runs_scanned) scan_runs();
+        if (A.runs.empty()) {
+            if (empty_state(IC_DATA, nullptr, tr(S::NoData), tr(S::GoData)) == 1) A.page = PAGE_DATA;
+            return;
+        }
+        banner(tr(S::NoData), C::blue, IC_INFO);
+        if (button(tr(S::GoData), BTN_SECONDARY, IC_DATA)) A.page = PAGE_DATA;
+        gap(8);
+        section_title(tr(S::TabCompare));
+        compare_view(std::max(px(300), ImGui::GetContentRegionAvail().y - px(2)));
         return;
     }
     TrainStats st = A.trainer.stats();
@@ -3370,6 +3712,8 @@ void page_train() {
     std::vector<int> ids = {0, 1};
     if (text_data) { labels.push_back(tr(S::TabTests)); ids.push_back(2); }
     if (skills_tab) { labels.push_back(tr(S::TabSkills)); ids.push_back(3); }
+    labels.push_back(tr(S::TabCompare));
+    ids.push_back(4);
     int sel = 0;
     for (int i = 0; i < (int)ids.size(); ++i)
         if (ids[i] == A.train_tab) sel = i;
@@ -3379,7 +3723,198 @@ void page_train() {
     if (A.train_tab == 0) plot_loss(st, ImVec2(ImGui::GetContentRegionAvail().x, h));
     else if (A.train_tab == 1) log_view(h);
     else if (A.train_tab == 2) tests_view(st);
-    else skill_metrics(st);
+    else if (A.train_tab == 3) skill_metrics(st);
+    else compare_view(h);
+}
+
+// ------------------------------------------------------------- comparison
+
+const ImVec4& run_color(int i) {
+    static const ImVec4* palette[] = {&C::accent_hi, &C::blue, &C::good, &C::warn, &C::violet, &C::teal, &C::bad};
+    return *palette[i % 7];
+}
+
+void compare_chart(const std::vector<const State::RunRecord*>& sel, const std::vector<int>& colors, bool val, ImVec2 size) {
+    ImVec2 p0 = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("##cmpplot", size);
+    bool hov = ImGui::IsItemHovered();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 p1(p0.x + size.x, p0.y + size.y);
+    dl->AddRectFilled(p0, p1, col(C::surface), px(12));
+    dl->AddRect(p0, p1, col(C::border), px(12));
+    ImFont* sf = F.small ? F.small : ImGui::GetFont();
+    float lo = 1e30f, hi = -1e30f;
+    int total = 2;
+    for (const State::RunRecord* r : sel) {
+        const std::vector<float>& v = val ? r->val_hist : r->train_hist;
+        for (float x : v) { lo = std::min(lo, x); hi = std::max(hi, x); }
+        const std::vector<int>& s = val ? r->val_steps : r->train_steps;
+        if (!s.empty()) total = std::max(total, s.back());
+    }
+    if (lo > hi) {
+        const char* msg = tr(S::PlotEmpty);
+        ImVec2 ts = ImGui::CalcTextSize(msg);
+        dl->AddText(ImVec2(p0.x + (size.x - ts.x) * 0.5f, p0.y + (size.y - ts.y) * 0.5f), col(C::muted), msg);
+        return;
+    }
+    if (hi - lo < 1e-6f) hi = lo + 1e-6f;
+    float pad = (hi - lo) * 0.06f;
+    lo = std::max(0.f, lo - pad);
+    hi += pad;
+    ImVec2 a(p0.x + px(60), p0.y + px(20)), b(p1.x - px(22), p1.y - px(36));
+    auto X = [&](float step) { return a.x + (b.x - a.x) * (step - 1) / std::max(1, total - 1); };
+    auto Y = [&](float v) { return b.y - (b.y - a.y) * (v - lo) / (hi - lo); };
+    char t[64];
+    for (int gi = 0; gi <= 4; ++gi) {
+        float v = lo + (hi - lo) * gi / 4.f, y = Y(v);
+        dl->AddLine(ImVec2(a.x, y), ImVec2(b.x, y), col(C::border, gi == 0 ? 1.f : 0.55f));
+        std::snprintf(t, sizeof t, "%.3f", v);
+        ImVec2 ts = text_size(sf, t);
+        dl->AddText(sf, sf->FontSize, ImVec2(a.x - ts.x - px(10), y - ts.y * 0.5f), col(C::subtle), t);
+        int step = gi == 0 ? 1 : (int)std::lround((double)total * gi / 4);
+        std::snprintf(t, sizeof t, "%d", step);
+        ts = text_size(sf, t);
+        float x = std::min(std::max(X((float)step) - ts.x * 0.5f, a.x - px(4)), b.x - ts.x + px(4));
+        dl->AddText(sf, sf->FontSize, ImVec2(x, b.y + px(10)), col(C::subtle), t);
+    }
+    for (size_t k = 0; k < sel.size(); ++k) {
+        const std::vector<float>& v = val ? sel[k]->val_hist : sel[k]->train_hist;
+        const std::vector<int>& s = val ? sel[k]->val_steps : sel[k]->train_steps;
+        std::vector<ImVec2> pts;
+        for (size_t i = 0; i < v.size() && i < s.size(); ++i) pts.push_back(ImVec2(X((float)s[i]), Y(v[i])));
+        ImU32 c = col(run_color(colors[k]));
+        if (pts.size() >= 2) dl->AddPolyline(pts.data(), (int)pts.size(), c, 0, px(2.f));
+        if (val)
+            for (const ImVec2& q : pts) dl->AddCircleFilled(q, px(2.5f), c);
+    }
+    ImVec2 m = ImGui::GetIO().MousePos;
+    if (hov && m.x >= a.x && m.x <= b.x) {
+        float step = (m.x - a.x) / std::max(1.f, b.x - a.x) * (total - 1) + 1;
+        dl->AddLine(ImVec2(m.x, a.y), ImVec2(m.x, b.y), col(C::border_hi), 1.f);
+        ImGui::BeginTooltip();
+        ImGui::Text(tr(S::StepLbl), (int)std::lround(step));
+        for (size_t k = 0; k < sel.size(); ++k) {
+            const std::vector<float>& v = val ? sel[k]->val_hist : sel[k]->train_hist;
+            const std::vector<int>& s = val ? sel[k]->val_steps : sel[k]->train_steps;
+            if (v.empty()) continue;
+            size_t best = 0;
+            for (size_t i = 1; i < s.size(); ++i)
+                if (std::abs(s[i] - step) < std::abs(s[best] - step)) best = i;
+            ImGui::TextColored(run_color(colors[k]), "%s  %.4f", sel[k]->name.c_str(), v[best]);
+        }
+        ImGui::EndTooltip();
+    }
+}
+
+void compare_view(float h) {
+    if (!A.runs_scanned) scan_runs();
+    if (A.runs.empty()) {
+        empty_state(IC_TREND, nullptr, tr(S::CompareEmpty));
+        return;
+    }
+    static int metric = 0;  // 0 validation loss, 1 training loss
+    std::vector<const State::RunRecord*> sel;
+    std::vector<int> colors;
+    for (size_t i = 0; i < A.runs.size(); ++i)
+        if (A.runs[i].selected) {
+            sel.push_back(&A.runs[i]);
+            colors.push_back((int)i);
+        }
+    const char* metrics[] = {tr(S::ValLoss), tr(S::Loss)};
+    segmented("cmpmetric", &metric, metrics, 2);
+    ImGui::SameLine(0, px(14));
+    text(tr(S::CompareHint), C::subtle);
+    gap(4);
+    compare_chart(sel, colors, metric == 0, ImVec2(ImGui::GetContentRegionAvail().x, std::max(px(240), h * 0.45f)));
+    gap(8);
+
+    // the best value per column among all records
+    auto best_of = [](auto get, bool low) {
+        double b = low ? 1e30 : -1e30;
+        for (auto& r : A.runs) {
+            double v = get(r);
+            if (v >= 0) b = low ? std::min(b, v) : std::max(b, v);
+        }
+        return b;
+    };
+    double b_val = best_of([](const State::RunRecord& r) { return (double)r.best_val; }, true);
+    double b_loss = best_of([](const State::RunRecord& r) { return (double)r.loss; }, true);
+    double b_acc = best_of([](const State::RunRecord& r) { return (double)r.val_acc; }, false);
+    double b_tests = best_of([](const State::RunRecord& r) { return r.tests_total > 0 ? (double)r.tests_passed / r.tests_total : -1.0; }, false);
+
+    ImGuiTableFlags tf = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp |
+                         ImGuiTableFlags_PadOuterX | ImGuiTableFlags_ScrollY;
+    ImGui::PushStyleColor(ImGuiCol_TableRowBg, C::surface);
+    ImGui::PushStyleColor(ImGuiCol_TableRowBgAlt, mix(C::surface, C::surface2, 0.5f));
+    ImGui::PushStyleColor(ImGuiCol_TableBorderLight, C::border);
+    float th = std::max(px(180), ImGui::GetContentRegionAvail().y - px(4));
+    if (ImGui::BeginTable("##runs", 11, tf, ImVec2(0, th))) {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, px(46));
+        ImGui::TableSetupColumn(tr(S::ColData), 0, 2.2f);
+        ImGui::TableSetupColumn(tr(S::ColDate), 0, 1.4f);
+        ImGui::TableSetupColumn(tr(S::Steps), 0, 1.0f);
+        ImGui::TableSetupColumn(tr(S::Elapsed), 0, 1.0f);
+        ImGui::TableSetupColumn(tr(S::NavModel), 0, 1.6f);
+        ImGui::TableSetupColumn(tr(S::Loss), 0, 1.1f);
+        ImGui::TableSetupColumn(tr(S::ColBestVal), 0, 1.3f);
+        ImGui::TableSetupColumn(tr(S::Accuracy), 0, 1.0f);
+        ImGui::TableSetupColumn(tr(S::TabTests), 0, 1.0f);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, px(30));
+        ImGui::TableHeadersRow();
+        int remove = -1;
+        for (size_t i = 0; i < A.runs.size(); ++i) {
+            State::RunRecord& r = A.runs[i];
+            ImGui::PushID((int)i);
+            ImGui::TableNextRow(0, px(30));
+            ImGui::TableNextColumn();
+            ImGui::Checkbox("##sel", &r.selected);
+            ImGui::SameLine(0, px(4));
+            ImVec2 cp = ImGui::GetCursorScreenPos();
+            float fh = ImGui::GetFrameHeight();
+            ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(cp.x + px(5), cp.y + fh * 0.5f), px(4), col(run_color((int)i), r.selected ? 1.f : 0.3f));
+            ImGui::Dummy(ImVec2(px(10), fh));
+            auto cell = [&](const std::string& s, bool best = false, const ImVec4& c = C::text) {
+                ImGui::TableNextColumn();
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextColored(best ? C::good : c, "%s", s.c_str());
+            };
+            cell(r.name.empty() ? "-" : r.name);
+            if (ImGui::IsItemHovered() && !r.state.empty() && r.state != "done") tooltip(tr(S::RunStopped));
+            char when[32];
+            std::strftime(when, sizeof when, "%d.%m %H:%M", std::localtime(&r.time));
+            cell(when, false, C::muted);
+            cell(r.state == "done" ? std::to_string(r.steps) : strf("%d / %d", r.steps, r.total), false, r.state == "done" ? C::text : C::warn);
+            cell(fmt_time(r.elapsed), false, C::muted);
+            cell(r.arch + "  \xC2\xB7  " + fmt_count(r.params), false, C::muted);
+            cell(r.loss >= 0 ? strf("%.4f", r.loss) : "-", r.loss >= 0 && r.loss == (float)b_loss);
+            cell(r.best_val >= 0 ? strf("%.4f", r.best_val) : "-", r.best_val >= 0 && r.best_val == (float)b_val);
+            cell(r.val_acc >= 0 ? strf("%.1f%%", r.val_acc * 100) : "-", r.val_acc >= 0 && r.val_acc == (float)b_acc);
+            bool tests = r.tests_total > 0 && r.tests_passed >= 0;
+            cell(tests ? strf("%d/%d", r.tests_passed, r.tests_total) : "-", tests && (double)r.tests_passed / r.tests_total == b_tests);
+            ImGui::TableNextColumn();
+            {
+                ImVec2 bp = ImGui::GetCursorScreenPos();
+                float bs = ImGui::GetFrameHeight();
+                if (ImGui::InvisibleButton("##del", ImVec2(bs, bs))) remove = (int)i;
+                bool dh = ImGui::IsItemHovered();
+                if (dh) {
+                    ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                    ImGui::GetWindowDrawList()->AddRectFilled(bp, ImVec2(bp.x + bs, bp.y + bs), col(C::bad, 0.15f), px(6));
+                }
+                icon(ImGui::GetWindowDrawList(), IC_TRASH, ImVec2(bp.x + bs * 0.5f, bp.y + bs * 0.5f), px(14), col(dh ? C::bad : C::subtle));
+                tooltip(tr(S::DeleteRun));
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+        if (remove >= 0) {
+            std::error_code ec;
+            std::filesystem::remove(upath(A.runs[remove].file), ec);
+            A.runs.erase(A.runs.begin() + remove);
+        }
+    }
+    ImGui::PopStyleColor(3);
 }
 
 // ------------------------------------------------------------- playground
@@ -4080,7 +4615,20 @@ void chat_pump() {
 void page_chat() {
     State::Chat& c = A.chat;
     const char* clear_label = tr(S::ChatClear);
-    header(tr(S::NavChat), tr(S::ChatHelp), button_width(clear_label, IC_PLUS));
+    const char* serve_label = tr(S::ServeApi);
+    header(tr(S::NavChat), tr(S::ChatHelp), button_width(clear_label, IC_PLUS) + button_width(serve_label, IC_GLOBE) + px(8));
+    ImGui::BeginDisabled(!c.model || !chat_ready() || c.path.empty());
+    if (button(serve_label, BTN_SECONDARY, IC_GLOBE)) {
+        std::string cli = (upath(exe_dir()) / "kor-cli").u8string();
+#if defined(_WIN32)
+        cli += ".exe";
+#endif
+        run_in_terminal(upath(c.path).parent_path().u8string(),
+                        {cli, "serve", c.path, "--port", "8080", "--q-tag", c.q_tag, "--a-tag", c.a_tag});
+    }
+    ImGui::EndDisabled();
+    tooltip(tr(S::ServeApiHelp));
+    ImGui::SameLine(0, px(8));
     ImGui::BeginDisabled(c.msgs.empty() && !c.running);
     if (button(clear_label, BTN_SECONDARY, IC_PLUS)) {
         chat_stop();
@@ -4704,6 +5252,22 @@ void notifications_popup() {
         gap(4);
         ImFont* bf = ImGui::GetFont();
         ImFont* sf = F.small ? F.small : bf;
+        if (update_ready()) {
+            float w = ImGui::GetContentRegionAvail().x, h = px(44);
+            ImVec2 p = ImGui::GetCursorScreenPos();
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), col(C::accent, 0.14f), px(8));
+            dl->AddRect(p, ImVec2(p.x + w, p.y + h), col(C::accent, 0.5f), px(8));
+            icon(dl, IC_SPARK, ImVec2(p.x + px(16), p.y + h * 0.5f), px(15), col(C::accent_hi));
+            std::string msg = strf(tr(S::UpdateAvailable), A.update->latest.c_str());
+            float bw = button_width(tr(S::UpdateDownload));
+            text_ellipsis(dl, bf, ImVec2(p.x + px(32), p.y + (h - bf->FontSize) * 0.5f), w - px(44) - bw, msg.c_str(), col(C::text));
+            ImGui::SetCursorScreenPos(ImVec2(p.x + w - bw - px(6), p.y + (h - ImGui::GetFrameHeight()) * 0.5f));
+            if (button(tr(S::UpdateDownload), BTN_PRIMARY)) open_folder(A.update->url);
+            ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + h));
+            ImGui::Dummy(ImVec2(0, 0));
+            gap(6);
+        }
         int shown = 0;
         for (auto it = A.activity.rbegin(); it != A.activity.rend() && shown < 8; ++it, ++shown) {
             int k = std::max(0, std::min((int)State::ACT_COUNT - 1, it->kind));
@@ -4716,7 +5280,7 @@ void notifications_popup() {
             text_ellipsis(dl, bf, ImVec2(p.x + px(18), p.y + px(2)), w - px(18), act_text(*it).c_str(), col(C::text));
             dl->AddText(sf, sf->FontSize, ImVec2(p.x + px(18), p.y + px(4) + bf->FontSize), col(C::subtle), ago(it->t).c_str());
         }
-        if (A.activity.empty()) text_wrapped(tr(S::NoNotifications), C::muted, F.small);
+        if (A.activity.empty() && !update_ready()) text_wrapped(tr(S::NoNotifications), C::muted, F.small);
         ImGui::EndPopup();
     }
     ImGui::PopStyleVar();
@@ -4785,10 +5349,11 @@ void title_bar(ImVec2 pos, float w, float h, float sbw) {
     // bell, cloud, settings
     float s = px(34), sp = px(4);
     float ix = right - s * 3 - sp * 2 - px(6);
-    bool unread = A.activity.size() > A.seen_activity;
+    bool unread = A.activity.size() > A.seen_activity || (update_ready() && !A.update_seen);
     ImVec2 bell_at(ix, cy - s * 0.5f);
     if (bar_icon("##bell", IC_BELL, bell_at, s, tr(S::Notifications), unread ? &C::accent : nullptr)) {
         A.seen_activity = A.activity.size();
+        A.update_seen = true;
         ImGui::OpenPopup("##notif");
     }
     bool py = A.python.found();
@@ -5089,6 +5654,8 @@ void init(float ui_scale) {
         else if (key == "project" && !value.empty()) A.recent_projects.push_back(value);
         else if (key == "dataset" && !value.empty()) A.recent_data.push_back(value);
         else if (key == "fold") A.sidebar_folded = value == "1";
+        else if (key == "update_check") A.update_check = value != "0";
+        else if (key == "gpu") A.use_gpu = value == "1";
     }
     set_language(lang);
     const char* shown_user = std::getenv("KOR_USER");
@@ -5118,6 +5685,8 @@ void shutdown() {
     for (auto& r : A.recent_projects) out << "project " << r << "\n";
     for (auto& r : A.recent_data) out << "dataset " << r << "\n";
     out << "fold " << (A.sidebar_folded ? 1 : 0) << "\n";
+    out << "update_check " << (A.update_check ? 1 : 0) << "\n";
+    out << "gpu " << (A.use_gpu ? 1 : 0) << "\n";
     for (auto& kv : A.saved_args) {
         auto p = std::find_if(A.plugins.begin(), A.plugins.end(), [&](const Plugin& x) { return x.file == kv.first; });
         if (p != A.plugins.end() && p->args == kv.second) continue;  // still the default
@@ -5180,7 +5749,7 @@ void generate_media() {
 
 void start_training() { begin_training(); }
 
-void set_train_tab(int tab) { A.train_tab = std::max(0, std::min(3, tab)); }
+void set_train_tab(int tab) { A.train_tab = std::max(0, std::min(4, tab)); }
 
 void use_skills_for_session(const char* const* files, int n) {
     A.skills_on.clear();
@@ -5192,6 +5761,19 @@ void keep_settings() { A.save_settings = false; }
 void scroll_to_end() { A.scroll_end = true; }
 
 void load_community_list() { A.want_community = true; }
+
+void open_settings() { A.want_settings = true; }
+
+void open_clean() {
+    if (A.data.kind != DATA_TEXT) return;
+    A.want_clean = true;
+    A.page = PAGE_DATA;
+}
+
+void check_updates() {
+    A.update_started = true;
+    start_update_check();
+}
 
 void set_custom_frame(bool on, bool maximized) {
     A.custom_frame = on;
@@ -5212,6 +5794,10 @@ int take_window_command() {
 }
 
 void frame() {
+    if (!A.update_started) {
+        A.update_started = true;  // after keep_settings(): screenshot runs stay offline
+        if (A.update_check && A.save_settings) start_update_check();
+    }
     pump_events();
     poll_plugin();
     chat_pump();

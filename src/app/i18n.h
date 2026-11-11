@@ -23,7 +23,9 @@
     X(RamFmt, "%.1f GB total, %.1f GB free", "%.1f GB toplam, %.1f GB boş", "%.1f ГБ всего, %.1f ГБ свободно") \
     X(Simd, "Acceleration", "Hızlandırma", "Ускорение") \
     X(Gpu, "Graphics", "Ekran kartı", "Видеокарта") \
-    X(GpuNote, "Training currently runs on the CPU. A GPU backend is on the roadmap.", "Eğitim şu an işlemcide çalışır. Ekran kartı desteği yol haritasında.", "Сейчас обучение идёт на процессоре. Поддержка видеокарт — в планах.") \
+    X(GpuNote, "Training runs on the CPU; text models can use the graphics card for the large matrix products (experimental, OpenCL).", "Eğitim işlemcide çalışır; metin modelleri büyük matris çarpımları için ekran kartını kullanabilir (deneysel, OpenCL).", "Обучение идёт на процессоре; текстовые модели могут считать большие матричные произведения на видеокарте (экспериментально, OpenCL).") \
+    X(UseGpu, "Graphics card (experimental)", "Ekran kartı (deneysel)", "Видеокарта (эксперимент.)") \
+    X(UseGpuHelp, "Runs the large matrix products on the graphics card through OpenCL. At the start the results are checked against the CPU and both are timed; if the card is missing, wrong or slower, training stays on the CPU. The log says which one is used.", "Büyük matris çarpımlarını OpenCL ile ekran kartında yapar. Başta sonuçlar işlemciyle karşılaştırılır ve ikisinin hızı ölçülür; kart yoksa, hatalıysa ya da daha yavaşsa eğitim işlemcide kalır. Hangisinin kullanıldığı günlükte yazar.", "Считает большие матричные произведения на видеокарте через OpenCL. В начале результаты сверяются с процессором и замеряется скорость; если карты нет, она ошибается или медленнее, обучение остаётся на процессоре. Что используется, видно в журнале.") \
     X(QuickStart, "Quick start", "Hızlı başlangıç", "Быстрый старт") \
     X(Step1, "Load text, a CSV table, images or sound", "Metin, CSV tablosu, resim veya ses yükle", "Загрузите текст, таблицу CSV, изображения или звук") \
     X(Step2, "Let Kor pick a model that fits your computer", "Kor bilgisayarına uygun modeli seçsin", "Позвольте Kor подобрать модель под ваш компьютер") \
@@ -436,7 +438,41 @@
     X(TileReady, "Ready", "Hazır", "Готово") \
     X(TileNoModel, "None loaded", "Yüklü değil", "Не загружена") \
     X(TileDetected, "Detected", "Algılandı", "Обнаружен") \
-    X(TileNoGpu, "None", "Yok", "Нет")
+    X(TileNoGpu, "None", "Yok", "Нет") \
+    X(UpdateAvailable, "New version available: %s", "Yeni sürüm var: %s", "Доступна новая версия: %s") \
+    X(UpdateDownload, "Download", "İndir", "Скачать") \
+    X(UpdateAtStart, "Check for updates at startup", "Açılışta güncellemeleri denetle", "Проверять обновления при запуске") \
+    X(UpdateNow, "Check now", "Şimdi denetle", "Проверить сейчас") \
+    X(UpdateLatest, "You have the latest version.", "En güncel sürümü kullanıyorsun.", "У вас последняя версия.") \
+    X(UpdateChecking, "Checking for updates...", "Güncellemeler denetleniyor...", "Проверка обновлений...") \
+    X(UpdateFailed, "Could not check for updates: %s", "Güncellemeler denetlenemedi: %s", "Не удалось проверить обновления: %s") \
+    X(Updates, "Updates", "Güncellemeler", "Обновления") \
+    X(TabCompare, "Compare", "Karşılaştır", "Сравнение") \
+    X(CompareEmpty, "Every finished or stopped training is kept here, so you can compare the curves and results of different settings.", "Biten veya durdurulan her eğitim burada saklanır; farklı ayarların eğrilerini ve sonuçlarını karşılaştırabilirsin.", "Здесь хранится каждое завершённое или остановленное обучение, чтобы сравнивать кривые и результаты разных настроек.") \
+    X(CompareHint, "Tick the trainings to draw on the chart. The best value of each column is green.", "Grafikte görmek istediğin eğitimleri işaretle. Her sütundaki en iyi değer yeşildir.", "Отметьте обучения для графика. Лучшее значение в каждом столбце — зелёное.") \
+    X(ColData, "Data", "Veri", "Данные") \
+    X(ColDate, "Date", "Tarih", "Дата") \
+    X(ColBestVal, "Best val. loss", "En iyi doğr. kaybı", "Лучшая ошибка проверки") \
+    X(DeleteRun, "Delete this record", "Bu kaydı sil", "Удалить запись") \
+    X(RunStopped, "stopped", "durduruldu", "остановлено") \
+    X(ServeApi, "Serve as API", "API olarak sun", "Запустить API") \
+    X(ServeApiHelp, "Starts kor-cli serve in a terminal: an OpenAI-compatible API at http://127.0.0.1:8080/v1 that other programs can use. Only this computer can reach it.", "kor-cli serve'ü bir terminalde başlatır: diğer programların kullanabileceği, http://127.0.0.1:8080/v1 adresinde OpenAI uyumlu bir API. Yalnızca bu bilgisayardan erişilebilir.", "Запускает kor-cli serve в терминале: API, совместимый с OpenAI, по адресу http://127.0.0.1:8080/v1 для других программ. Доступен только с этого компьютера.") \
+    X(Tools, "Tools:", "Araçlar:", "Инструменты:") \
+    X(CleanData, "Clean data", "Veriyi temizle", "Очистить данные") \
+    X(CleanHelp, "A tidy copy is saved as %s and loaded; your file stays as it is.", "Temiz bir kopya %s olarak kaydedilip yüklenir; asıl dosyan değişmez.", "Чистая копия сохраняется как %s и загружается; исходный файл не меняется.") \
+    X(CleanSpaces, "Fix spaces (line ends, tabs, double spaces)", "Boşlukları düzelt (satır sonları, sekmeler, çift boşluklar)", "Исправить пробелы (концы строк, табуляции, двойные пробелы)") \
+    X(CleanEmpty, "Remove empty lines", "Boş satırları kaldır", "Удалить пустые строки") \
+    X(CleanDupes, "Remove repeats", "Tekrarları kaldır", "Удалить повторы") \
+    X(CleanDupesHelp, "Dialogue: the same question with the same answer. Plain text: the same line, if it has at least 24 characters.", "Diyalogda: aynı soru ve aynı cevap. Düz metinde: en az 24 karakterlik aynı satır.", "Диалог: тот же вопрос с тем же ответом. Обычный текст: та же строка длиной от 24 символов.") \
+    X(CleanBroken, "Remove questions without an answer and answers without a question", "Cevapsız soruları ve sorusuz cevapları kaldır", "Удалить вопросы без ответа и ответы без вопроса") \
+    X(CleanPreview, "%d lines become %d: %d repeats, %d empty and %d broken lines go, %d lines are tidied.", "%d satır %d satıra iner: %d tekrar, %d boş ve %d yarım satır kaldırılır, %d satır düzeltilir.", "%d строк станет %d: удаляются повторы (%d), пустые (%d) и неполные (%d) строки, исправляется строк: %d.") \
+    X(CleanLoad, "Clean and load", "Temizle ve yükle", "Очистить и загрузить") \
+    X(CleanNothing, "Nothing to clean: the data is already tidy.", "Temizlenecek bir şey yok: veri zaten düzenli.", "Нечего очищать: данные уже в порядке.") \
+    X(CleanDone, "Cleaned: %d repeats and %d other lines removed, %d lines tidied. Saved as %s.", "Temizlendi: %d tekrar ve %d başka satır kaldırıldı, %d satır düzeltildi. %s olarak kaydedildi.", "Очищено: удалено повторов %d и других строк %d, исправлено строк %d. Сохранено как %s.") \
+    X(ImportJsonl, "Import JSONL", "JSONL içe aktar", "Импорт JSONL") \
+    X(ImportJsonlHelp, "Chat datasets in JSON Lines (OpenAI messages, ShareGPT, Alpaca, prompt/completion) become question-answer text saved next to the file.", "JSON Lines sohbet verileri (OpenAI messages, ShareGPT, Alpaca, prompt/completion) soru-cevap metnine çevrilip dosyanın yanına kaydedilir.", "Наборы чатов в JSON Lines (OpenAI messages, ShareGPT, Alpaca, prompt/completion) превращаются в текст вопрос-ответ рядом с файлом.") \
+    X(ImportDone, "Imported %d dialogues (%s) and saved them as %s.", "%d diyalog içe aktarıldı (%s), %s olarak kaydedildi.", "Импортировано диалогов: %d (%s), сохранено как %s.") \
+    X(CantWrite, "cannot write %s", "%s yazılamadı", "не удалось записать %s")
 
 enum class S {
 #define X(id, en, tr, ru) id,

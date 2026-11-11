@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(KorStudio VERSION 0.6.0 LANGUAGES C CXX)
+project(KorStudio VERSION 0.7.0 LANGUAGES C CXX)
 
 option(KOR_BUILD_GUI "Build the Kor Studio desktop application" ON)
 
@@ -19,6 +19,7 @@ endif()
 # ---------------------------------------------------------------- engine
 add_library(korcore STATIC
   src/core/parallel.cpp
+  src/core/gpu.cpp
   src/core/kernels.cpp
   src/core/kernels_base.cpp
   src/core/layers.cpp
@@ -52,23 +53,24 @@ if(NOT MSVC)
 endif()
 
 find_package(Threads REQUIRED)
-target_link_libraries(korcore PUBLIC Threads::Threads)
+target_link_libraries(korcore PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
 
 # Python training skills: child processes and the JSON line protocol.
 add_library(korskills STATIC
+  src/skills/datatools.cpp
   src/skills/json.cpp
   src/skills/process.cpp
   src/skills/skill.cpp)
 target_link_libraries(korskills PUBLIC korcore)
 
-add_executable(kor-cli src/cli/main.cpp)
+add_executable(kor-cli src/cli/main.cpp src/cli/serve.cpp)
 target_link_libraries(kor-cli PRIVATE korskills)
 # The `kor` Python library sits next to the executables (skills import it).
 add_custom_command(TARGET kor-cli POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_directory
           ${CMAKE_SOURCE_DIR}/python/kor $<TARGET_FILE_DIR:kor-cli>/python/kor)
 if(WIN32)
-  target_link_libraries(kor-cli PRIVATE shell32)
+  target_link_libraries(kor-cli PRIVATE shell32 ws2_32)
 endif()
 
 if(MINGW)
@@ -123,7 +125,7 @@ if(KOR_BUILD_GUI)
   add_executable(kor-studio WIN32 ${KOR_APP_SOURCES})
   target_link_libraries(kor-studio PRIVATE korskills imgui)
   if(WIN32)
-    target_link_libraries(kor-studio PRIVATE comdlg32 winmm shell32)
+    target_link_libraries(kor-studio PRIVATE comdlg32 winmm shell32 winhttp)
   endif()
   if(MSVC)
     target_link_options(kor-studio PRIVATE /ENTRY:mainCRTStartup)

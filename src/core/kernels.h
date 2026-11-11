@@ -15,7 +15,11 @@ struct Kernels {
     void (*axpy)(float a, const float* x, float* y, int n);  // y += a * x
 };
 
-// Returns the fastest kernel set supported by this CPU.
+// The kernels in use: the fastest CPU set, or the GPU set while gpu_use() is on.
 const Kernels& K();
+// The fastest kernel set supported by this CPU.
+const Kernels& cpu_kernels();
+// Replaces the kernels returned by K() (nullptr = back to the CPU set).
+void set_kernels(const Kernels* k);
 
 }  // namespace kor

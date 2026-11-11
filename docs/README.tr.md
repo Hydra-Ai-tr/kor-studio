@@ -28,8 +28,22 @@ işlemcide eğitilir.
   kapanırsa bir sonraki açılışta *Eğitime devam et* ile tam kaldığı adımdan sürer. Kayıt önce
   geçici dosyaya yazılır, bir önceki kayıt da yedek olarak tutulur; yarım yazılmış dosya eğitimi
   bozmaz.
+- **Eğitimleri karşılaştır** – biten ya da durdurulan her eğitim kaydedilir. *Karşılaştır*
+  sekmesi birkaç eğitimin doğrulama (ya da eğitim) kaybı eğrilerini tek grafikte gösterir; yanında
+  veri, model, adım, süre, en iyi kayıp, doğruluk ve test sonuçlarını içeren bir tablo vardır.
+- **Veri araçları** – JSON Lines sohbet verilerini (OpenAI `messages`, ShareGPT, Alpaca,
+  `prompt`/`completion`) soru-cevap metni olarak içe aktar; eğitimden önce metni temizle:
+  boşlukları düzelt, boş satırları, tekrarlanan soru-cevapları ve cevapsız soruları kaldır. Araç,
+  temiz kopyayı yazmadan önce neyin değişeceğini gösterir; asıl dosyan değişmez.
+- **Ekran kartı (deneysel)** – metin modelleri büyük matris çarpımlarını OpenCL ile ekran kartında
+  yapabilir. Başta sonuçlar işlemciyle karşılaştırılır ve ikisinin hızı ölçülür; kart yoksa,
+  hatalıysa ya da daha yavaşsa eğitim işlemcide kalır.
 - **Sohbet** – eğitimi biten modeller otomatik kaydedilir; Sohbet sayfasında bir `.kor` modeli seç
   ve onunla konuşarak dene (sıcaklık, cevap uzunluğu, konuşmayı hatırlama ayarlarıyla).
+- **Yerel, OpenAI uyumlu API** – `kor-cli serve` (ya da Sohbet sayfasındaki *API olarak sun*)
+  modeli `http://127.0.0.1:8080/v1` adresinde sunar; OpenAI API'si için yazılmış araçlar onu
+  kullanabilir.
+- **Güncelleme bildirimi** – yeni sürüm çıkınca uygulama haber verir (ayarlardan kapatılabilir).
 - **Projeler** – bir proje klasörü veri setini, modelini, eğitim ayarlarını ve soru testlerini bir
   arada tutar; eğitim bitince ve program kapanırken kendini kaydeder. Ana sayfada son projeler,
   son işlemler, model ve veri seti sayıları ile canlı CPU, RAM ve GPU belleği kullanımı görünür.
@@ -62,14 +76,30 @@ işlemcide eğitilir.
 | LoRA ince ayar | Ağırlıkların çok küçük bir kısmını eğiterek eğitilmiş modeli uyarlama |
 | Yarı hassasiyetli kayıt | Kayıtlı modeller diskte yarı yer kaplar |
 | Çalışma anında SIMD seçimi | İşlemci destekliyorsa AVX2/FMA, desteklemiyorsa taşınabilir çekirdekler |
+| İsteğe bağlı OpenCL | Büyük matris çarpımları ekran kartında; işlemciyle karşılaştırılıp hızı ölçülerek |
+
+## İndir
+
+**Windows:** [son sürümden](https://github.com/Hydra-Ai-tr/kor-studio/releases/latest)
+`kor-studio-<sürüm>-setup.exe` kurulum dosyasını (kullanıcına kurar, Başlat menüsüne ekler,
+istersen `kor-cli`'yi PATH'e ekler) ya da taşınabilir `kor-studio-<sürüm>-windows-x64.zip`
+dosyasını indir (açıp `kor-studio.exe`'yi çalıştır). Windows 10 veya üstü gerekir; Python 3 yalnızca
+eklentiler için gerekir. Programlar henüz kod imzalı değil, bu yüzden Windows SmartScreen onay
+isteyebilir (*Ek bilgi* → *Yine de çalıştır*).
+
+**Linux:** CI'ın yayımladığı sürümlerde `kor-studio-<sürüm>-linux-x86_64.tar.gz` bulunur (Ubuntu
+22.04'te derlenir). **macOS:** kaynaktan derle.
 
 ### Dürüstçe: ne beklemeli
 
-Kor Studio v0.5 eğitimi **işlemcide** yapar. Küçük modeller içindir: tablo ağları ve birkaç milyon
+Kor Studio eğitimi esas olarak **işlemcide** yapar. Küçük modeller içindir: tablo ağları ve birkaç milyon
 parametreye kadar transformer'lar; bunlar bir dizüstünde saniyeler ya da dakikalar içinde eğitilir.
 Resim ve ses modelleri daha yavaştır (her piksel ya da örnek bir parçadır); iyi sonuç için onlarca
 dakika ile saatler gerekir. Basit şekiller ve kısa melodiler bekle, fotoğraf ya da konuşma değil. ChatGPT boyutunda bir modeli dizüstünde eğitmez; bunu hiçbir program
-yapamaz. Ekran kartı desteği yol haritasındadır.
+yapamaz. Ekran kartı desteği deneyseldir ve yalnızca büyük matris çarpımlarını kapsar: dikkat
+katmanı ve optimizer işlemcide kalır, bu yüzden kazanç modele bağlıdır. Bir RTX 3050 Ti Laptop
+GPU'da eğitim boyutundaki çarpımlar (2048 x 256 x 768), kopyalama dahil işlemciden 5-9 kat
+hızlı çalıştı; `kor-cli gpu` kendi bilgisayarındaki karşılaştırmayı yazar.
 
 ## Derleme
 
@@ -81,6 +111,14 @@ cmake -S . -B build -G Ninja
 cmake --build build
 ./build/bin/kor-studio
 ```
+
+Linux'ta önce GLFW bağımlılıklarını kur:
+`sudo apt install xorg-dev libgl1-mesa-dev libwayland-dev libxkbcommon-dev wayland-protocols`.
+Sürüm paketleri `scripts/package.ps1` (Windows: klasör, zip ve [Inno Setup 6](https://jrsoftware.org/isinfo.php)
+kuruluysa `installer/kor-studio.iss` ile kurulum dosyası) ve `scripts/package.sh` (Linux, macOS:
+`.tar.gz`) ile hazırlanır; `KOR_SIGN_PFX` ve `KOR_SIGN_PASSWORD` tanımlıysa Windows programları ve
+kurulum dosyası imzalanır. [GitHub Actions](../.github/workflows/build.yml) her gönderimde
+Windows ve Linux'ta derleyip test eder; `v*` etiketi sürümü de paketleyip yayımlar.
 
 ### Komut satırı
 
@@ -96,7 +134,30 @@ kor-cli demo-images resimler && kor-cli train resimler --out resim.kor
 kor-cli generate resim.kor --count 16 --out yeni.png
 kor-cli demo-sounds melodiler && kor-cli train melodiler --out ses.kor
 kor-cli generate ses.kor --seconds 3 --out yeni.wav
+kor-cli data import sohbetler.jsonl --out sohbetler.txt   # JSON Lines sohbet verisi -> diyalog metni
+kor-cli data clean sohbetler.txt                          # temiz kopya: sohbetler-clean.txt
+kor-cli serve sohbet.kor --port 8080                      # OpenAI uyumlu API
+kor-cli gpu                                               # ekran kartını işlemciyle karşılaştır
+kor-cli train buyuk.txt --gpu --out llm.kor               # büyük çarpımlar ekran kartında (deneysel)
 ```
+
+**Yerel API.** `kor-cli serve model.kor`, `http://127.0.0.1:8080/v1` adresinde OpenAI'nin
+`/v1/models`, `/v1/chat/completions` ve `/v1/completions` uçlarını (akışlı yanıt dahil) sunar.
+Sohbet mesajları modelin diyalog biçimine çevrilir (varsayılan `Kullanıcı: ` / `Asistan: `, ya da
+modelde kayıtlı etiketler). Varsayılan olarak yalnızca bu bilgisayar erişebilir; `--host 0.0.0.0`
+ağa açar, o zaman `--api-key ANAHTAR` da kullanılmalı.
+
+```bash
+curl http://127.0.0.1:8080/v1/chat/completions -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"Merhaba, nasılsın?"}],"max_tokens":80}'
+```
+
+**Veri araçları.** `kor-cli data import` JSON Lines (ya da tek bir JSON dizisi) okur: OpenAI
+`messages` (sistem mesajları atlanır), ShareGPT `conversations`, Alpaca `instruction`/`input`/`output`,
+`prompt`/`completion` ve `question`/`answer` kayıtları soru ve cevap satırlarına, yalnızca `text`
+içeren kayıtlar paragraflara dönüşür. Uygulamada bir `.jsonl` dosyası yüklemek onu aynı şekilde
+içe aktarır. `kor-cli data clean` temiz bir kopya yazar (`--keep-duplicates` ve `--keep-empty`
+ilgili adımı kapatır).
 
 ## Lisans
 

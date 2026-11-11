@@ -17,6 +17,11 @@
 #include <dxgi.h>
 #include <pdh.h>
 #include <pdhmsg.h>
+#include <winhttp.h>
+
+#define KOR_WIDEN2(x) L##x
+#define KOR_WIDEN(x) KOR_WIDEN2(x)
+#define KOR_VERSION_W KOR_WIDEN(KOR_VERSION)
 
 #include <algorithm>
 #include <cwchar>
@@ -40,7 +45,8 @@ static std::string file_dialog(int kind, bool save) {
     ofn.nMaxFile = 4096;
     ofn.lpstrFilter = kind == DLG_MODEL     ? L"Kor model (*.kor)\0*.kor\0All files\0*.*\0"
                       : kind == DLG_PROJECT ? L"Kor project (project.korproj)\0*.korproj\0All files\0*.*\0"
-                                            : L"Data (*.txt;*.csv;*.tsv;*.png;*.bmp;*.ppm;*.pgm;*.wav)\0*.txt;*.csv;*.tsv;*.png;*.bmp;*.ppm;*.pgm;*.wav\0"
+                                            : L"Data (*.txt;*.csv;*.tsv;*.jsonl;*.json;*.png;*.bmp;*.ppm;*.pgm;*.wav)\0"
+                                              L"*.txt;*.csv;*.tsv;*.jsonl;*.json;*.png;*.bmp;*.ppm;*.pgm;*.wav\0"
                                               L"All files\0*.*\0";
     ofn.Flags = OFN_NOCHANGEDIR | (save ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST);
     if (save) ofn.lpstrDefExt = L"kor";
@@ -326,11 +332,72 @@ void open_terminal(const std::string& dir) {
     ShellExecuteW(nullptr, L"open", L"cmd.exe", args.c_str(), widen(dir).c_str(), SW_SHOWNORMAL);
 }
 
+void run_in_terminal(const std::string& dir, const std::vector<std::string>& args) {
+    // cmd /K "<line>" drops the outer quotes and keeps the window open afterwards.
+    std::wstring line;
+    for (const std::string& a : args) {
+        std::wstring w = widen(a);
+        w.erase(std::remove_if(w.begin(), w.end(), [](wchar_t c) { return c == L'"' || c == L'%'; }), w.end());
+        line += (line.empty() ? L"\"" : L" \"") + w + L"\"";
+    }
+    std::wstring params = L"/K \"" + line + L"\"";
+    ShellExecuteW(nullptr, L"open", L"cmd.exe", params.c_str(), widen(dir).c_str(), SW_SHOWNORMAL);
+}
+
 bool play_wav(const std::string& path) {
     return PlaySoundW(widen(path).c_str(), nullptr, SND_FILENAME | SND_ASYNC | SND_NODEFAULT) != FALSE;
 }
 
 void stop_sound() { PlaySoundW(nullptr, nullptr, 0); }
+
+bool http_get(const std::string& url, std::string& body, std::string& err) {
+    body.clear();
+    std::wstring wurl = widen(url);
+    URL_COMPONENTS uc{};
+    uc.dwStructSize = sizeof uc;
+    wchar_t host[256] = {}, path[2048] = {};
+    uc.lpszHostName = host;
+    uc.dwHostNameLength = 256;
+    uc.lpszUrlPath = path;
+    uc.dwUrlPathLength = 2048;
+    if (!WinHttpCrackUrl(wurl.c_str(), 0, 0, &uc)) {
+        err = "bad URL";
+        return false;
+    }
+    HINTERNET s = WinHttpOpen(L"KorStudio/" KOR_VERSION_W, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
+                              WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!s) {
+        err = "WinHttpOpen failed";
+        return false;
+    }
+    WinHttpSetTimeouts(s, 5000, 5000, 10000, 10000);
+    bool ok = false;
+    HINTERNET c = WinHttpConnect(s, host, uc.nPort, 0);
+    HINTERNET r = c ? WinHttpOpenRequest(c, L"GET", path, nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                         uc.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0)
+                    : nullptr;
+    if (r && WinHttpSendRequest(r, L"Accept: application/json\r\n", (DWORD)-1L, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+        WinHttpReceiveResponse(r, nullptr)) {
+        DWORD status = 0, len = sizeof status;
+        WinHttpQueryHeaders(r, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status,
+                            &len, WINHTTP_NO_HEADER_INDEX);
+        DWORD avail = 0;
+        while (WinHttpQueryDataAvailable(r, &avail) && avail > 0 && body.size() < (8u << 20)) {
+            std::string chunk(avail, '\0');
+            DWORD got = 0;
+            if (!WinHttpReadData(r, &chunk[0], avail, &got) || got == 0) break;
+            body.append(chunk.data(), got);
+        }
+        ok = status >= 200 && status < 300;
+        if (!ok) err = "HTTP " + std::to_string(status);
+    } else {
+        err = "network error " + std::to_string(GetLastError());
+    }
+    if (r) WinHttpCloseHandle(r);
+    if (c) WinHttpCloseHandle(c);
+    WinHttpCloseHandle(s);
+    return ok;
+}
 
 #else  // POSIX
 
@@ -340,6 +407,7 @@ void stop_sound() { PlaySoundW(nullptr, nullptr, 0); }
 #include <cstring>
 #include <fcntl.h>
 #include <poll.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -527,12 +595,51 @@ void open_terminal(const std::string& dir) {
     _exit(127);
 }
 
+void run_in_terminal(const std::string& dir, const std::vector<std::string>& args) {
+    std::string line;
+    for (const std::string& a : args) {
+        std::string q = "'";
+        for (char c : a) q += c == '\'' ? std::string("'\\''") : std::string(1, c);
+        line += (line.empty() ? "" : " ") + q + "'";
+    }
+#if defined(__APPLE__)
+    std::string script = config_dir() + "/run.command";
+    if (FILE* f = std::fopen(script.c_str(), "w")) {
+        std::fprintf(f, "#!/bin/sh\ncd '%s'\n%s\n", dir.c_str(), line.c_str());
+        std::fclose(f);
+        chmod(script.c_str(), 0755);
+        run_process({"open", script}, line);
+    }
+#else
+    pid_t pid = fork();
+    if (pid != 0) return;
+    if (chdir(dir.c_str()) != 0) _exit(1);
+    setsid();
+    std::string sh = line + "; exec sh";
+    execlp("x-terminal-emulator", "x-terminal-emulator", "-e", "sh", "-c", sh.c_str(), (char*)nullptr);
+    execlp("xterm", "xterm", "-e", "sh", "-c", sh.c_str(), (char*)nullptr);
+    _exit(127);
+#endif
+}
+
 int system_language() {
     const char* l = std::getenv("LANG");
     std::string s = l ? l : "";
     if (s.rfind("tr", 0) == 0) return LANG_TR;
     if (s.rfind("ru", 0) == 0) return LANG_RU;
     return LANG_EN;
+}
+
+bool http_get(const std::string& url, std::string& body, std::string& err) {
+    body.clear();
+    std::string out;
+    int code = run_process({"curl", "-fsSL", "--max-time", "15", "-H", "Accept: application/json", url}, out);
+    if (code != 0) {
+        err = code == -1 ? "curl not found" : "curl exit " + std::to_string(code);
+        return false;
+    }
+    body = std::move(out);
+    return true;
 }
 
 #endif

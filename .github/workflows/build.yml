@@ -1,0 +1,137 @@
+# Builds and tests Kor Studio on Windows and Linux for every push and pull
+# request. A tag such as v0.7.0 also packs the release (zip, installer,
+# tar.gz) and publishes it on GitHub.
+#
+# Optional code signing for Windows: add the repository secrets
+#   WINDOWS_PFX_BASE64    the .pfx certificate, base64 encoded
+#   WINDOWS_PFX_PASSWORD  its password
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            git
+
+      - name: Build
+        shell: msys2 {0}
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+
+      - name: Test
+        shell: msys2 {0}
+        run: ./build/bin/kor-cli.exe selftest
+
+      - name: Install Inno Setup
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+
+      - name: Signing certificate
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          PFX: ${{ secrets.WINDOWS_PFX_BASE64 }}
+          PFX_PASSWORD: ${{ secrets.WINDOWS_PFX_PASSWORD }}
+        run: |
+          if ($env:PFX) {
+            $file = Join-Path $env:RUNNER_TEMP "sign.pfx"
+            [IO.File]::WriteAllBytes($file, [Convert]::FromBase64String($env:PFX))
+            "KOR_SIGN_PFX=$file" >> $env:GITHUB_ENV
+            "KOR_SIGN_PASSWORD=$env:PFX_PASSWORD" >> $env:GITHUB_ENV
+          } else {
+            Write-Host "No signing certificate: the release is unsigned"
+          }
+
+      - name: Package
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          ./scripts/package.ps1 -Version $version
+
+      - uses: actions/upload-artifact@v4
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          name: windows
+          path: |
+            build/release/*.zip
+            build/release/*-setup.exe
+
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build xorg-dev libgl1-mesa-dev libwayland-dev libxkbcommon-dev wayland-protocols
+
+      - name: Build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+
+      - name: Test
+        run: ./build/bin/kor-cli selftest
+
+      - name: Package
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: sh scripts/package.sh build
+
+      - uses: actions/upload-artifact@v4
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          name: linux
+          path: build/release/*.tar.gz
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          notes="docs/releases/${TAG}.md"
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          elif [ -f "$notes" ]; then
+            gh release create "$TAG" dist/* --title "Kor Studio ${TAG#v}" --notes-file "$notes" --latest
+          else
+            gh release create "$TAG" dist/* --title "Kor Studio ${TAG#v}" --generate-notes --latest
+          fi

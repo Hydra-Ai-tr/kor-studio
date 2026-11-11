@@ -128,11 +128,14 @@ int main(int argc_ansi, char** argv_ansi) {
     //   --model <file.kor>  --generate (start the playground's picture or sound generation)
     //   --chat <file.kor>  --say <message> (repeatable; chat page)
     //   --project <folder or project.korproj>  --save-project <folder> (saves the loaded data and model there)
+    //   --settings (opens the settings window)  --check-updates (asks GitHub for the latest release)
+    //   --clean (opens the data cleaning window for the loaded text)
     // Screenshot runs leave the settings file unchanged.
     std::string shot, data, record, model, chat, project, save_project;
     std::vector<const char*> skills, says;
     int page = -1, lang = -1, tab = -1, width = 1320, height = 820;
     bool train = false, use_skills = false, bottom = false, community = false, generate = false;
+    bool settings = false, check_updates = false, clean = false;
     double delay = 1.0, every = 0.5;
     for (int i = 1; i < argc; ++i) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
@@ -154,6 +157,9 @@ int main(int argc_ansi, char** argv_ansi) {
         else if (!std::strcmp(argv[i], "--say")) says.push_back(next());
         else if (!std::strcmp(argv[i], "--project")) project = next();
         else if (!std::strcmp(argv[i], "--save-project")) save_project = next();
+        else if (!std::strcmp(argv[i], "--settings")) settings = true;
+        else if (!std::strcmp(argv[i], "--check-updates")) check_updates = true;
+        else if (!std::strcmp(argv[i], "--clean")) clean = true;
         else if (!std::strcmp(argv[i], "--lang")) {
             std::string l = next();
             lang = l == "tr" ? LANG_TR : l == "ru" ? LANG_RU : LANG_EN;
@@ -218,6 +224,9 @@ int main(int argc_ansi, char** argv_ansi) {
     }
     if (page >= 0) app::set_page(page);
     if (tab >= 0) app::set_train_tab(tab);
+    if (check_updates) app::check_updates();
+    if (settings) app::open_settings();
+    if (clean) app::open_clean();
 
     auto t0 = std::chrono::steady_clock::now();
     int frame_no = 0;

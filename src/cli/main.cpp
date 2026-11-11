@@ -1,10 +1,13 @@
 // kor-cli: headless companion to Kor Studio (system info, training, self-test,
 // generation and question tests). Also used by Python plugins.
+#include "../core/gpu.h"
 #include "../core/kernels.h"
 #include "../core/media.h"
 #include "../core/parallel.h"
 #include "../core/sysinfo.h"
+#include "../skills/datatools.h"
 #include "../skills/skill.h"
+#include "serve.h"
 
 #include <atomic>
 #include <chrono>
@@ -380,6 +383,20 @@ static int selftest() {
         std::printf("half float conversion %s\n", pass ? "OK" : "FAIL");
         if (!pass) ++fails;
     }
+    {
+        std::string out, err;
+        ImportReport ir;
+        bool pass = import_jsonl("{\"messages\":[{\"role\":\"system\",\"content\":\"x\"},{\"role\":\"user\",\"content\":\"Hi\\nthere\"},"
+                                 "{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}]}]}\n"
+                                 "{\"instruction\":\"Add\",\"input\":\"1+1\",\"output\":\"2\"}\nbroken\n",
+                                 "Q: ", "A: ", out, ir, &err) &&
+                    out == "Q: Hi there\nA: Hello\nQ: Add 1+1\nA: 2\n" && ir.dialogues == 2 && ir.skipped == 1;
+        CleanReport cr;
+        std::string c = clean_text("Q: a  b \nA: c\n\nQ: a b\nA: c\nQ: lost\nQ: d\nA: e\n", "Q: ", "A: ", CleanOptions(), cr);
+        pass = pass && c == "Q: a b\nA: c\nQ: d\nA: e\n" && cr.duplicates == 1 && cr.broken == 1 && cr.empty == 1;
+        std::printf("dataset tools (JSONL import, cleaning) %s\n", pass ? "OK" : "FAIL");
+        if (!pass) ++fails;
+    }
     std::printf(fails ? "SELFTEST FAILED (%d)\n" : "SELFTEST PASSED\n", fails);
     return fails ? 1 : 0;
 }
@@ -523,6 +540,7 @@ static int train(const std::vector<std::string>& a) {
     num("--dropout", plan.cfg.dropout);
     num("--wd", plan.cfg.weight_decay);
     num("--ema", plan.cfg.ema);
+    plan.cfg.gpu = has_flag(a, "--gpu");
     std::printf("auto plan: %zu parameters, ~%.0f MB RAM, batch %d x%d, %d steps, %d threads, kernels %s\n",
                 plan.params, plan.est_ram_mb, plan.cfg.batch, plan.cfg.accum, plan.cfg.steps, plan.cfg.threads, K().name);
     if (kind == DATA_TEXT)
@@ -561,6 +579,7 @@ static int train(const std::vector<std::string>& a) {
         c.probes = plan.cfg.probes;
         c.hooks = plan.cfg.hooks;
         c.threads = plan.cfg.threads;
+        c.gpu = plan.cfg.gpu;
         plan.cfg = c;
     }
     if (use_ckpt) {
@@ -759,6 +778,115 @@ static int test(const std::vector<std::string>& a) {
     return 0;
 }
 
+static bool write_text(const std::string& path, const std::string& text) {
+    std::ofstream o(upath(path), std::ios::binary);
+    o << text;
+    return (bool)o;
+}
+
+static std::string sibling(const std::string& path, const char* suffix) {
+    std::filesystem::path p = upath(path);
+    return (p.parent_path() / (p.stem().u8string() + suffix)).u8string();
+}
+
+// kor-cli data clean <text> [--out file] [--keep-duplicates] [--keep-empty]
+// kor-cli data import <file.jsonl> [--out file] [--q-tag "Kullanıcı: "] [--a-tag "Asistan: "]
+static int data_tool(const std::vector<std::string>& a) {
+    const std::string& sub = a[2];
+    const std::string& in = a[3];
+    std::string text;
+    if (!read_text(in, text)) { std::printf("error: cannot read %s\n", in.c_str()); return 1; }
+    if (sub == "import") {
+        std::string out, err;
+        ImportReport r;
+        if (!import_jsonl(text, flag(a, "--q-tag", "Kullanıcı: "), flag(a, "--a-tag", "Asistan: "), out, r, &err)) {
+            std::printf("error: %s\n", err.c_str());
+            return 1;
+        }
+        std::string dst = flag(a, "--out", sibling(in, ".txt").c_str());
+        if (!write_text(dst, out)) { std::printf("error: cannot write %s\n", dst.c_str()); return 1; }
+        std::printf("%zu records (%s): %zu dialogues, %zu turns, %zu skipped\nwrote %s\n", r.records, r.format.c_str(), r.dialogues,
+                    r.turns, r.skipped, dst.c_str());
+        return 0;
+    }
+    if (sub == "clean") {
+        Dataset d;
+        std::string err, qt, at;
+        if (d.load_text(in, &err)) d.dialogue_tags(qt, at);
+        CleanOptions o;
+        o.dedupe = !has_flag(a, "--keep-duplicates");
+        o.drop_empty = !has_flag(a, "--keep-empty");
+        CleanReport r;
+        std::string out = clean_text(text, qt, at, o, r);
+        std::string dst = flag(a, "--out", sibling(in, "-clean.txt").c_str());
+        if (!write_text(dst, out)) { std::printf("error: cannot write %s\n", dst.c_str()); return 1; }
+        if (!qt.empty()) std::printf("dialogue: \"%s\" / \"%s\"\n", qt.c_str(), at.c_str());
+        std::printf("%zu -> %zu lines: %zu duplicates, %zu empty, %zu broken removed, %zu tidied\nwrote %s\n", r.lines_in, r.lines_out,
+                    r.duplicates, r.empty, r.broken, r.changed, dst.c_str());
+        return 0;
+    }
+    std::printf("error: unknown data command %s (clean or import)\n", sub.c_str());
+    return 1;
+}
+
+// kor-cli gpu: finds the OpenCL GPU, checks its products against the CPU and times both.
+static int gpu_check() {
+    const GpuInfo& g = gpu_probe();
+    if (!g.found) { std::printf("no usable GPU: %s\n", g.error.c_str()); return 1; }
+    std::printf("GPU: %s (%s, %.1f GB, %s)\n", g.name.c_str(), g.vendor.c_str(), g.mem_gb, g.platform.c_str());
+    const Kernels& cpu = cpu_kernels();
+    Rng rng(7);
+    const char* names[] = {"mm   ", "mm_ta", "mm_tb"};
+    // x, y, z in the argument order of each product; the last ones are shapes of a text model step.
+    const int shapes[][3] = {{67, 45, 83}, {129, 257, 63}, {512, 512, 512}, {2048, 256, 768}, {2048, 768, 256}};
+    bool all_ok = true;
+    std::printf("\n%-6s %-16s %10s %10s %9s %10s\n", "", "size", "CPU ms", "GPU ms", "speed", "max error");
+    for (const auto& s : shapes)
+        for (int v = 0; v < 3; ++v) {
+            int x = s[0], y = s[1], z = s[2];
+            size_t na = (size_t)x * y, nb = v == 0 ? (size_t)y * z : (size_t)x * z, nc = v == 1 ? (size_t)y * z : (size_t)x * z;
+            if (v == 2) nb = (size_t)z * y;
+            std::vector<float> A(na), B(nb), C0(nc), C1, C2;
+            for (float& f : A) f = rng.normal();
+            for (float& f : B) f = rng.normal();
+            for (float& f : C0) f = rng.normal();
+            auto time_it = [&](bool gpu, std::vector<float>& C) {
+                double best = 1e9;
+                for (int r = 0; r < 3; ++r) {
+                    C = C0;
+                    auto t0 = std::chrono::steady_clock::now();
+                    std::string err;
+                    if (gpu && !gpu_gemm(v, A.data(), B.data(), C.data(), x, y, z, &err)) {
+                        std::printf("GPU error: %s\n", err.c_str());
+                        return -1.0;
+                    }
+                    if (!gpu) {
+                        if (v == 0) cpu.mm(A.data(), B.data(), C.data(), x, y, z);
+                        else if (v == 1) cpu.mm_ta(A.data(), B.data(), C.data(), x, y, z);
+                        else cpu.mm_tb(A.data(), B.data(), C.data(), x, y, z);
+                    }
+                    best = std::min(best, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+                }
+                return best * 1000;
+            };
+            double tc = time_it(false, C1), tg = time_it(true, C2);
+            if (tg < 0) return 1;
+            double err = 0;
+            for (size_t i = 0; i < nc; ++i) err = std::max(err, (double)std::fabs(C1[i] - C2[i]) / (1.0 + std::fabs(C1[i])));
+            bool ok = err < 1e-3;
+            all_ok = all_ok && ok;
+            char size[32];
+            std::snprintf(size, sizeof size, "%dx%dx%d", x, y, z);
+            std::printf("%-6s %-16s %10.2f %10.2f %8.2fx %10.1e%s\n", names[v], size, tc, tg, tc / tg, err, ok ? "" : "  WRONG");
+        }
+    std::string msg;
+    bool on = gpu_use(true, &msg);
+    gpu_use(false);
+    std::printf("\n%s: %s\n", all_ok ? "results match the CPU" : "RESULTS DIFFER FROM THE CPU", msg.c_str());
+    std::printf("training with --gpu %s\n", on ? "will use it for the large products" : "stays on the CPU");
+    return all_ok ? 0 : 1;
+}
+
 int main(int argc, char** argv) {
 #if defined(_WIN32)
     SetConsoleOutputCP(CP_UTF8);
@@ -767,6 +895,7 @@ int main(int argc, char** argv) {
     std::string cmd = a.size() > 1 ? a[1] : "";
     if (cmd == "sysinfo") { print_sysinfo(); return 0; }
     if (cmd == "selftest") return selftest();
+    if (cmd == "gpu") return gpu_check();
     if (cmd == "demo-data" && a.size() > 2) {
         bool ok = write_spiral_csv(a[2]);
         std::printf(ok ? "wrote %s\n" : "cannot write %s\n", a[2].c_str());
@@ -782,9 +911,12 @@ int main(int argc, char** argv) {
     if (cmd == "train" && a.size() > 2) return train(a);
     if (cmd == "generate" && a.size() > 2) return generate(a);
     if (cmd == "test" && a.size() > 3) return test(a);
+    if (cmd == "serve" && a.size() > 2) return serve(a);
+    if (cmd == "data" && a.size() > 3) return data_tool(a);
     std::printf("Kor Studio CLI\n"
                 "  kor-cli sysinfo                      show detected hardware\n"
                 "  kor-cli selftest                     verify the training engine\n"
+                "  kor-cli gpu                          check the OpenCL GPU against the CPU (experimental)\n"
                 "  kor-cli demo-data <out.csv>          write a demo classification dataset\n"
                 "  kor-cli demo-images <folder>         write demo pictures (for an image model)\n"
                 "  kor-cli demo-sounds <folder>         write demo melodies (for a sound model)\n"
@@ -796,7 +928,7 @@ int main(int argc, char** argv) {
                 "                [--skill \"skill.py [args]\"]... [--python <command>] [--lang en|tr|ru]\n"
                 "                [--from model.kor [--lora R]]        fine-tune a saved model\n"
                 "                [--dim N] [--layers N] [--heads N] [--ctx N]   text model size\n"
-                "                [--lr X] [--batch N] [--threads N] [--seed N] [--wd X]\n"
+                "                [--lr X] [--batch N] [--threads N] [--seed N] [--wd X] [--gpu]\n"
                 "                [--align 0..1] [--prompt-weight 0..1] [--dropout X] [--ema 0.999]\n"
                 "                [--resume|--fresh] [--checkpoint file] [--checkpoint-every 60] [--no-checkpoint]\n"
                 "                      autosave (default <out>.autosave); Ctrl+C stops and saves\n"
@@ -804,6 +936,13 @@ int main(int argc, char** argv) {
                 "                image model: [--count 16] [--out generated.png]\n"
                 "                sound model: [--seconds 3] [--out generated.wav]\n"
                 "  kor-cli test <model.kor> <tests.txt> [--data <text>] [--tsv]\n"
+                "  kor-cli serve <model.kor> [--port 8080] [--host 127.0.0.1] [--api-key KEY] [--cors]\n"
+                "                [--name ID] [--q-tag \"Kullanıcı: \"] [--a-tag \"Asistan: \"]\n"
+                "                      OpenAI-compatible API: /v1/chat/completions, /v1/completions, /v1/models\n"
+                "  kor-cli data clean <text> [--out file] [--keep-duplicates] [--keep-empty]\n"
+                "                      tidy spaces, drop repeated and broken question-answer pairs\n"
+                "  kor-cli data import <file.jsonl> [--out file] [--q-tag \"Kullanıcı: \"] [--a-tag \"Asistan: \"]\n"
+                "                      chat datasets (messages, ShareGPT, Alpaca, prompt/completion) to training text\n"
                 "\n"
                 "Question tests are written one per line as: question => expected answer\n");
     return cmd.empty() ? 0 : 1;

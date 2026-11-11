@@ -1,5 +1,6 @@
 #include "trainer.h"
 
+#include "gpu.h"
 #include "kernels.h"
 #include "parallel.h"
 
@@ -483,6 +484,12 @@ void Trainer::run() {
     Rng rng(cfg.seed * 7919 + 13);
     Optimizer opt(cfg.optimizer, cfg.weight_decay);
     std::vector<Param*> ps;
+    std::string gpu_msg;
+    bool gpu_on = cfg.gpu && gpu_use(true, &gpu_msg);
+    struct GpuOff {
+        bool on;
+        ~GpuOff() { if (on) gpu_use(false); }
+    } gpu_off{gpu_on};
     {
         std::lock_guard<std::mutex> lk(model_mu);
         ps = model.params();
@@ -493,6 +500,14 @@ void Trainer::run() {
         e.n2 = get_threads();
         e.text = K().name;
         emit(e);
+        if (cfg.gpu) {
+            TrainEvent g;
+            g.kind = EV_HOOK_LOG;
+            g.source = "GPU";
+            g.text = gpu_msg;
+            g.n1 = gpu_on ? TONE_GOOD : TONE_WARN;
+            emit(g);
+        }
     }
     Batch batch, vbatch;
     double active = 0;  // seconds spent training (pauses excluded)

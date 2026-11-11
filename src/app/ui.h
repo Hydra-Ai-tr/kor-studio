@@ -25,6 +25,9 @@ void use_skills_for_session(const char* const* files, int n);
 void keep_settings();
 void scroll_to_end();          // scrolls the page to the bottom once it is drawn
 void load_community_list();    // fetches the community plugin list once Python is found
+void open_settings();          // shows the settings window
+void check_updates();          // asks GitHub for the latest release now
+void open_clean();             // shows the cleaning window for the loaded text
 
 // The window frame drawn by the app (Windows): the title bar with the window
 // buttons. Its empty parts move the window.

@@ -30,6 +30,8 @@ Usage sample_usage();
 std::string user_name();  // the account the app runs under
 // Opens a terminal in `dir` where kor-cli (next to the app) can be run.
 void open_terminal(const std::string& dir);
+// Runs a command line in a new terminal window that stays open, in `dir`.
+void run_in_terminal(const std::string& dir, const std::vector<std::string>& args);
 int system_language();      // Lang value guessed from the OS locale
 
 // Runs a program (args[0]) with arguments and waits for it. Standard output
@@ -45,6 +47,8 @@ int run_process(const std::vector<std::string>& args, std::string& output);
 // its "Python 3.x.y" banner.
 std::vector<std::string> find_python(std::string& version);
 void set_env(const char* name, const char* value);
+// Downloads a small text resource over HTTP(S). Blocking; call it off the UI thread.
+bool http_get(const std::string& url, std::string& body, std::string& err);
 void open_folder(const std::string& path);  // shows a folder in the file manager
 // Plays a WAV file in the background; a new sound replaces the one playing.
 bool play_wav(const std::string& path);

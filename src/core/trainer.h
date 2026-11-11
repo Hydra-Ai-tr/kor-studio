@@ -25,6 +25,7 @@ struct TrainConfig {
     int warmup = 30;
     float clip = 1.0f;    // global gradient-norm clip (0 = off)
     int threads = 0;      // 0 = keep current
+    bool gpu = false;     // experimental: large matrix products on an OpenCL GPU (see gpu.h)
     int eval_every = 50;
     int eval_batches = 8;
     int optimizer = OPT_ADAMW;
