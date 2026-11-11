@@ -147,7 +147,14 @@ static int pow2_at_least(int v) {
     return p;
 }
 
-AutoPlan autotune(const SysInfo& s, const Dataset& d) {
+double estimate_gpu_train_bytes(const ModelSpec& s) {
+    // as gpt_act_floats in gpu.cpp for one sequence of s.ctx tokens, training
+    double T = s.ctx, C = s.dim, att = (double)s.heads * T * T;
+    double act = s.nlayer * T * (12 * C + 4) + 7 * T * C + T * s.vocab + 11 * T + 2 * att + 13 * T * C;
+    return ((double)estimate_params(s) * 4 + act) * 4;
+}
+
+AutoPlan autotune(const SysInfo& s, const Dataset& d, double gpu_gb) {
     AutoPlan p;
     int threads = recommended_threads(s);
     p.cfg.threads = threads;
@@ -158,11 +165,19 @@ AutoPlan autotune(const SysInfo& s, const Dataset& d) {
 
     if (d.kind == DATA_TEXT) {
         struct Preset { int dim, heads, layers, ctx; };
-        static const Preset presets[5] = {
-            {48, 2, 2, 48}, {64, 4, 3, 64}, {128, 4, 4, 96}, {192, 6, 6, 128}, {256, 8, 6, 192}};
+        // 0-4 for the CPU; 5-9 (about 14M, 40M, 85M, 200M, 300M parameters) only on a GPU
+        static const Preset presets[10] = {
+            {48, 2, 2, 48},     {64, 4, 3, 64},      {128, 4, 4, 96},     {192, 6, 6, 128},    {256, 8, 6, 192},
+            {384, 6, 8, 256},   {512, 8, 12, 512},   {768, 12, 12, 512},  {1024, 16, 16, 512}, {1024, 16, 24, 1024}};
+        const bool on_gpu = gpu_gb > 0 && d.media == MEDIA_TEXT;
         int by_power = power < 4 ? 0 : power < 8 ? 1 : power < 16 ? 2 : power < 32 ? 3 : 4;
+        if (on_gpu) by_power = 9;
         size_t n = d.ids.size();
-        int by_data = n < 50000 ? 0 : n < 300000 ? 1 : n < 2000000 ? 2 : n < 20000000 ? 3 : 4;
+        // A model learns from text in proportion to its size: large ones need
+        // tens to hundreds of millions of tokens, or they only memorize.
+        int by_data = n < 50000 ? 0 : n < 300000 ? 1 : n < 2000000 ? 2 : n < 20000000 ? 3 : n < 60000000 ? 4
+                    : n < 200000000 ? 5 : n < 500000000 ? 6 : n < 1000000000 ? 7 : 8;
+        if (!on_gpu) by_data = std::min(by_data, 4);
         std::string q_tag, a_tag;
         bool dialogue = d.media == MEDIA_TEXT && d.dialogue_tags(q_tag, a_tag);
         // Exact answers need more model than the amount of text suggests: on
@@ -198,6 +213,20 @@ AutoPlan autotune(const SysInfo& s, const Dataset& d) {
             spec.rate = d.rate;
             if (d.media == MEDIA_IMAGE) spec.ctx = want_ctx;
             else spec.ctx = std::max(8, std::min(std::max(pr.ctx, want_ctx), (int)d.n_train / 4));
+            if (tier >= 5) {
+                // On the card: the model, its optimizer state and one sequence must
+                // fit (larger batches run in parts); the host keeps weights,
+                // gradients, moments and a best-weights copy.
+                double gpu_mb = estimate_gpu_train_bytes(spec) / (1024.0 * 1024.0);
+                double host_mb = (double)estimate_params(spec) * 4 * 5 / (1024.0 * 1024.0);
+                if (gpu_mb <= gpu_gb * 1024.0 * 0.8 && host_mb <= budget) {
+                    batch = spec.ctx >= 1024 ? 8 : 16;
+                    p.est_gpu_mb = gpu_mb;
+                    break;
+                }
+                --tier;
+                continue;
+            }
             double mb = (double)estimate_train_bytes(spec, batch) / (1024.0 * 1024.0);
             if (mb <= budget) break;
             if (batch > 4) batch /= 2;
@@ -208,7 +237,10 @@ AutoPlan autotune(const SysInfo& s, const Dataset& d) {
         p.spec = spec;
         p.cfg.batch = batch;
         p.cfg.accum = batch < 16 ? 16 / batch : 1;
-        p.cfg.lr = tier <= 1 ? 3e-3f : 1e-3f;
+        if (tier >= 5) p.cfg.accum = std::max(1, 64 / batch);  // about 32k tokens per step
+        // larger models need smaller steps
+        static const float lrs[10] = {3e-3f, 3e-3f, 1e-3f, 1e-3f, 1e-3f, 6e-4f, 4e-4f, 3e-4f, 2e-4f, 2e-4f};
+        p.cfg.lr = lrs[tier];
         double per_step = (double)batch * p.cfg.accum * spec.ctx;
         // Dialogue has to be learned answer by answer, which takes far more
         // passes than picking up the style of ordinary text. Question tests
@@ -216,8 +248,11 @@ AutoPlan autotune(const SysInfo& s, const Dataset& d) {
         // sound are learned from their own pixels and samples, many passes.
         double epochs = dialogue ? 250.0 : d.media == MEDIA_IMAGE ? 60.0 : d.media == MEDIA_AUDIO ? 20.0 : 4.0;
         bool long_run = dialogue || d.media != MEDIA_TEXT;
-        p.cfg.steps = (int)std::max(long_run ? 1000.0 : 300.0, std::min(long_run ? 8000.0 : 3000.0, (double)d.n_train * epochs / per_step));
-        p.cfg.warmup = std::min(100, p.cfg.steps / 10);
+        // a large model on a large text: about one pass over it
+        if (tier >= 5) epochs = 1.0;
+        double most = tier >= 5 ? 100000.0 : long_run ? 8000.0 : 3000.0;
+        p.cfg.steps = (int)std::max(long_run ? 1000.0 : 300.0, std::min(most, (double)d.n_train * epochs / per_step));
+        p.cfg.warmup = std::min(tier >= 5 ? 2000 : 100, p.cfg.steps / 10);
         if (dialogue) {
             // Windows that start at a question and a lower weight on the
             // question text: the loss goes where the answers are.

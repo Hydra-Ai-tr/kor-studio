@@ -412,6 +412,7 @@ public:
     std::string generate(const std::string& prompt, int length, float temperature, bool one_line) override {
         if (m_.spec.kind != MODEL_GPT) return "";
         std::lock_guard<std::mutex> lk(tr_.model_mu);
+        if (before_read) before_read();
         std::vector<int> ids = m_.encode(prompt);
         if (ids.empty()) ids.push_back(rng.below(std::max(1, m_.spec.vocab)));
         std::string out;
@@ -424,6 +425,7 @@ public:
     }
     ProbeResult ask(const Probe& p) override {
         std::lock_guard<std::mutex> lk(tr_.model_mu);
+        if (before_read) before_read();
         return run_probe(m_, p);
     }
 
@@ -461,6 +463,8 @@ public:
     float dropout = 0;
     float mix = -1;
     int newline = -1;
+    // Brings the host weights up to date (model_mu held) before they are read.
+    std::function<void()> before_read;
 
 private:
     Trainer& tr_;
@@ -501,11 +505,12 @@ void Trainer::run() {
         e.text = K().name;
         emit(e);
         if (cfg.gpu) {
-            // Text models: one step of this data on both, before trusting the GPU.
+            // Text models: one step of this data on both, before trusting the GPU
+            // (a small batch: on the CPU a large model takes long and much memory).
             if (gpu_on && text && model.spec.lora_rank == 0) {
                 Batch cb;
                 Rng crng(4242);
-                data.sample(cb, B, T, crng, false);
+                data.sample(cb, std::min(B, 2), std::min(T, 128), crng, false);
                 model.set_dropout(0.f);
                 model.use_gpu = false;
                 model.zero_grad();
@@ -526,6 +531,7 @@ void Trainer::run() {
                     worst = std::max(worst, std::sqrt(diff / std::max(norm, 1e-30)));
                 }
                 model.zero_grad();
+                model.release_scratch();
                 model.set_dropout(cfg.dropout);
                 char b[160];
                 if (!model.last_step_on_gpu) {
@@ -566,7 +572,44 @@ void Trainer::run() {
     std::vector<std::vector<float>> snap_w;
     int snap_step = 0, snap_pass = -1;
     std::vector<ProbeResult> last_results;
+    // Resident GPU run: the weights, gradients and optimizer moments stay on the
+    // card and come to the host only where something reads them. The callers
+    // of these hold model_mu.
+    bool resident = false, host_w_old = false, host_m_old = false;
+    auto last_pull = clock::now();
+    auto gpu_warn = [&](const std::string& text) {
+        TrainEvent e;
+        e.kind = EV_HOOK_LOG;
+        e.source = "GPU";
+        e.text = text;
+        e.n1 = TONE_WARN;
+        emit(e);
+    };
+    // The run ended on its own (GPU error, out of memory): its state is on the host.
+    auto resident_lost = [&] {
+        if (!resident) return;
+        bool ok = gpu_resident_end(true);
+        resident = host_w_old = host_m_old = false;
+        gpu_warn(ok ? "the GPU ran into a problem; training continues with the optimizer on the CPU"
+                    : "the GPU failed; training continues on the CPU from the last weights it handed over");
+    };
+    auto sync = [&](bool moments) {
+        if (!resident) return;
+        if (!gpu_resident_active()) {
+            resident_lost();
+            return;
+        }
+        if (!host_w_old && !(moments && host_m_old)) return;
+        if (!gpu_resident_pull(moments && host_m_old)) {
+            resident_lost();
+            return;
+        }
+        host_w_old = false;
+        if (moments) host_m_old = false;
+        last_pull = clock::now();
+    };
     auto snapshot = [&](int step) {
+        sync(false);
         snap_step = step;
         snap_w.resize(ps.size());
         for (size_t i = 0; i < ps.size(); ++i)
@@ -599,15 +642,21 @@ void Trainer::run() {
         ema_in = !ema_in;
     };
     auto restore = [&] {
+        sync(false);
         for (size_t i = 0; i < ps.size(); ++i)
             if (ps[i]->trainable && snap_w[i].size() == ps[i]->w.v.size()) {
                 ps[i]->w.v = snap_w[i];
                 if (use_ema) ema_w[i] = snap_w[i];
             }
+        if (resident) {
+            host_w_old = false;
+            if (!gpu_resident_push()) resident_lost();
+        }
     };
 
     // Runs the question tests and returns how many passed; the caller must hold model_mu.
     auto run_probes = [&](int step) {
+        sync(false);
         std::vector<ProbeResult> results;
         int pass = 0, example = -1;
         for (size_t i = 0; i < cfg.probes.size(); ++i) {
@@ -733,9 +782,15 @@ void Trainer::run() {
     bool model_saved = cfg.resume;
     auto last_save = clock::now();
     // Writes the checkpoint; call between steps (the raw weights must be in the model).
+    double save_secs = 0;  // how long the last save took
     auto save_checkpoint = [&](int step) {
         if (cfg.checkpoint.empty() || step <= 0) return;
         last_save = clock::now();
+        struct Timer {
+            std::chrono::steady_clock::time_point t0;
+            double& out;
+            ~Timer() { out = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); }
+        } timer{last_save, save_secs};
         std::string err;
         bool ok = true;
         std::vector<float> th, vh;
@@ -747,6 +802,7 @@ void Trainer::run() {
         }
         {
             std::lock_guard<std::mutex> lk(model_mu);
+            sync(true);
             if (!model_saved) {
                 ok = model.save(cfg.checkpoint + ".tmp", false, &err);
                 if (ok) flush_to_disk(cfg.checkpoint + ".tmp");
@@ -808,6 +864,25 @@ void Trainer::run() {
             events_.push_back(e);
         } else stats_.save_error = err;
     };
+
+    // Averaged weights need the host weights after every step, so with EMA the
+    // optimizer stays on the CPU.
+    if (gpu_on && model.use_gpu && !use_ema) {
+        std::lock_guard<std::mutex> lk(model_mu);
+        GpuGpt g;
+        std::string err;
+        if (model.gpu_layout(g)) {
+            resident = gpu_resident_begin(g, cfg.optimizer == OPT_SGD ? 1 : 2, B, T, &err);
+            TrainEvent e;
+            e.kind = EV_HOOK_LOG;
+            e.source = "GPU";
+            e.text = resident ? "weights, gradients and optimizer stay on the GPU" : "the optimizer runs on the CPU: " + err;
+            e.n1 = resident ? TONE_GOOD : TONE_WARN;
+            emit(e);
+            if (resident) model.release_scratch();
+        }
+    }
+    ctl.before_read = [&] { sync(false); };
 
     std::vector<std::shared_ptr<TrainHook>> hooks;
     for (auto& h : cfg.hooks) {
@@ -874,6 +949,10 @@ void Trainer::run() {
         bool saved_on_pause = false;
         while (paused_ && !stop_) {
             { std::lock_guard<std::mutex> lk(stats_mu_); stats_.state = TS_PAUSED; }
+            if (resident && host_w_old) {
+                std::lock_guard<std::mutex> lk(model_mu);
+                sync(false);
+            }
             if (!saved_on_pause && !cfg.checkpoint.empty() && step - 1 > start_step) {
                 save_checkpoint(step - 1);
                 saved_on_pause = true;
@@ -887,22 +966,50 @@ void Trainer::run() {
         int probe_pass = 0;
         {
             std::lock_guard<std::mutex> lk(model_mu);
-            model.zero_grad();
-            for (int a = 0; a < accum; ++a) {
-                data.sample(batch, B, T, rng, false, sopts);
-                if (text) ctl.mix_into(batch, rng, sopts);
-                loss += model.step(batch, true, 1.f / accum) / accum;
+            auto accumulate = [&] {
+                loss = 0;
+                for (int a = 0; a < accum; ++a) {
+                    data.sample(batch, B, T, rng, false, sopts);
+                    if (text) ctl.mix_into(batch, rng, sopts);
+                    loss += model.step(batch, true, 1.f / accum) / accum;
+                }
+            };
+            if (resident && !gpu_resident_zero_grad()) resident_lost();
+            if (!resident) model.zero_grad();
+            accumulate();
+            if (resident && !gpu_resident_active()) {
+                // part of this step's gradient was lost with the card: the whole step again on the host
+                resident_lost();
+                model.zero_grad();
+                accumulate();
             }
-            if (!std::isfinite(loss)) {
-                final_state = TS_ERROR;
-                error = "loss became NaN/Inf - try a lower learning rate";
-            } else {
-                clip_gradients(ps, cfg.clip);
+            bool nan_grad = false;
+            if (std::isfinite(loss)) {
                 float progress = (float)(step - 1) / std::max(1, cfg.steps - 1);
                 lr = step <= cfg.warmup ? cfg.lr * step / std::max(1, cfg.warmup)
                                         : cfg.lr * (0.1f + 0.45f * (1.f + std::cos(3.14159265f * progress)));
                 lr = ctl.lr_fixed > 0 ? ctl.lr_fixed : lr * ctl.lr_factor;
-                opt.step(ps, lr);
+                if (resident) {
+                    const long t = opt.steps_taken() + 1;
+                    float norm = 0;
+                    if (gpu_resident_update(cfg.optimizer != OPT_SGD, lr, cfg.weight_decay, cfg.clip, t, &norm)) {
+                        opt.set_steps_taken(t);
+                        host_w_old = host_m_old = true;
+                    } else if (gpu_resident_active()) {
+                        nan_grad = true;
+                    } else {
+                        resident_lost();  // this step's update is skipped
+                    }
+                } else {
+                    clip_gradients(ps, cfg.clip);
+                    opt.step(ps, lr);
+                }
+            }
+            if (!std::isfinite(loss) || nan_grad) {
+                final_state = TS_ERROR;
+                error = "loss became NaN/Inf - try a lower learning rate";
+            } else {
+                if (resident && std::chrono::duration<double>(clock::now() - last_pull).count() >= 20) sync(false);
                 if (use_ema) ema_update(step);
                 bool eval_now = cfg.eval_every > 0 && (step % cfg.eval_every == 0 || step == cfg.steps) && data.val_items() > 0;
                 bool probe_now = probe_best && step % cfg.probe_every == 0 && step != cfg.steps;
@@ -1004,8 +1111,15 @@ void Trainer::run() {
             break;
         }
         if (!cfg.checkpoint.empty() && step < cfg.steps &&
-            std::chrono::duration<double>(clock::now() - last_save).count() >= std::max(5.0, cfg.checkpoint_every))
+            // large models take seconds to save: at most about 5% of the time goes to saving
+            std::chrono::duration<double>(clock::now() - last_save).count() >= std::max({5.0, cfg.checkpoint_every, 20 * save_secs}))
             save_checkpoint(step);
+    }
+    if (resident) {
+        std::lock_guard<std::mutex> lk(model_mu);
+        sync(true);
+        if (resident) gpu_resident_end(false);
+        resident = false;
     }
     if (ctl.stop_requested && final_state == TS_DONE) end_state = "hook_stop";
     // A stopped or failed run stays resumable; a finished one needs no checkpoint any more.

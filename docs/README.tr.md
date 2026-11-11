@@ -35,10 +35,11 @@ işlemcide eğitilir.
   `prompt`/`completion`) soru-cevap metni olarak içe aktar; eğitimden önce metni temizle:
   boşlukları düzelt, boş satırları, tekrarlanan soru-cevapları ve cevapsız soruları kaldır. Araç,
   temiz kopyayı yazmadan önce neyin değişeceğini gösterir; asıl dosyan değişmez.
-- **Ekran kartında eğitim** – metin modellerinin ileri ve geri geçişinin tamamı OpenCL ile ekran
-  kartında çalışabilir; işlemciden birkaç kat hızlıdır. Başta verinden bir adım ikisinde de
-  çalıştırılıp sonuçlar karşılaştırılır; kart yoksa, farklı sonuç verirse ya da belleği yetmezse
-  eğitim işlemcide kalır.
+- **Ekran kartında eğitim** – metin modelleri OpenCL ile ekran kartında, işlemciden birkaç kat
+  hızlı eğitilir: ağırlıklar, gradyanlar ve optimizer eğitim boyunca kartta kalır, karta sığmayan
+  batch parçalar halinde işlenir. 85 milyon parametreli bir model 4 GB'lık dizüstü kartında
+  eğitilir. Başta verinden bir adım ikisinde de çalıştırılıp sonuçlar karşılaştırılır; kart yoksa
+  ya da farklı sonuç verirse eğitim işlemcide kalır.
 - **Sohbet** – eğitimi biten modeller otomatik kaydedilir; Sohbet sayfasında bir `.kor` modeli seç
   ve onunla konuşarak dene (sıcaklık, cevap uzunluğu, konuşmayı hatırlama ayarlarıyla).
 - **Yerel, OpenAI uyumlu API** – `kor-cli serve` (ya da Sohbet sayfasındaki *API olarak sun*)
@@ -99,9 +100,13 @@ Resim ve ses modelleri daha yavaştır (her piksel ya da örnek bir parçadır);
 dakika ile saatler gerekir. Basit şekiller ve kısa melodiler bekle, fotoğraf ya da konuşma değil. ChatGPT boyutunda bir modeli dizüstünde eğitmez; bunu hiçbir program
 yapamaz. `--gpu` ile (ya da eğitim ayarlarında *Ekran kartında eğit*) metin modelinin gömme,
 LayerNorm, dikkat, MLP, dropout ve kayıp hesabı ekran kartında çalışır; ara sonuçlar kartta
-kalır, her adımda yalnızca ağırlıklar gider ve gradyanlar döner, optimizer işlemcide kalır.
-Belleğe sığmayan modeller, LoRA ince ayarı ve tablo modelleri yalnızca dikkat katmanını ve büyük
-çarpımları karta gönderir. `kor-cli gpu` her GPU çekirdeğini işlemciyle karşılaştırır ve bir
+kalır. Ağırlıklar, gradyanlar ve AdamW/SGD durumu da eğitim boyunca kartta durur, her adımda
+yalnızca tokenlar gider; karta sığmayan batch birkaç geçişte işlenir ve gradyanlar kartta
+toplanır. Kart açıkken otomatik plan modeli kart belleğine, RAM'e ve metnin büyüklüğüne göre
+seçer (yaklaşık 14M, 38M, 86M ya da 200M parametre); 85.567.565 parametreli bir model 4 GB'lık
+RTX 3050 Ti Laptop GPU'da eğitilir. Metin üretimi ve soru testleri hâlâ işlemcide çalışır, bu
+boyuttaki modellerde yavaştır. LoRA ince ayarı ve tablo modelleri yalnızca büyük çarpımları
+karta gönderir; ağırlık ortalaması (EMA) açıkken optimizer işlemcide kalır. `kor-cli gpu` her GPU çekirdeğini işlemciyle karşılaştırır ve bir
 eğitim adımını ikisinde de ölçer. Bir RTX 3050 Ti Laptop GPU'da, i5-12500H'nin 8 iş parçacığına
 (AVX2) karşı, kayıp ve gradyanlar 2e-6 içinde aynıyken: 0,17M parametreli model 3,5 kat,
 0,83M parametreli 7-12 kat, 4,85M parametreli 17-20 kat hızlı çalıştı (adım 2,1-2,7 sn yerine

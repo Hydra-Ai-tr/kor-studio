@@ -152,14 +152,18 @@ float half_to_float(uint16_t h) {
     return f;
 }
 
+size_t utf8_len(const char* s, size_t i, size_t n) {
+    unsigned char c = (unsigned char)s[i];
+    size_t len = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : (c >> 3) == 0x1E ? 4 : 1;
+    return i + len > n ? 1 : len;
+}
+
 std::vector<std::string> utf8_chars(const std::string& s) {
     std::vector<std::string> out;
     size_t i = 0, n = s.size();
     while (i < n) {
-        unsigned char c = (unsigned char)s[i];
-        size_t len = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : (c >> 3) == 0x1E ? 4 : 1;
-        if (i + len > n) len = 1;
-        if (!(len == 1 && c == '\r')) out.emplace_back(s, i, len);
+        size_t len = utf8_len(s.data(), i, n);
+        if (!(len == 1 && s[i] == '\r')) out.emplace_back(s, i, len);
         i += len;
     }
     return out;
@@ -279,6 +283,22 @@ int Model::extend_vocab(const std::vector<std::string>& tokens) {
     return (int)add.size();
 }
 
+void Model::release_scratch() {
+    for (auto& b : blocks) b->release_scratch();
+    if (lnf) lnf->release_scratch();
+    if (head) head->release_scratch();
+    for (Tensor& t : xs) t = Tensor();
+    for (Tensor& t : acts) t = Tensor();
+    xf = logits = dout = d1 = d2 = Tensor();
+}
+
+bool Model::gpu_layout(GpuGpt& g) {
+    if (spec.kind != MODEL_GPT || spec.lora_rank != 0) return false;
+    g.vocab = head->out; g.ctx = spec.ctx; g.dim = spec.dim; g.heads = spec.heads; g.nlayer = spec.nlayer;
+    g.params = params();
+    return true;
+}
+
 void Model::set_dropout(float p) {
     p = std::max(0.f, std::min(0.9f, p));
     for (auto& b : blocks) b->set_dropout(p);
@@ -313,10 +333,8 @@ const Tensor& Model::output() const { return spec.kind == MODEL_GPT ? logits : a
 
 float Model::step(const Batch& b, bool train, float scale, int* correct) {
     last_step_on_gpu = false;
-    if (spec.kind == MODEL_GPT && spec.lora_rank == 0 && use_gpu && gpu_active() && (int)b.ids.size() == b.B * b.T) {
-        GpuGpt g;
-        g.vocab = head->out; g.ctx = spec.ctx; g.dim = spec.dim; g.heads = spec.heads; g.nlayer = spec.nlayer;
-        g.params = params();
+    GpuGpt g;
+    if (use_gpu && gpu_active() && (int)b.ids.size() == b.B * b.T && gpu_layout(g)) {
         const float* w = b.w.size() == b.tgt.size() && !b.w.empty() ? b.w.data() : nullptr;
         float p = blocks.empty() ? 0.f : blocks[0]->drop1.p, loss = 0;
         if (gpu_gpt_step(g, b.ids.data(), b.tgt.data(), w, b.B, b.T, train, p, rng.next(), scale, &loss, correct)) {
@@ -456,28 +474,62 @@ std::vector<int> Model::generate(const std::vector<int>& prompt, int n, float te
 
 std::vector<int> Model::encode(const std::string& text) const { return tokenize(text, vocab); }
 
-std::vector<int> tokenize(const std::string& text, const std::vector<std::string>& vocab) {
-    std::unordered_map<std::string, int> map;
-    size_t longest = 1;
-    for (size_t i = 0; i < vocab.size(); ++i) {
-        map.emplace(vocab[i], (int)i);
-        longest = std::max(longest, utf8_chars(vocab[i]).size());
-    }
-    std::vector<std::string> chars = utf8_chars(text);
-    std::vector<int> ids;
-    ids.reserve(chars.size());
-    for (size_t i = 0; i < chars.size();) {
-        int best = -1;
-        size_t best_len = 1;
-        std::string piece;
-        for (size_t l = 1; l <= longest && i + l <= chars.size(); ++l) {
-            piece += chars[i + l - 1];
-            auto it = map.find(piece);
-            if (it != map.end()) { best = it->second; best_len = l; }
+Tokenizer::Tokenizer(const std::vector<std::string>& vocab) : root_(256, -1) {
+    nodes_.push_back(-1);
+    for (size_t v = 0; v < vocab.size(); ++v) {
+        const std::string& p = vocab[v];
+        if (p.find('\r') != std::string::npos) continue;  // the text is read without '\r' (see utf8_chars)
+        int node = 0;
+        for (size_t i = 0; i < p.size(); ++i) {
+            unsigned char b = (unsigned char)p[i];
+            int& next = node == 0 ? root_[b] : kids_.emplace((uint64_t)node << 8 | b, -1).first->second;
+            if (next < 0) {
+                next = (int)nodes_.size();
+                nodes_.push_back(-1);
+            }
+            node = next;
         }
-        if (best >= 0) ids.push_back(best);  // unknown characters are skipped
-        i += best_len;
+        if (node > 0 && nodes_[node] < 0) nodes_[node] = (int)v;  // the first of equal pieces wins
     }
+}
+
+void Tokenizer::encode(const char* s, size_t n, std::vector<int>& out) const {
+    size_t i = 0;
+    while (i < n) {
+        // longest piece from i, extended one whole character at a time
+        int best = -1, node = 0;
+        size_t best_end = 0, j = i, first_end = 0;
+        while (j < n) {
+            size_t len = utf8_len(s, j, n);
+            if (len == 1 && s[j] == '\r') {
+                j += 1;
+                if (first_end == 0 && node == 0) i = j;  // a leading '\r' is not a character
+                continue;
+            }
+            for (size_t k = 0; k < len && node >= 0; ++k) {
+                unsigned char b = (unsigned char)s[j + k];
+                if (node == 0) node = root_[b];
+                else {
+                    auto it = kids_.find((uint64_t)node << 8 | b);
+                    node = it == kids_.end() ? -1 : it->second;
+                }
+            }
+            j += len;
+            if (first_end == 0) first_end = j;
+            if (node < 0) break;
+            if (nodes_[node] >= 0) { best = nodes_[node]; best_end = j; }
+        }
+        if (first_end == 0) break;  // only '\r' was left
+        if (best >= 0) out.push_back(best);  // unknown characters are skipped
+        i = best >= 0 ? best_end : first_end;
+    }
+}
+
+std::vector<int> tokenize(const std::string& text, const std::vector<std::string>& vocab) {
+    std::vector<int> ids;
+    ids.reserve(text.size() / 2);
+    Tokenizer(vocab).encode(text.data(), text.size(), ids);
+    ids.shrink_to_fit();
     return ids;
 }
 

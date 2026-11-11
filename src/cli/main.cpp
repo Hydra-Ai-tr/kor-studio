@@ -179,6 +179,74 @@ static double gradcheck(Model& m, const Batch& b, const char* label) {
     return worst;
 }
 
+// Largest weight difference between a run stopped halfway and resumed and an
+// uninterrupted one (-1 when something failed). With `gpu` the weights and the
+// optimizer stay on the card (no EMA) and the stopping hook also generates text.
+static float resume_check(bool gpu, std::string& err) {
+    std::string text;
+    for (int i = 0; i < 120; ++i) text += "Kullanıcı: merhaba " + std::to_string(i % 7) + "\nAsistan: selam " + std::to_string(i % 5) + "\n";
+    std::string dpath = "kor_selftest_data.txt", ck = "kor_selftest_ckpt.kor";
+    { std::ofstream f(upath(dpath), std::ios::binary); f << text; }
+    Dataset data;
+    bool pass = data.load_text(dpath, &err);
+    std::remove(dpath.c_str());
+    struct StopAt : TrainHook {
+        Trainer* tr = nullptr;
+        int at = 0;
+        std::string name() const override { return "stop-at"; }
+        bool open(TrainControl&, std::string*) override { return true; }
+        bool wants(int k) const override { return k == HOOK_STEP; }
+        int step_every() const override { return at; }
+        void on_event(const HookInfo&, TrainControl& ctl) override {
+            ctl.generate("Kullanıcı:", 4, 0.f, true);
+            tr->request_stop();
+        }
+    };
+    auto run = [&](bool interrupt, std::vector<float>& w_out) {
+        ModelSpec s;
+        s.kind = MODEL_GPT; s.vocab = (int)data.vocab.size(); s.ctx = 16; s.dim = 16; s.heads = 2; s.nlayer = 1;
+        auto m = std::make_shared<Model>(s);
+        m->vocab = data.vocab;
+        TrainConfig c;
+        c.steps = 40; c.batch = 4; c.eval_every = 10; c.ema = gpu ? 0.f : 0.9f; c.threads = 1; c.gpu = gpu;
+        Trainer tr;
+        auto finish = [&] {
+            while (tr.running()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            tr.stop();
+        };
+        if (interrupt) {
+            auto h = std::make_shared<StopAt>();
+            h->tr = &tr;
+            h->at = 20;
+            c.hooks.push_back(h);
+            c.checkpoint = ck;
+            if (!tr.start(m, &data, c)) return false;
+            finish();
+            if (!has_checkpoint(ck)) return false;
+            CheckpointInfo info;
+            if (!read_checkpoint(ck, info, &err) || info.step != 20) return false;
+            m = Model::load(ck, &err);
+            if (!m) return false;
+            c = info.cfg;
+            c.threads = 1;
+            c.gpu = gpu;  // a setting of the machine, not saved with the run
+            c.checkpoint = ck;
+            c.resume = true;
+        }
+        if (!tr.start(m, &data, c)) return false;
+        finish();
+        if (tr.stats().state != TS_DONE || has_checkpoint(ck)) return false;
+        for (Param* p : m->params()) w_out.insert(w_out.end(), p->w.v.begin(), p->w.v.end());
+        return true;
+    };
+    std::vector<float> wa, wb;
+    pass = pass && run(false, wa) && run(true, wb) && wa.size() == wb.size();
+    float diff = 0;
+    for (size_t i = 0; pass && i < wa.size(); ++i) diff = std::max(diff, std::fabs(wa[i] - wb[i]));
+    remove_checkpoint(ck);
+    return pass ? diff : -1.f;
+}
+
 static int selftest() {
     int fails = 0;
     set_threads(4);
@@ -301,7 +369,7 @@ static int selftest() {
     {   // subword tokens: learned pieces shorten the text and decode back to it
         std::string text = "merhaba dünya\nmerhaba kor\nmerhaba dünya, merhaba kor\n";
         auto chars = utf8_chars(text);
-        auto v = learn_subwords(chars, 40);
+        auto v = learn_subwords(text, 40);
         std::vector<int> ids = tokenize(text, v);
         std::string back;
         for (int t : ids) back += v[t];
@@ -311,65 +379,32 @@ static int selftest() {
         std::printf("subword tokens: %zu pieces, %zu chars -> %zu tokens %s\n", v.size(), chars.size(), ids.size(), pass ? "OK" : "FAIL");
         if (!pass) ++fails;
     }
-    {   // crash-safe training: a run stopped halfway and resumed ends like an uninterrupted one
-        std::string text;
-        for (int i = 0; i < 120; ++i) text += "Kullanıcı: merhaba " + std::to_string(i % 7) + "\nAsistan: selam " + std::to_string(i % 5) + "\n";
-        std::string err, dpath = "kor_selftest_data.txt", ck = "kor_selftest_ckpt.kor";
-        { std::ofstream f(upath(dpath), std::ios::binary); f << text; }
-        Dataset data;
-        bool pass = data.load_text(dpath, &err);
-        std::remove(dpath.c_str());
-        struct StopAt : TrainHook {
-            Trainer* tr = nullptr;
-            int at = 0;
-            std::string name() const override { return "stop-at"; }
-            bool open(TrainControl&, std::string*) override { return true; }
-            bool wants(int k) const override { return k == HOOK_STEP; }
-            int step_every() const override { return at; }
-            void on_event(const HookInfo&, TrainControl&) override { tr->request_stop(); }
-        };
-        auto run = [&](bool interrupt, std::vector<float>& w_out) {
-            ModelSpec s;
-            s.kind = MODEL_GPT; s.vocab = (int)data.vocab.size(); s.ctx = 16; s.dim = 16; s.heads = 2; s.nlayer = 1;
-            auto m = std::make_shared<Model>(s);
-            m->vocab = data.vocab;
-            TrainConfig c;
-            c.steps = 40; c.batch = 4; c.eval_every = 10; c.ema = 0.9f; c.threads = 1;
-            Trainer tr;
-            auto finish = [&] {
-                while (tr.running()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
-                tr.stop();
-            };
-            if (interrupt) {
-                auto h = std::make_shared<StopAt>();
-                h->tr = &tr;
-                h->at = 20;
-                c.hooks.push_back(h);
-                c.checkpoint = ck;
-                if (!tr.start(m, &data, c)) return false;
-                finish();
-                if (!has_checkpoint(ck)) return false;
-                CheckpointInfo info;
-                if (!read_checkpoint(ck, info, &err) || info.step != 20) return false;
-                m = Model::load(ck, &err);
-                if (!m) return false;
-                c = info.cfg;
-                c.threads = 1;
-                c.checkpoint = ck;
-                c.resume = true;
+    {   // the tokenizer gives the longest match over whole characters, like a plain search
+        std::string text = "ab\r\nabc ğüşabcd\r\rab\xC3" "A x\xE2\x82\nabab\xF0\x9F\x99\x82 q?";
+        std::vector<std::string> v = {"a", "b", "ab", "abc", "abcd", "\n", " ", "ğ", "ü", "ş", "ğü", "x", "\xC3" "A", "q",
+                                      "b\na", "\xF0\x9F\x99\x82", "ab\xF0\x9F\x99\x82", "c", "d", "A"};
+        auto chars = utf8_chars(text);
+        std::vector<int> ref;
+        for (size_t i = 0; i < chars.size();) {
+            int best = -1;
+            size_t best_len = 1;
+            std::string piece;
+            for (size_t l = 1; i + l <= chars.size(); ++l) {
+                piece += chars[i + l - 1];
+                for (size_t k = 0; k < v.size(); ++k)
+                    if (v[k] == piece && best_len <= l) { best = (int)k; best_len = l; break; }
             }
-            if (!tr.start(m, &data, c)) return false;
-            finish();
-            if (tr.stats().state != TS_DONE || has_checkpoint(ck)) return false;
-            for (Param* p : m->params()) w_out.insert(w_out.end(), p->w.v.begin(), p->w.v.end());
-            return true;
-        };
-        std::vector<float> wa, wb;
-        pass = pass && run(false, wa) && run(true, wb) && wa.size() == wb.size();
-        float diff = 0;
-        for (size_t i = 0; pass && i < wa.size(); ++i) diff = std::max(diff, std::fabs(wa[i] - wb[i]));
-        pass = pass && diff < 1e-4f;
-        remove_checkpoint(ck);
+            if (best >= 0) ref.push_back(best);
+            i += best_len;
+        }
+        bool pass = tokenize(text, v) == ref;
+        std::printf("tokenizer: %zu tokens %s\n", ref.size(), pass ? "OK" : "FAIL");
+        if (!pass) ++fails;
+    }
+    {   // crash-safe training: a run stopped halfway and resumed ends like an uninterrupted one
+        std::string err;
+        float diff = resume_check(false, err);
+        bool pass = diff >= 0 && diff < 1e-4f;
         std::printf("resume after stop: weight difference %.2g %s %s\n", diff, pass ? "OK" : "FAIL", err.c_str());
         if (!pass) ++fails;
     }
@@ -491,7 +526,7 @@ static int train(const std::vector<std::string>& a) {
     else if (kind == DATA_TEXT)
         std::printf("text: %zu tokens, vocabulary %zu\n", data.ids.size(), data.vocab.size());
     SysInfo sys = detect_system();
-    AutoPlan plan = autotune(sys, data);
+    AutoPlan plan = autotune(sys, data, has_flag(a, "--gpu") ? gpu_probe().mem_gb : 0);
     if (steps > 0) { plan.cfg.steps = steps; plan.cfg.eval_every = std::max(10, steps / 10); }
     else plan.cfg.eval_every = std::max(10, plan.cfg.steps / 10);
     auto num = [&](const char* name, auto& v) {
@@ -541,6 +576,10 @@ static int train(const std::vector<std::string>& a) {
     num("--wd", plan.cfg.weight_decay);
     num("--ema", plan.cfg.ema);
     plan.cfg.gpu = has_flag(a, "--gpu");
+    // on the GPU a text model keeps only weights, gradients, moments and a best copy in RAM
+    const bool gpu_text = plan.cfg.gpu && gpu_probe().found && plan.spec.kind == MODEL_GPT && plan.spec.lora_rank == 0;
+    plan.est_ram_mb = gpu_text ? (double)plan.params * 4 * 5 / (1024.0 * 1024.0)
+                               : (double)estimate_train_bytes(plan.spec, plan.cfg.batch) / (1024.0 * 1024.0);
     std::printf("auto plan: %zu parameters, ~%.0f MB RAM, batch %d x%d, %d steps, %d threads, kernels %s\n",
                 plan.params, plan.est_ram_mb, plan.cfg.batch, plan.cfg.accum, plan.cfg.steps, plan.cfg.threads, K().name);
     if (kind == DATA_TEXT)
@@ -876,6 +915,90 @@ static double gpt_numeric_check() {
     return worst;
 }
 
+static double rel_diff(const std::vector<Param*>& a, const std::vector<Param*>& b, bool grads) {
+    double worst = 0;
+    for (size_t i = 0; i < a.size(); ++i) {
+        const std::vector<float>& x = grads ? a[i]->g.v : a[i]->w.v;
+        const std::vector<float>& y = grads ? b[i]->g.v : b[i]->w.v;
+        double diff = 0, ref = 0;
+        for (size_t k = 0; k < x.size(); ++k) {
+            diff += std::pow((double)x[k] - y[k], 2);
+            ref += std::pow((double)x[k], 2);
+        }
+        worst = std::max(worst, std::sqrt(diff / std::max(ref, 1e-30)));
+    }
+    return worst;
+}
+
+// A batch split into passes of 3 sequences must give the loss and gradients of the CPU.
+static double gpt_split_check() {
+    ModelSpec s;
+    s.kind = MODEL_GPT;
+    s.vocab = 40; s.ctx = 32; s.dim = 32; s.heads = 4; s.nlayer = 2;
+    Model cpu(s, 8), gpu(s, 8);
+    Batch b;
+    b.B = 8; b.T = 32;
+    Rng rng(21);
+    for (int i = 0; i < b.B * b.T; ++i) {
+        b.ids.push_back(rng.below(s.vocab));
+        b.tgt.push_back(rng.below(s.vocab));
+        b.w.push_back(0.2f + rng.uniform());
+    }
+    cpu.use_gpu = false;
+    cpu.zero_grad();
+    gpu.zero_grad();
+    float l0 = cpu.step(b, true, 0.5f);
+    gpu_limit_pass_rows(3);
+    float l1 = gpu.step(b, true, 0.5f);
+    gpu_limit_pass_rows(0);
+    if (!gpu.last_step_on_gpu) return 1;
+    return std::max(rel_diff(cpu.params(), gpu.params(), true), (double)std::fabs(l0 - l1));
+}
+
+// Training steps with weights, gradients and optimizer on the card must end
+// with the weights of the same steps on the CPU (clipping included).
+static double resident_check(int opt) {
+    ModelSpec s;
+    s.kind = MODEL_GPT;
+    s.vocab = 40; s.ctx = 32; s.dim = 32; s.heads = 4; s.nlayer = 2;
+    Model cpu(s, 9), gpu(s, 9);
+    cpu.use_gpu = false;
+    Optimizer o(opt, 0.01f);
+    const float lr = 3e-3f, clip = 0.5f;
+    GpuGpt g;
+    g.vocab = s.vocab; g.ctx = s.ctx; g.dim = s.dim; g.heads = s.heads; g.nlayer = s.nlayer;
+    g.params = gpu.params();
+    if (!gpu_resident_begin(g, opt == OPT_SGD ? 1 : 2, 4, s.ctx)) return 1;
+    Rng rng(5);
+    double worst = 0;
+    for (int t = 1; t <= 4; ++t) {
+        Batch b;
+        b.B = 4; b.T = s.ctx;
+        for (int i = 0; i < b.B * b.T; ++i) { b.ids.push_back(rng.below(s.vocab)); b.tgt.push_back(rng.below(s.vocab)); }
+        cpu.zero_grad();
+        float l0 = 0, l1 = 0;
+        for (int a = 0; a < 2; ++a) l0 += cpu.step(b, true, 0.5f);
+        float n0 = clip_gradients(cpu.params(), clip);
+        o.step(cpu.params(), lr);
+        gpu_resident_zero_grad();
+        for (int a = 0; a < 2; ++a) l1 += gpu.step(b, true, 0.5f);
+        float n1 = 0;
+        if (!gpu.last_step_on_gpu || !gpu_resident_update(opt == OPT_ADAMW, lr, 0.01f, clip, t, &n1)) {
+            gpu_resident_end(false);
+            return 1;
+        }
+        worst = std::max({worst, (double)std::fabs(l0 - l1), std::fabs(n0 - n1) / (1.0 + n0)});
+    }
+    gpu_resident_end(true);
+    if (opt == OPT_SGD) return std::max(worst, rel_diff(cpu.params(), gpu.params(), false));
+    // AdamW moves every weight by about lr per step, also ones whose gradient is
+    // only rounding noise (the key bias): measure in parts of one such step.
+    for (size_t i = 0; i < g.params.size(); ++i)
+        for (size_t k = 0; k < g.params[i]->w.v.size(); ++k)
+            worst = std::max(worst, (double)std::fabs(cpu.params()[i]->w.v[k] - g.params[i]->w.v[k]) / lr);
+    return worst;
+}
+
 // Times forward + backward of a text model on random tokens (no data, nothing saved).
 static void step_bench(int dim, int heads, int layers, int ctx, int batch, bool gpu_ok) {
     ModelSpec s;
@@ -992,8 +1115,26 @@ static int gpu_check() {
         bool ok = e < 0.05;
         all_ok = all_ok && ok;
         std::printf("text model with dropout and loss weights: gradient vs finite differences %.1e%s\n", e, ok ? "" : "  WRONG");
+        e = gpt_split_check();
+        ok = e < 1e-4;
+        all_ok = all_ok && ok;
+        std::printf("batch split into passes of 3 sequences: difference from the CPU %.1e%s\n", e, ok ? "" : "  WRONG");
+        for (int opt : {OPT_ADAMW, OPT_SGD}) {
+            e = resident_check(opt);
+            ok = e < (opt == OPT_SGD ? 1e-4 : 1e-2);
+            all_ok = all_ok && ok;
+            std::printf("4 steps with weights and %s on the GPU: difference from the CPU %.1e%s\n", opt == OPT_SGD ? "SGD" : "AdamW", e,
+                        ok ? "" : "  WRONG");
+        }
     }
     gpu_use(false);
+    if (on) {
+        std::string err;
+        float d = resume_check(true, err);
+        bool ok = d >= 0 && d < 1e-4f;
+        all_ok = all_ok && ok;
+        std::printf("training on the GPU stopped halfway and resumed: weight difference %.2g%s %s\n", d, ok ? "" : "  WRONG", err.c_str());
+    }
     std::printf("\n%s: %s\n", all_ok ? "results match the CPU" : "RESULTS DIFFER FROM THE CPU", msg.c_str());
     std::printf("training with --gpu %s\n", on ? "will use the GPU" : "stays on the CPU");
     std::printf("\none training step (forward + backward, random tokens):\n");

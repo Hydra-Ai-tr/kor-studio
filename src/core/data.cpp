@@ -9,8 +9,10 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <new>
 #include <set>
 #include <sstream>
+#include <string_view>
 #include <unordered_map>
 
 namespace kor {
@@ -18,9 +20,18 @@ namespace kor {
 static bool read_file(const std::string& path, std::string& out, std::string* err) {
     std::ifstream in(upath(path), std::ios::binary);
     if (!in) { if (err) *err = "cannot open file"; return false; }
-    std::ostringstream ss;
-    ss << in.rdbuf();
-    out = ss.str();
+    // straight into the string: large files are not held twice
+    in.seekg(0, std::ios::end);
+    std::streamoff size = in.tellg();
+    in.seekg(0, std::ios::beg);
+    if (size < 0) { if (err) *err = "cannot read file"; return false; }
+    try {
+        out.assign((size_t)size, '\0');
+    } catch (const std::bad_alloc&) {
+        if (err) *err = "the file does not fit in memory";
+        return false;
+    }
+    if (size > 0 && !in.read(&out[0], size)) { if (err) *err = "cannot read file"; return false; }
     if (out.size() >= 3 && (unsigned char)out[0] == 0xEF && (unsigned char)out[1] == 0xBB && (unsigned char)out[2] == 0xBF)
         out.erase(0, 3);  // UTF-8 BOM
     return true;
@@ -28,27 +39,64 @@ static bool read_file(const std::string& path, std::string& out, std::string* er
 
 // ------------------------------------------------------------------ text
 
+// A character (1-4 bytes) as a number: distinct characters get distinct keys.
+static uint64_t char_key(const char* s, size_t len) {
+    uint64_t k = len;
+    for (size_t j = 0; j < len; ++j) k = k << 8 | (unsigned char)s[j];
+    return k;
+}
+
+// Calls f(pointer, length) for each character of s, '\r' left out (as utf8_chars).
+template <class F>
+static void each_char(const char* s, size_t n, F f) {
+    for (size_t i = 0; i < n;) {
+        size_t len = utf8_len(s, i, n);
+        if (!(len == 1 && s[i] == '\r')) f(s + i, len);
+        i += len;
+    }
+}
+
+// The distinct characters of s, sorted, and (count) how many characters it has.
+static std::vector<std::string> distinct_chars(const std::string& s, size_t* count) {
+    std::unordered_map<uint64_t, int> seen;
+    std::vector<std::string> out;
+    size_t n = 0;
+    each_char(s.data(), s.size(), [&](const char* c, size_t len) {
+        ++n;
+        if (seen.emplace(char_key(c, len), 0).second) out.emplace_back(c, len);
+    });
+    std::sort(out.begin(), out.end());
+    if (count) *count = n;
+    return out;
+}
+
 bool Dataset::load_text(const std::string& p, std::string* err, int subword) {
     std::string text;
     if (!read_file(p, text, err)) return false;
-    auto chars = utf8_chars(text);
-    if (chars.size() < 64) { if (err) *err = "text is too short (need at least 64 characters)"; return false; }
-    std::set<std::string> uniq(chars.begin(), chars.end());
+    size_t n_chars = 0;
+    std::vector<std::string> uniq = distinct_chars(text, &n_chars);
+    if (n_chars < 64) { if (err) *err = "text is too short (need at least 64 characters)"; return false; }
     *this = Dataset();
     kind = DATA_TEXT;
     path = p;
     raw = std::move(text);
-    if (subword > (int)uniq.size()) {
-        vocab = learn_subwords(chars, subword);
-        ids = tokenize(raw, vocab);
-    } else {
-        vocab.assign(uniq.begin(), uniq.end());
-        std::unordered_map<std::string, int> map;
-        for (size_t i = 0; i < vocab.size(); ++i) map[vocab[i]] = (int)i;
-        ids.reserve(chars.size());
-        for (auto& c : chars) ids.push_back(map[c]);
+    try {
+        if (subword > (int)uniq.size()) {
+            vocab = learn_subwords(raw, subword);
+            ids = tokenize(raw, vocab);
+        } else {
+            vocab = std::move(uniq);
+            std::unordered_map<uint64_t, int> map;
+            for (size_t i = 0; i < vocab.size(); ++i) map[char_key(vocab[i].data(), vocab[i].size())] = (int)i;
+            ids.reserve(n_chars);
+            each_char(raw.data(), raw.size(), [&](const char* c, size_t len) { ids.push_back(map[char_key(c, len)]); });
+        }
+        split_text();
+    } catch (const std::bad_alloc&) {
+        *this = Dataset();
+        if (err) *err = "the text is too large for the memory of this computer";
+        return false;
     }
-    split_text();
     return true;
 }
 
@@ -240,27 +288,36 @@ void Dataset::split_text() {
     if (tag_ids(q, a, newline)) layout = layout_dialogue(ids, q, a, newline);
 }
 
-std::vector<std::string> learn_subwords(const std::vector<std::string>& chars, int vocab_size) {
-    std::vector<std::string> vocab;
-    std::unordered_map<std::string, int> index;
-    for (auto& c : chars)
-        if (index.emplace(c, (int)vocab.size()).second) vocab.push_back(c);
-    std::sort(vocab.begin(), vocab.end());
-    index.clear();
-    for (size_t i = 0; i < vocab.size(); ++i) index[vocab[i]] = (int)i;
-    // Merges are learned on the first 300k characters; pieces never cross a line break.
-    size_t n = std::min<size_t>(chars.size(), 300000);
-    std::vector<int> seq(n);
-    for (size_t i = 0; i < n; ++i) seq[i] = index[chars[i]];
-    auto has_newline = [&](int id) { return vocab[id].find('\n') != std::string::npos; };
+std::vector<std::string> learn_subwords(const std::string& text, int vocab_size) {
+    // Every character of the text is in the vocabulary.
+    std::vector<std::string> vocab = distinct_chars(text, nullptr);
+    std::unordered_map<uint64_t, int> index;
+    for (size_t i = 0; i < vocab.size(); ++i) index[char_key(vocab[i].data(), vocab[i].size())] = (int)i;
+    // Merges are learned on about 1M characters: the whole text when it is
+    // small, otherwise 8 parts spread over it (-1 separates them). Pieces never
+    // cross a line break or a part boundary.
+    const size_t budget = 1500000, parts = 8;
+    std::vector<int> seq;
+    auto add = [&](size_t a, size_t b) {
+        while (a < b && ((unsigned char)text[a] & 0xC0) == 0x80) ++a;  // start on a whole character
+        if (!seq.empty()) seq.push_back(-1);
+        each_char(text.data() + a, b - a, [&](const char* c, size_t len) { seq.push_back(index[char_key(c, len)]); });
+    };
+    if (text.size() <= budget) add(0, text.size());
+    else
+        for (size_t k = 0; k < parts; ++k) {
+            size_t a = text.size() / parts * k;
+            add(a, std::min(text.size(), a + budget / parts));
+        }
     std::vector<char> nl(vocab.size());
-    for (size_t i = 0; i < vocab.size(); ++i) nl[i] = has_newline((int)i);
+    for (size_t i = 0; i < vocab.size(); ++i) nl[i] = vocab[i].find('\n') != std::string::npos;
+    auto joins = [&](int a, int b) { return a >= 0 && b >= 0 && !nl[a] && !nl[b]; };
     std::unordered_map<uint64_t, int> count;
     std::vector<std::pair<int, uint64_t>> ranked;
     while ((int)vocab.size() < vocab_size) {
         count.clear();
         for (size_t i = 0; i + 1 < seq.size(); ++i)
-            if (!nl[seq[i]] && !nl[seq[i + 1]]) ++count[(uint64_t)seq[i] << 32 | (uint32_t)seq[i + 1]];
+            if (joins(seq[i], seq[i + 1])) ++count[(uint64_t)seq[i] << 32 | (uint32_t)seq[i + 1]];
         ranked.clear();
         for (auto& kv : count)
             if (kv.second >= 2) ranked.push_back({-kv.second, kv.first});
@@ -283,7 +340,7 @@ std::vector<std::string> learn_subwords(const std::vector<std::string>& chars, i
         }
         size_t w = 0;
         for (size_t r = 0; r < seq.size(); ++r) {
-            if (r + 1 < seq.size()) {
+            if (r + 1 < seq.size() && joins(seq[r], seq[r + 1])) {
                 auto it = merge.find((uint64_t)seq[r] << 32 | (uint32_t)seq[r + 1]);
                 if (it != merge.end()) { seq[w++] = it->second; ++r; continue; }
             }
@@ -356,52 +413,67 @@ void Dataset::encode_with(const std::vector<std::string>& fixed) {
 
 // -------------------------------------------------------------- dialogue
 
-static std::vector<std::string> split_lines(const std::string& s) {
-    std::vector<std::string> lines;
-    std::istringstream in(s);
-    std::string l;
-    while (std::getline(in, l)) {
-        if (!l.empty() && l.back() == '\r') l.pop_back();
-        lines.push_back(l);
+// Calls f(line) for the lines of s (as std::getline, without a trailing '\r')
+// that start in its first `limit` bytes.
+template <class F>
+static void each_line(const std::string& s, size_t limit, F f) {
+    std::string_view all(s);
+    for (size_t pos = 0; pos < s.size() && pos < limit;) {
+        size_t end = all.find('\n', pos);
+        if (end == std::string_view::npos) end = s.size();
+        std::string_view l = all.substr(pos, end - pos);
+        if (!l.empty() && l.back() == '\r') l.remove_suffix(1);
+        f(l);
+        pos = end + 1;
     }
-    return lines;
 }
 
-static std::string line_tag(const std::string& l) {
+static bool starts(std::string_view l, const std::string& tag) { return l.compare(0, tag.size(), tag) == 0; }
+
+static std::string line_tag(std::string_view l) {
     size_t p = l.find(": ");
-    return p == std::string::npos || p == 0 || p > 24 ? "" : l.substr(0, p + 2);
+    return p == std::string_view::npos || p == 0 || p > 24 ? "" : std::string(l.substr(0, p + 2));
 }
+
+// Dialogue structure and test questions come from the start of large texts.
+static const size_t kTagScan = 8u << 20, kPairScan = 64u << 20;
 
 bool Dataset::dialogue_tags(std::string& q_tag, std::string& a_tag) const {
     if (kind != DATA_TEXT) return false;
-    std::vector<std::string> lines = split_lines(raw);
     std::map<std::pair<std::string, std::string>, int> count;
-    for (size_t i = 0; i + 1 < lines.size(); ++i) {
-        std::string a = line_tag(lines[i]), b = line_tag(lines[i + 1]);
-        if (!a.empty() && !b.empty() && a != b) ++count[{a, b}];
-    }
+    std::string prev;
+    size_t lines = 0;
+    each_line(raw, kTagScan, [&](std::string_view l) {
+        std::string b = line_tag(l);
+        if (lines++ > 0 && !prev.empty() && !b.empty() && prev != b) ++count[{prev, b}];
+        prev = std::move(b);
+    });
     int best = 0, second = 0;
     for (auto& kv : count) {
         if (kv.second > best) { second = best; best = kv.second; q_tag = kv.first.first; a_tag = kv.first.second; }
         else if (kv.second > second) second = kv.second;
     }
     // "Q then A" must be clearly more common than "A then Q" would be by chance.
-    return best >= 8 && best >= (int)lines.size() / 8;
+    return best >= 8 && best >= (int)(lines / 8);
 }
 
 std::vector<std::pair<std::string, std::string>> Dataset::dialogue_pairs(int n) const {
     std::vector<std::pair<std::string, std::string>> out;
     std::string qt, at;
     if (!dialogue_tags(qt, at)) return out;
-    std::vector<std::string> lines = split_lines(raw);
     std::map<std::string, std::string> pairs;  // question -> expected ("" = ambiguous)
-    for (size_t i = 0; i + 1 < lines.size(); ++i) {
-        if (lines[i].compare(0, qt.size(), qt) != 0 || lines[i + 1].compare(0, at.size(), at) != 0) continue;
-        std::string question = lines[i].substr(qt.size()), expected = lines[i + 1].substr(at.size());
-        auto it = pairs.find(question);
-        if (it == pairs.end()) pairs[question] = expected;
-        else if (it->second != expected) it->second.clear();  // same question, different answers
-    }
+    std::string_view prev;
+    bool have_prev = false;
+    each_line(raw, kPairScan, [&](std::string_view l) {
+        if (have_prev && starts(prev, qt) && starts(l, at)) {
+            std::string question(prev.substr(qt.size())), expected(l.substr(at.size()));
+            auto it = pairs.find(question);
+            if (it == pairs.end()) pairs[question] = expected;
+            else if (it->second != expected) it->second.clear();  // same question, different answers
+        }
+        prev = l;
+        have_prev = true;
+    });
     for (auto& kv : pairs)
         if (!kv.second.empty()) out.push_back(kv);
     Rng rng(123);
@@ -418,9 +490,9 @@ std::vector<Probe> Dataset::auto_probes(int n) const {
     return out;
 }
 
-static std::string trim(const std::string& s) {
+static std::string trim(std::string_view s) {
     size_t a = s.find_first_not_of(" \t\r\n"), b = s.find_last_not_of(" \t\r\n");
-    return a == std::string::npos ? "" : s.substr(a, b - a + 1);
+    return a == std::string_view::npos ? "" : std::string(s.substr(a, b - a + 1));
 }
 
 int Dataset::hold_out(const std::vector<Probe>& tests) {
@@ -430,27 +502,39 @@ int Dataset::hold_out(const std::vector<Probe>& tests) {
     std::set<std::string> questions;
     for (auto& p : tests)
         if (!p.question.empty()) questions.insert(p.question);
-    std::vector<std::string> lines = split_lines(raw);
-    std::string kept;
-    int removed = 0;
-    for (size_t i = 0; i < lines.size(); ++i) {
-        bool drop = false;
-        if (dialogue) {
-            drop = lines[i].compare(0, qt.size(), qt) == 0 && questions.count(trim(lines[i].substr(qt.size())));
-        } else {
-            std::string l = trim(lines[i]);
-            for (auto& q : questions)
-                if (l.compare(0, q.size(), q) == 0) { drop = true; break; }
-        }
-        if (drop) {
-            ++removed;
-            if (dialogue && i + 1 < lines.size() && lines[i + 1].compare(0, at.size(), at) == 0) ++i;
-            continue;
-        }
-        kept += lines[i];
-        kept += '\n';
-    }
+    auto asks = [&](std::string_view line) {
+        if (dialogue) return starts(line, qt) && questions.count(trim(line.substr(qt.size()))) > 0;
+        std::string l = trim(line);
+        for (auto& q : questions)
+            if (l.compare(0, q.size(), q) == 0) return true;
+        return false;
+    };
+    // The kept lines (each followed by '\n'); with `keep` null only counts the removed ones.
+    auto scan = [&](std::string* keep) {
+        int removed = 0;
+        bool skip_answer = false;
+        each_line(raw, raw.size(), [&](std::string_view l) {
+            if (skip_answer) {
+                skip_answer = false;
+                if (starts(l, at)) return;
+            }
+            if (asks(l)) {
+                ++removed;
+                skip_answer = dialogue;
+                return;
+            }
+            if (keep) {
+                keep->append(l.data(), l.size());
+                *keep += '\n';
+            }
+        });
+        return removed;
+    };
+    int removed = scan(nullptr);
     if (removed) {
+        std::string kept;
+        kept.reserve(raw.size());
+        scan(&kept);
         ids = encode(kept, vocab);
         split_text();
     }
@@ -467,14 +551,14 @@ Probe make_probe(const std::string& question, const std::string& expected, const
 
 std::vector<Probe> parse_tests(const std::string& text, const std::string& q_tag, const std::string& a_tag) {
     std::vector<Probe> out;
-    for (const std::string& line : split_lines(text)) {
+    each_line(text, text.size(), [&](std::string_view line) {
         std::string l = trim(line);
-        if (l.empty() || l[0] == '#') continue;
+        if (l.empty() || l[0] == '#') return;
         size_t sep = l.find("=>");
-        if (sep == std::string::npos) continue;
+        if (sep == std::string::npos) return;
         Probe p = make_probe(l.substr(0, sep), l.substr(sep + 2), q_tag, a_tag);
         if (!p.question.empty() && !p.expected.empty()) out.push_back(p);
-    }
+    });
     return out;
 }
 

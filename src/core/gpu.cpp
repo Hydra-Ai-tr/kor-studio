@@ -345,6 +345,61 @@ void xent(__global float* z, __global const int* tgt, __global const float* w, _
     const float gs = base * (use_w ? w[row] : 1.0f), is = 1.0f / sum;
     for (int j = l; j < V; j += WG) zr[j] = exp(zr[j] - mx) * is * gs - (j == t ? gs : 0.0f);
 }
+
+// Token embedding gradient without atomics: work-item (u, c) sums column c of
+// the rows of dx whose token is utok[u] (rows order[ustart[u] .. ustart[u + 1])).
+__kernel void embed_tok_back(__global const float* dx, __global const int* order, __global const int* ustart,
+                             __global const int* utok, __global float* gt, const int C, const int n) {
+    const int i = get_global_id(0);
+    if (i >= n) return;
+    const int u = i / C, c = i % C;
+    float s = 0.0f;
+    for (int k = ustart[u]; k < ustart[u + 1]; ++k) s += dx[order[k] * C + c];
+    gt[utok[u] * C + c] += s;
+}
+
+// Position embedding gradient: the rows of dx at the same position of every sequence.
+__kernel void embed_pos_back(__global const float* dx, __global float* gp, const int B, const int TC) {
+    const int i = get_global_id(0);
+    if (i >= TC) return;
+    float s = 0.0f;
+    for (int b = 0; b < B; ++b) s += dx[b * TC + i];
+    gp[i] += s;
+}
+
+// Partial sums of squares: work-group g writes part[off + g].
+__kernel __attribute__((reqd_work_group_size(WG, 1, 1)))
+void sumsq(__global const float* x, const int n, __global float* part, const int off) {
+    __local float red[WG];
+    const int l = get_local_id(0), gid = get_group_id(0), ng = get_num_groups(0);
+    float s = 0.0f;
+    for (int i = gid * WG + l; i < n; i += ng * WG) s += x[i] * x[i];
+    s = wg_sum(red, s);
+    if (l == 0) part[off + gid] = s;
+}
+
+// The AdamW and SGD updates of Optimizer::step; k scales the gradient (clipping).
+__kernel void adamw(__global float* w, __global const float* g, __global float* m, __global float* s, const int n,
+                    const float lr, const float b1, const float b2, const float ob1, const float ob2, const float c1,
+                    const float c2, const float decay, const float k) {
+    const int i = get_global_id(0);
+    if (i >= n) return;
+    const float gi = g[i] * k;
+    const float mi = b1 * m[i] + ob1 * gi;
+    const float si = b2 * s[i] + ob2 * gi * gi;
+    m[i] = mi;
+    s[i] = si;
+    w[i] -= lr * ((mi / c1) / (sqrt(si / c2) + 1e-8f) + decay * w[i]);
+}
+
+__kernel void sgd(__global float* w, __global const float* g, __global float* m, const int n, const float lr,
+                  const float decay, const float k) {
+    const int i = get_global_id(0);
+    if (i >= n) return;
+    const float mi = 0.9f * m[i] + g[i] * k;
+    m[i] = mi;
+    w[i] -= lr * (mi + decay * w[i]);
+}
 )CL";
 
 // A device buffer that grows on demand.
@@ -356,10 +411,19 @@ struct DBuf {
 // Device memory of the whole-model text path (one set per shape).
 struct GptBufs {
     std::vector<DBuf> w, g;  // parameters and their gradients
+    std::vector<DBuf> m, s;  // optimizer moments while the weights live on the card
     // per layer: block input, ln1 out + stats, qkv, attention out, residual h, ln2 out + stats, fc1 out
     std::vector<DBuf> x, a1, st1, qkv, ho, h, a3, st2, a4;
     DBuf xf, stf, logits, ids, tgt, wt, rows, ones;
     DBuf s1, s4, S, dS, dy, dx, t1, t2, t3, yx, dq, d4;
+    DBuf order, ustart, utok, part;
+};
+
+// A training run whose weights, gradients and optimizer state stay on the card.
+struct Resident {
+    bool on = false;
+    std::vector<Param*> params;
+    int optimizer_moments = 0;  // 2 for AdamW, 1 for SGD with momentum
 };
 
 struct Gpu {
@@ -371,10 +435,13 @@ struct Gpu {
     cl_context ctx = nullptr;
     cl_command_queue q = nullptr;
     cl_kernel kgemm = nullptr, ksoft = nullptr, ksoftb = nullptr, kfill = nullptr, kadd = nullptr, kembed = nullptr, kln = nullptr,
-              klnb = nullptr, kgelu = nullptr, kgelub = nullptr, kresid = nullptr, kdropb = nullptr, kxent = nullptr;
+              klnb = nullptr, kgelu = nullptr, kgelub = nullptr, kresid = nullptr, kdropb = nullptr, kxent = nullptr,
+              kembt = nullptr, kembp = nullptr, ksumsq = nullptr, kadam = nullptr, ksgd = nullptr;
     // products and attention of the CPU layers
     DBuf pa, pb, pc, aq, as, ad, ao, adq;
     GptBufs gpt;
+    Resident res;
+    int gpt_cap = 1 << 30;  // most sequences per pass after running out of memory
     // page-locked host memory: copies to and from it run at full bus speed
     cl_mem pin = nullptr;
     float* pinned = nullptr;
@@ -495,7 +562,8 @@ void init(Gpu& g) {
         {&g.kgemm, "bgemm"}, {&g.ksoft, "softmax_causal"}, {&g.ksoftb, "softmax_back"}, {&g.kfill, "fill"},
         {&g.kadd, "add_to"}, {&g.kembed, "embed"}, {&g.kln, "layernorm"}, {&g.klnb, "layernorm_back"},
         {&g.kgelu, "gelu"}, {&g.kgelub, "gelu_back"}, {&g.kresid, "resid_drop"}, {&g.kdropb, "drop_back"},
-        {&g.kxent, "xent"}};
+        {&g.kxent, "xent"}, {&g.kembt, "embed_tok_back"}, {&g.kembp, "embed_pos_back"}, {&g.ksumsq, "sumsq"},
+        {&g.kadam, "adamw"}, {&g.ksgd, "sgd"}};
     for (auto& k : ks)
         if (e == 0) *k.k = cl.CreateKernel(prog, k.name, &e);
     if (e != 0) {
@@ -506,11 +574,13 @@ void init(Gpu& g) {
     g.ready = true;
 }
 
+cl_int touch(Gpu& g, DBuf& b);
+
 bool need(Gpu& g, DBuf& b, size_t floats) {
     size_t bytes = std::max<size_t>(floats, 1) * 4;
     if (b.cap >= bytes) return true;
     if (bytes > g.max_alloc) return false;
-    size_t want = std::min(g.max_alloc, std::max(bytes, b.cap * 5 / 4));
+    size_t want = std::min(g.max_alloc, std::max(bytes, b.cap * 5 / 4)) / 4 * 4;
     if (b.m) g.cl.ReleaseMemObject(b.m);
     b.m = nullptr;
     b.cap = 0;
@@ -521,6 +591,13 @@ bool need(Gpu& g, DBuf& b, size_t floats) {
         return false;
     }
     b.cap = want;
+    // Drivers may reserve the memory only on first use: touch it now, so running
+    // out of memory shows here and not halfway through a pass.
+    if (touch(g, b) != 0) {
+        g.cl.ReleaseMemObject(b.m);
+        b = DBuf();
+        return false;
+    }
     return true;
 }
 
@@ -622,6 +699,13 @@ struct Args {
         return e;
     }
 };
+
+cl_int touch(Gpu& g, DBuf& b) {
+    size_t n = b.cap / 4;
+    cl_int e = Args(g, g.kfill).m(b).i((int)n).f(0.f).flat(n);
+    if (!e) e = g.cl.Finish(g.q);
+    return e;
+}
 
 // A strided matrix view inside a device buffer (see bgemm).
 struct View {
@@ -747,56 +831,109 @@ struct GptJob {
     bool train;
     float dropout;
     uint64_t seed;
-    float scale;
+    float base;  // gradient of a row of weight 1: scale / (sum of the row weights of the whole batch)
 };
 
-// Device memory (floats) the job needs, to refuse what would not fit.
-double gpt_floats(const GpuGpt& m, int B, int T) {
-    double N = (double)B * T, C = m.dim, L = m.nlayer;
-    double params = 0;
-    for (Param* p : m.params) params += (double)p->w.size();
-    double per_layer = N * (C * 12 + 4);
-    double att = 2.0 * B * m.heads * T * T;
-    double scratch = N * (C * 6 + 4 * C * 2 + 3 * C) + N * m.vocab + N * 4;
-    return params * 2 + per_layer * L + N * C * 2 + att + scratch;
+double param_floats(const GpuGpt& m) {
+    double n = 0;
+    for (Param* p : m.params) n += (double)p->w.size();
+    return n;
 }
 
-cl_int gpt_run(Gpu& g, const GptJob& j, float* loss, int* correct) {
+// Device memory (floats) of the activations of one pass over B x T tokens.
+double gpt_act_floats(const GpuGpt& m, int B, int T, bool train) {
+    double N = (double)B * T, C = m.dim, att = (double)B * m.heads * T * T;
+    double f = m.nlayer * N * (12 * C + 4) + N * C * 7 + N * (double)m.vocab + N * 11 + att;
+    if (train) f += att + N * C * 13;
+    return f;
+}
+
+// The most sequences per pass that fit next to `fixed` floats of parameters (0 = none).
+int gpt_rows(Gpu& g, const GpuGpt& m, int B, int T, bool train, double fixed) {
+    const double budget = (double)g.mem * 0.85 / 4 - fixed, cap = (double)g.max_alloc / 4;
+    for (int b = std::min(B, g.gpt_cap); b >= 1; --b) {
+        double N = (double)b * T;
+        if (gpt_act_floats(m, b, T, train) <= budget && N * m.vocab <= cap && (double)b * m.heads * T * T <= cap &&
+            N * m.dim * 4 <= cap)
+            return b;
+    }
+    return 0;
+}
+
+void release_acts(Gpu& g) {
+    GptBufs& d = g.gpt;
+    for (auto* v : {&d.x, &d.a1, &d.st1, &d.qkv, &d.ho, &d.h, &d.a3, &d.st2, &d.a4})
+        for (DBuf& b : *v) release(g, b);
+    for (DBuf* b : {&d.xf, &d.stf, &d.logits, &d.ids, &d.tgt, &d.wt, &d.rows, &d.ones, &d.s1, &d.s4, &d.S, &d.dS, &d.dy, &d.dx,
+                    &d.t1, &d.t2, &d.t3, &d.yx, &d.dq, &d.d4, &d.order, &d.ustart, &d.utok, &d.part})
+        release(g, *b);
+}
+
+void release_params(Gpu& g) {
+    GptBufs& d = g.gpt;
+    for (auto* v : {&d.w, &d.g, &d.m, &d.s})
+        for (DBuf& b : *v) release(g, b);
+}
+
+// Weights, gradients (when training) and `moments` optimizer moments of the trainable ones.
+bool gpt_param_bufs(Gpu& g, const std::vector<Param*>& ps, bool grads, int moments) {
+    GptBufs& d = g.gpt;
+    for (auto* v : {&d.w, &d.g, &d.m, &d.s})
+        if (v->size() < ps.size()) v->resize(ps.size());
+    for (size_t i = 0; i < ps.size(); ++i) {
+        size_t n = ps[i]->w.size();
+        bool tr = ps[i]->trainable;
+        if (!need(g, d.w[i], n) || (grads && !need(g, d.g[i], n)) || (tr && moments >= 1 && !need(g, d.m[i], n)) ||
+            (tr && moments >= 2 && !need(g, d.s[i], n)))
+            return false;
+    }
+    return true;
+}
+
+// The buffers of a pass over B x T tokens.
+bool gpt_act_bufs(Gpu& g, const GpuGpt& m, int B, int T, bool train) {
+    const size_t N = (size_t)B * T, C = m.dim, C3 = 3 * C, C4 = 4 * C, L = m.nlayer, S = (size_t)B * m.heads * T * T;
+    GptBufs& d = g.gpt;
+    for (auto* v : {&d.x, &d.a1, &d.st1, &d.qkv, &d.ho, &d.h, &d.a3, &d.st2, &d.a4})
+        if (v->size() < L + 1) v->resize(L + 1);
+    for (size_t l = 0; l <= L; ++l)
+        if (!need(g, d.x[l], N * C)) return false;
+    for (size_t l = 0; l < L; ++l)
+        if (!need(g, d.a1[l], N * C) || !need(g, d.st1[l], N * 2) || !need(g, d.qkv[l], N * C3) || !need(g, d.ho[l], N * C) ||
+            !need(g, d.h[l], N * C) || !need(g, d.a3[l], N * C) || !need(g, d.st2[l], N * 2) || !need(g, d.a4[l], N * C4))
+            return false;
+    if (!need(g, d.xf, N * C) || !need(g, d.stf, N * 2) || !need(g, d.logits, N * m.vocab) || !need(g, d.ids, N) ||
+        !need(g, d.tgt, N) || !need(g, d.wt, N) || !need(g, d.rows, N * 2) || !need(g, d.ones, N) || !need(g, d.s1, N * C) ||
+        !need(g, d.s4, N * C4) || !need(g, d.S, S))
+        return false;
+    if (train && (!need(g, d.dS, S) || !need(g, d.dy, N * C) || !need(g, d.dx, N * C) || !need(g, d.t1, N * C) ||
+                  !need(g, d.t2, N * C) || !need(g, d.t3, N * C) || !need(g, d.yx, N * C) || !need(g, d.dq, N * C3) ||
+                  !need(g, d.d4, N * C4) || !need(g, d.order, N) || !need(g, d.ustart, N + 1) || !need(g, d.utok, N)))
+        return false;
+    return true;
+}
+
+// Weights to the card, gradients zeroed (copies run in order before the kernels).
+cl_int gpt_upload(Gpu& g, const std::vector<Param*>& ps, bool train) {
+    GptBufs& d = g.gpt;
+    cl_int e = 0;
+    for (size_t i = 0; i < ps.size() && !e; ++i) {
+        e = g.cl.EnqueueWriteBuffer(g.q, d.w[i].m, 0, 0, ps[i]->w.size() * 4, ps[i]->w.data(), 0, nullptr, nullptr);
+        if (!e && train) e = Args(g, g.kfill).m(d.g[i]).i((int)ps[i]->w.size()).f(0.f).flat(ps[i]->w.size());
+    }
+    return e;
+}
+
+// One pass over B x T tokens with the parameters already on the card: adds
+// base * gradient to the device gradients (train), the weighted loss to
+// *loss_sum and the correct predictions to *hits.
+cl_int gpt_pass(Gpu& g, const GptJob& j, double* loss_sum, int* hits) {
     const GpuGpt& m = *j.m;
     const int B = j.B, T = j.T, N = B * T, C = m.dim, H = m.heads, hd = C / H, L = m.nlayer, V = m.vocab, C3 = 3 * C, C4 = 4 * C;
     GptBufs& d = g.gpt;
     const std::vector<Param*>& ps = m.params;
-    const size_t np = ps.size();
-    auto fail = [&]() { return CL_MEM_OBJECT_ALLOCATION_FAILURE; };
-    if (d.w.size() < np) { d.w.resize(np); d.g.resize(np); }
-    for (auto* v : {&d.x, &d.a1, &d.st1, &d.qkv, &d.ho, &d.h, &d.a3, &d.st2, &d.a4})
-        if ((int)v->size() < L + 1) v->resize(L + 1);
-    for (size_t i = 0; i < np; ++i)
-        if (!need(g, d.w[i], ps[i]->w.size()) || (j.train && !need(g, d.g[i], ps[i]->w.size()))) return fail();
-    for (int l = 0; l <= L; ++l)
-        if (!need(g, d.x[l], (size_t)N * C)) return fail();
-    for (int l = 0; l < L; ++l)
-        if (!need(g, d.a1[l], (size_t)N * C) || !need(g, d.st1[l], (size_t)N * 2) || !need(g, d.qkv[l], (size_t)N * C3) ||
-            !need(g, d.ho[l], (size_t)N * C) || !need(g, d.h[l], (size_t)N * C) || !need(g, d.a3[l], (size_t)N * C) ||
-            !need(g, d.st2[l], (size_t)N * 2) || !need(g, d.a4[l], (size_t)N * C4))
-            return fail();
-    if (!need(g, d.xf, (size_t)N * C) || !need(g, d.stf, (size_t)N * 2) || !need(g, d.logits, (size_t)N * V) ||
-        !need(g, d.ids, N) || !need(g, d.tgt, N) || !need(g, d.wt, N) || !need(g, d.rows, (size_t)N * 2) || !need(g, d.ones, N) ||
-        !need(g, d.s1, (size_t)N * C) || !need(g, d.s4, (size_t)N * C4) || !need(g, d.S, (size_t)B * H * T * T))
-        return fail();
-    if (j.train && (!need(g, d.dS, (size_t)B * H * T * T) || !need(g, d.dy, (size_t)N * C) || !need(g, d.dx, (size_t)N * C) ||
-                    !need(g, d.t1, (size_t)N * C) || !need(g, d.t2, (size_t)N * C) || !need(g, d.t3, (size_t)N * C) ||
-                    !need(g, d.yx, (size_t)N * C) || !need(g, d.dq, (size_t)N * C3) || !need(g, d.d4, (size_t)N * C4)))
-        return fail();
-
     Cl& cl = g.cl;
-    cl_int e = 0;
-    // parameters in, gradients zeroed (copies run in order before the kernels)
-    for (size_t i = 0; i < np && !e; ++i) {
-        e = cl.EnqueueWriteBuffer(g.q, d.w[i].m, 0, 0, ps[i]->w.size() * 4, ps[i]->w.data(), 0, nullptr, nullptr);
-        if (!e && j.train) e = Args(g, g.kfill).m(d.g[i]).i((int)ps[i]->w.size()).f(0.f).flat(ps[i]->w.size());
-    }
-    if (!e) e = cl.EnqueueWriteBuffer(g.q, d.ids.m, 0, 0, (size_t)N * 4, j.ids, 0, nullptr, nullptr);
+    cl_int e = cl.EnqueueWriteBuffer(g.q, d.ids.m, 0, 0, (size_t)N * 4, j.ids, 0, nullptr, nullptr);
     if (!e) e = cl.EnqueueWriteBuffer(g.q, d.tgt.m, 0, 0, (size_t)N * 4, j.tgt, 0, nullptr, nullptr);
     if (!e && j.w) e = cl.EnqueueWriteBuffer(g.q, d.wt.m, 0, 0, (size_t)N * 4, j.w, 0, nullptr, nullptr);
     if (!e) e = Args(g, g.kfill).m(d.ones).i(N).f(1.f).flat(N);
@@ -847,13 +984,7 @@ cl_int gpt_run(Gpu& g, const GptJob& j, float* loss, int* correct) {
     }
     if (!e) e = layernorm(d.x[L], d.w[tail], d.w[tail + 1], d.xf, d.stf);
     if (!e) e = linear(d.xf, C, d.w[tail + 2], d.w[tail + 3], d.logits, V);
-    double wsum = N;
-    if (j.w) {
-        wsum = 0;
-        for (int r = 0; r < N; ++r) wsum += j.w[r];
-        if (wsum <= 0) wsum = 1;
-    }
-    if (!e) e = Args(g, g.kxent).m(d.logits).m(d.tgt).m(d.wt).m(d.rows).i(V).f((float)(j.scale / wsum)).i(j.w ? 1 : 0).i(j.train ? 1 : 0).rows(N);
+    if (!e) e = Args(g, g.kxent).m(d.logits).m(d.tgt).m(d.wt).m(d.rows).i(V).f(j.base).i(j.w ? 1 : 0).i(j.train ? 1 : 0).rows(N);
 
     // backward
     if (j.train && !e) {
@@ -878,38 +1009,68 @@ cl_int gpt_run(Gpu& g, const GptJob& j, float* loss, int* correct) {
         }
     }
 
-    // results
+    // embedding gradients from d.dy (the gradient of the embedding output),
+    // grouped by token: the rows of each token in position order
+    if (j.train && !e) {
+        std::vector<int> order(N), ustart, utok;
+        for (int n = 0; n < N; ++n) order[n] = n;
+        std::stable_sort(order.begin(), order.end(), [&](int a, int b) { return j.ids[a] < j.ids[b]; });
+        for (int k = 0; k < N; ++k)
+            if (k == 0 || j.ids[order[k]] != j.ids[order[k - 1]]) {
+                ustart.push_back(k);
+                utok.push_back(j.ids[order[k]]);
+            }
+        ustart.push_back(N);
+        const int U = (int)utok.size();
+        e = cl.EnqueueWriteBuffer(g.q, d.order.m, 1, 0, (size_t)N * 4, order.data(), 0, nullptr, nullptr);
+        if (!e) e = cl.EnqueueWriteBuffer(g.q, d.ustart.m, 1, 0, (size_t)(U + 1) * 4, ustart.data(), 0, nullptr, nullptr);
+        if (!e) e = cl.EnqueueWriteBuffer(g.q, d.utok.m, 1, 0, (size_t)U * 4, utok.data(), 0, nullptr, nullptr);
+        if (!e && ps[0]->trainable)
+            e = Args(g, g.kembt).m(d.dy).m(d.order).m(d.ustart).m(d.utok).m(d.g[0]).i(C).i(U * C).flat((size_t)U * C);
+        if (!e && ps[1]->trainable) e = Args(g, g.kembp).m(d.dy).m(d.g[1]).i(B).i(T * C).flat((size_t)T * C);
+    }
+
+    // results (the blocking read also waits for everything above)
     std::vector<float> rows((size_t)N * 2);
     if (!e) e = cl.EnqueueReadBuffer(g.q, d.rows.m, 1, 0, rows.size() * 4, rows.data(), 0, nullptr, nullptr);
     if (e) return e;
-    double total = 0;
-    int ok = 0;
     for (int r = 0; r < N; ++r) {
-        total += (j.w ? j.w[r] : 1.0) * rows[2 * r];
-        ok += rows[2 * r + 1] > 0.5f;
+        *loss_sum += (j.w ? j.w[r] : 1.0) * rows[2 * r];
+        *hits += rows[2 * r + 1] > 0.5f;
     }
-    *loss = (float)(total / wsum);
-    if (correct) *correct = ok;
-    if (!j.train) return 0;
-    for (size_t i = 2; i < np && !e; ++i)
-        if (ps[i]->trainable) e = download(g, d.g[i], ps[i]->g.data(), ps[i]->g.size(), true);
-    // the embedding gradient is a scatter by token: cheap on the CPU
-    Param* tok = ps[0];
-    Param* pos = ps[1];
-    if (!e && tok->trainable) {
-        std::vector<float> dx0((size_t)N * C);
-        e = download(g, d.dy, dx0.data(), dx0.size(), false);
-        for (int n = 0; n < N && !e; ++n) {
-            const float* src = dx0.data() + (size_t)n * C;
-            float* a = tok->g.row(j.ids[n]);
-            float* q = pos->g.row(n % T);
-            for (int c = 0; c < C; ++c) {
-                a[c] += src[c];
-                q[c] += src[c];
-            }
+    return 0;
+}
+
+// Weights (and optimizer moments) of a resident run back to the host.
+cl_int pull_locked(Gpu& g, bool moments) {
+    GptBufs& d = g.gpt;
+    const std::vector<Param*>& ps = g.res.params;
+    cl_int e = 0;
+    for (size_t i = 0; i < ps.size() && !e; ++i) {
+        Param& p = *ps[i];
+        e = download(g, d.w[i], p.w.data(), p.w.size(), false);
+        if (!moments || !p.trainable) continue;
+        if (!e && i < d.m.size() && d.m[i].m) {
+            if (p.m.size() != p.w.size()) p.m.resize(p.w.rows, p.w.cols);
+            e = download(g, d.m[i], p.m.data(), p.m.size(), false);
+        }
+        if (!e && i < d.s.size() && d.s[i].m) {
+            if (p.s.size() != p.w.size()) p.s.resize(p.w.rows, p.w.cols);
+            e = download(g, d.s[i], p.s.data(), p.s.size(), false);
         }
     }
     return e;
+}
+
+// Ends a resident run; with `pull` its state goes back to the host first.
+bool end_resident_locked(Gpu& g, bool pull) {
+    if (!g.res.on) return true;
+    bool ok = !pull || pull_locked(g, true) == 0;
+    g.cl.Finish(g.q);
+    release_acts(g);
+    release_params(g);
+    g.res = Resident();
+    return ok;
 }
 
 std::atomic<bool> g_on{false};
@@ -923,6 +1084,10 @@ void turn_off() {
 bool offload(int v, const float* A, const float* B, float* C, int x, int y, int z) {
     Gpu& g = G();
     if (!g_on.load(std::memory_order_relaxed) || (double)x * y * z < g.min_work) return false;
+    // All three matrices cross the bus; with a thin one (generating one token at
+    // a time) the product does about one operation per copied number and the
+    // CPU, which copies nothing, is faster.
+    if (std::min({x, y, z}) < 64) return false;
     std::unique_lock<std::mutex> lk(g.mu, std::try_to_lock);
     if (!lk.owns_lock()) return false;
     cl_int e = run(g, v, A, B, C, x, y, z);
@@ -1083,28 +1248,64 @@ bool gpu_gpt_step(const GpuGpt& m, const int* ids, const int* tgt, const float* 
         if (err) *err = "the GPU is not turned on";
         return false;
     }
-    if ((int)m.params.size() != 2 + 12 * m.nlayer + 4 || m.dim % m.heads != 0) return false;
+    if ((int)m.params.size() != 2 + 12 * m.nlayer + 4 || m.dim % m.heads != 0 || B < 1 || T < 1) return false;
     std::unique_lock<std::mutex> lk(g.mu, std::try_to_lock);
     if (!lk.owns_lock()) {
         if (err) *err = "the GPU is busy";
         return false;
     }
-    if (gpt_floats(m, B, T) * 4 > (double)g.mem * 0.85) {
-        if (err) *err = "the model does not fit in GPU memory";
+    const bool resident = g.res.on && g.res.params == m.params;
+    if (g.res.on && !resident) {
+        if (err) *err = "the GPU is busy with another model";
         return false;
     }
-    GptJob j{&m, ids, tgt, w, B, T, train, dropout, seed, scale};
-    cl_int e = gpt_run(g, j, loss, correct);
-    if (e == 0) return true;
+    const std::vector<Param*>& ps = m.params;
+    const double P = param_floats(m);
+    const double fixed = resident ? P * (2 + g.res.optimizer_moments) : P * (train ? 2 : 1);
+    double wsum = (double)B * T;
+    if (w) {
+        wsum = 0;
+        for (size_t r = 0; r < (size_t)B * T; ++r) wsum += w[r];
+        if (wsum <= 0) wsum = 1;
+    }
+    cl_int e = 0;
+    int bc = 0;
+    // As many sequences per pass as fit; after running out of memory, half as many.
+    for (;;) {
+        bc = gpt_rows(g, m, B, T, train, fixed);
+        if (bc >= 1 && (resident || gpt_param_bufs(g, ps, train, 0)) && gpt_act_bufs(g, m, bc, T, train)) break;
+        release_acts(g);
+        if (!resident) release_params(g);
+        if (bc <= 1) {
+            e = CL_MEM_OBJECT_ALLOCATION_FAILURE;
+            break;
+        }
+        g.gpt_cap = std::max(1, bc / 2);
+    }
+    if (!e && !resident) e = gpt_upload(g, ps, train);
+    double lsum = 0;
+    int hits = 0;
+    const float base = (float)(scale / wsum);
+    for (int r0 = 0; r0 < B && !e; r0 += bc) {
+        const size_t o = (size_t)r0 * T;
+        GptJob j{&m, ids + o, tgt + o, w ? w + o : nullptr, std::min(bc, B - r0), T, train, dropout,
+                 seed + (uint64_t)r0 * 0x9E3779B97F4A7C15ull, base};
+        e = gpt_pass(g, j, &lsum, &hits);
+    }
+    if (!e && train && !resident)
+        for (size_t i = 0; i < ps.size() && !e; ++i)
+            if (ps[i]->trainable) e = download(g, g.gpt.g[i], ps[i]->g.data(), ps[i]->g.size(), true);
+    if (e == 0) {
+        *loss = (float)(lsum / wsum);
+        if (correct) *correct = hits;
+        return true;
+    }
     g.cl.Finish(g.q);
-    if (err) *err = is_memory_error(e) ? "not enough GPU memory" : "OpenCL error " + std::to_string(e);
-    // memory may be held by a larger shape: free it and let the next call retry
-    GptBufs& d = g.gpt;
-    for (auto* v : {&d.w, &d.g, &d.x, &d.a1, &d.st1, &d.qkv, &d.ho, &d.h, &d.a3, &d.st2, &d.a4})
-        for (DBuf& b : *v) release(g, b);
-    for (DBuf* b : {&d.xf, &d.stf, &d.logits, &d.ids, &d.tgt, &d.wt, &d.rows, &d.ones, &d.s1, &d.s4, &d.S, &d.dS, &d.dy, &d.dx,
-                    &d.t1, &d.t2, &d.t3, &d.yx, &d.dq, &d.d4})
-        release(g, *b);
+    if (err) *err = is_memory_error(e) ? "the model does not fit in GPU memory" : "OpenCL error " + std::to_string(e);
+    // A resident run hands its weights and moments back so the CPU can continue.
+    if (resident) end_resident_locked(g, true);
+    release_acts(g);
+    release_params(g);
     if (!is_memory_error(e)) {
         lk.unlock();
         turn_off();
@@ -1112,11 +1313,145 @@ bool gpu_gpt_step(const GpuGpt& m, const int* ids, const int* tgt, const float* 
     return false;
 }
 
+void gpu_limit_pass_rows(int rows) {
+    Gpu& g = G();
+    std::lock_guard<std::mutex> lk(g.mu);
+    g.gpt_cap = rows > 0 ? rows : 1 << 30;
+}
+
+bool gpu_resident_begin(const GpuGpt& m, int moments, int B, int T, std::string* err) {
+    Gpu& g = G();
+    if (!g_on.load(std::memory_order_relaxed)) {
+        if (err) *err = "the GPU is not turned on";
+        return false;
+    }
+    if ((int)m.params.size() != 2 + 12 * m.nlayer + 4 || m.dim % m.heads != 0) return false;
+    std::lock_guard<std::mutex> lk(g.mu);
+    end_resident_locked(g, false);
+    release_acts(g);
+    release_params(g);
+    g.gpt_cap = 1 << 30;
+    moments = std::max(0, std::min(2, moments));
+    const double P = param_floats(m);
+    if (gpt_rows(g, m, std::max(1, B), T, true, P * (2 + moments)) < 1 || !gpt_param_bufs(g, m.params, true, moments)) {
+        release_params(g);
+        if (err) *err = "the model and its optimizer state do not fit in GPU memory";
+        return false;
+    }
+    GptBufs& d = g.gpt;
+    cl_int e = gpt_upload(g, m.params, true);
+    for (size_t i = 0; i < m.params.size() && !e; ++i) {
+        const Param& p = *m.params[i];
+        if (!p.trainable) continue;
+        if (moments >= 1)
+            e = p.m.size() == p.w.size() ? upload(g, d.m[i], p.m.data(), p.m.size())
+                                          : Args(g, g.kfill).m(d.m[i]).i((int)p.w.size()).f(0.f).flat(p.w.size());
+        if (!e && moments >= 2)
+            e = p.s.size() == p.w.size() ? upload(g, d.s[i], p.s.data(), p.s.size())
+                                          : Args(g, g.kfill).m(d.s[i]).i((int)p.w.size()).f(0.f).flat(p.w.size());
+    }
+    if (!e) e = g.cl.Finish(g.q);
+    if (e) {
+        release_params(g);
+        if (err) *err = "OpenCL error " + std::to_string(e);
+        return false;
+    }
+    g.res.on = true;
+    g.res.params = m.params;
+    g.res.optimizer_moments = moments;
+    return true;
+}
+
+bool gpu_resident_active() {
+    Gpu& g = G();
+    std::lock_guard<std::mutex> lk(g.mu);
+    return g.res.on;
+}
+
+bool gpu_resident_zero_grad() {
+    Gpu& g = G();
+    std::lock_guard<std::mutex> lk(g.mu);
+    if (!g.res.on) return false;
+    cl_int e = 0;
+    for (size_t i = 0; i < g.res.params.size() && !e; ++i) {
+        size_t n = g.res.params[i]->w.size();
+        e = Args(g, g.kfill).m(g.gpt.g[i]).i((int)n).f(0.f).flat(n);
+    }
+    return e == 0;
+}
+
+bool gpu_resident_update(bool adam, float lr, float weight_decay, float clip, long t, float* grad_norm) {
+    Gpu& g = G();
+    std::lock_guard<std::mutex> lk(g.mu);
+    if (!g.res.on || (adam && g.res.optimizer_moments < 2) || (!adam && g.res.optimizer_moments < 1)) return false;
+    const std::vector<Param*>& ps = g.res.params;
+    GptBufs& d = g.gpt;
+    const int groups = 64;
+    cl_int e = need(g, d.part, ps.size() * groups) ? 0 : CL_MEM_OBJECT_ALLOCATION_FAILURE;
+    for (size_t i = 0; i < ps.size() && !e; ++i)
+        if (ps[i]->trainable) e = Args(g, g.ksumsq).m(d.g[i]).i((int)ps[i]->w.size()).m(d.part).i((int)i * groups).rows(groups);
+    std::vector<float> part(ps.size() * groups);
+    if (!e) e = g.cl.EnqueueReadBuffer(g.q, d.part.m, 1, 0, part.size() * 4, part.data(), 0, nullptr, nullptr);
+    double sq = 0;
+    for (size_t i = 0; i < ps.size(); ++i)
+        if (ps[i]->trainable)
+            for (int k = 0; k < groups; ++k) sq += part[i * groups + k];
+    const float norm = (float)std::sqrt(sq);
+    if (grad_norm) *grad_norm = norm;
+    if (!e && !std::isfinite(norm)) return false;  // the weights stay as they are
+    const float k = clip > 0 && norm > clip ? clip / norm : 1.f;
+    const float b1 = 0.9f, b2 = 0.999f;
+    const float c1 = 1.f - std::pow(b1, (float)t), c2 = 1.f - std::pow(b2, (float)t);
+    for (size_t i = 0; i < ps.size() && !e; ++i) {
+        const Param& p = *ps[i];
+        if (!p.trainable) continue;
+        const int n = (int)p.w.size();
+        const float decay = p.decay ? weight_decay : 0.f;
+        if (adam)
+            e = Args(g, g.kadam).m(d.w[i]).m(d.g[i]).m(d.m[i]).m(d.s[i]).i(n).f(lr).f(b1).f(b2).f(1.f - b1).f(1.f - b2).f(c1).f(c2)
+                    .f(decay).f(k).flat(n);
+        else
+            e = Args(g, g.ksgd).m(d.w[i]).m(d.g[i]).m(d.m[i]).i(n).f(lr).f(decay).f(k).flat(n);
+    }
+    if (e) {
+        g.cl.Finish(g.q);
+        end_resident_locked(g, true);
+        return false;
+    }
+    return true;
+}
+
+bool gpu_resident_pull(bool moments) {
+    Gpu& g = G();
+    std::lock_guard<std::mutex> lk(g.mu);
+    if (!g.res.on) return false;
+    return pull_locked(g, moments) == 0;
+}
+
+bool gpu_resident_push() {
+    Gpu& g = G();
+    std::lock_guard<std::mutex> lk(g.mu);
+    if (!g.res.on) return false;
+    cl_int e = 0;
+    for (size_t i = 0; i < g.res.params.size() && !e; ++i) {
+        const Param& p = *g.res.params[i];
+        e = upload(g, g.gpt.w[i], p.w.data(), p.w.size());
+    }
+    return e == 0;
+}
+
+bool gpu_resident_end(bool pull) {
+    Gpu& g = G();
+    std::lock_guard<std::mutex> lk(g.mu);
+    return end_resident_locked(g, pull);
+}
+
 bool gpu_active() { return g_on; }
 
 bool gpu_use(bool on, std::string* msg) {
     Gpu& g = G();
     if (!on) {
+        gpu_resident_end(false);
         turn_off();
         return true;
     }

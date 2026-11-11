@@ -19,3 +19,4 @@ const char* language_name(int lang) {
 }
 
 const char* tr(S id) { return kTable[(int)id][g_lang]; }
+const char* tr_en(S id) { return kTable[(int)id][LANG_EN]; }

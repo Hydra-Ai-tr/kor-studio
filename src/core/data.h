@@ -29,8 +29,8 @@ struct TextLayout {
 };
 // Subword vocabulary by byte-pair merges: all characters plus the most frequent
 // merged pieces, up to vocab_size entries. Pieces never contain a line break
-// next to other characters.
-std::vector<std::string> learn_subwords(const std::vector<std::string>& chars, int vocab_size);
+// next to other characters. Large texts are learned from a sample spread over them.
+std::vector<std::string> learn_subwords(const std::string& text, int vocab_size);
 
 TextLayout layout_dialogue(const std::vector<int>& ids, const std::vector<int>& q_tag, const std::vector<int>& a_tag, int newline);
 // Start of a T-token window inside ids[lo, hi): an example start with

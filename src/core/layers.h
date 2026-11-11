@@ -38,6 +38,7 @@ struct Linear : Layer {
     void forward(const Tensor& x, Tensor& y, bool train) override;
     void backward(const Tensor& dy, Tensor& dx) override;
     void collect(std::vector<Param*>& ps) override;
+    void release_scratch() { xin = nullptr; xa = Tensor(); dxa = Tensor(); }
 
 private:
     const Tensor* xin = nullptr;
@@ -63,6 +64,7 @@ struct Dropout : Layer {
     Dropout(float p_, uint64_t seed) : p(p_), rng(seed) {}
     void forward(const Tensor& x, Tensor& y, bool train) override;
     void backward(const Tensor& dy, Tensor& dx) override;
+    void release_scratch() { std::vector<uint8_t>().swap(mask); active = false; }
 
 private:
     std::vector<uint8_t> mask;
@@ -76,6 +78,7 @@ struct LayerNorm : Layer {
     void forward(const Tensor& x, Tensor& y, bool train) override;
     void backward(const Tensor& dy, Tensor& dx) override;
     void collect(std::vector<Param*>& ps) override;
+    void release_scratch() { xhat = Tensor(); std::vector<float>().swap(inv); }
 
 private:
     Tensor xhat;
@@ -107,6 +110,12 @@ struct Attention {
     // of positions 0..pos-1 are read from (and this one appended to) kv, which
     // holds [ctx x 2C] rows.
     void step(const Tensor& x, Tensor& y, Tensor& kv, int pos);
+    void release_scratch() {
+        qkv.release_scratch();
+        proj.release_scratch();
+        q3 = ho = dho = dq3 = Tensor();
+        std::vector<float>().swap(att);
+    }
 
 private:
     void cpu_forward();  // ho and att from q3
@@ -132,6 +141,16 @@ struct Block {
     void step(const Tensor& x, Tensor& y, Tensor& kv, int pos);
     void collect(std::vector<Param*>& ps);
     void linears(std::vector<Linear*>& ls);
+    void release_scratch() {
+        ln1.release_scratch();
+        ln2.release_scratch();
+        attn.release_scratch();
+        fc1.release_scratch();
+        fc2.release_scratch();
+        drop1.release_scratch();
+        drop2.release_scratch();
+        a1 = a2 = r1 = h = a3 = a4 = a5 = a6 = r2 = t1 = t2 = dh = Tensor();
+    }
 
 private:
     Tensor a1, a2, r1, h, a3, a4, a5, a6, r2, t1, t2, dh;

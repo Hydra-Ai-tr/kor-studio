@@ -7,9 +7,12 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace kor {
+
+struct GpuGpt;
 
 enum ModelKind { MODEL_MLP = 0, MODEL_GPT = 1 };
 // What the tokens of a sequence model (MODEL_GPT) stand for.
@@ -78,6 +81,10 @@ public:
     bool use_gpu = true;
     bool last_step_on_gpu = false;
     void zero_grad();
+    // Frees the activations a CPU step left behind (they come back on the next one).
+    void release_scratch();
+    // The model as gpu_gpt_step sees it; false when it cannot run there (not a text model, LoRA).
+    bool gpu_layout(GpuGpt& g);
     std::vector<Param*> params();
     size_t param_count(bool trainable_only = false);
 
@@ -157,11 +164,25 @@ Sound sample_sound(Model& m, float seconds, float temperature, Rng& rng,
 
 uint16_t float_to_half(float f);
 float half_to_float(uint16_t h);
+// Bytes of the UTF-8 character at s[i] (1 for a broken or cut sequence).
+size_t utf8_len(const char* s, size_t i, size_t n);
 // Splits UTF-8 text into code points (as strings); drops '\r'.
 std::vector<std::string> utf8_chars(const std::string& s);
+
 // Text to token ids: at each position the longest vocabulary entry that
 // matches (single characters for character-level models). Characters the
-// vocabulary does not cover are skipped.
+// vocabulary does not cover are skipped, '\r' is ignored. Build it once for
+// many texts; it needs no per-character strings, so it suits large files.
+class Tokenizer {
+public:
+    explicit Tokenizer(const std::vector<std::string>& vocab);
+    void encode(const char* s, size_t n, std::vector<int>& out) const;  // appends
+
+private:
+    std::vector<int> root_;                    // byte -> node from the root
+    std::unordered_map<uint64_t, int> kids_;   // (node << 8 | byte) -> node
+    std::vector<int> nodes_;                   // node -> vocabulary id, -1 = none
+};
 std::vector<int> tokenize(const std::string& text, const std::vector<std::string>& vocab);
 
 }  // namespace kor

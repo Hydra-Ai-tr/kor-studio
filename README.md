@@ -71,10 +71,11 @@ code a readable reference for how training actually works.
   `prompt`/`completion`) as question-answer text, and clean a text before training: tidy spaces,
   drop empty lines, repeated question-answer pairs and questions without an answer. The tool
   shows what will change before it writes a cleaned copy; your file stays as it is.
-- **Graphics card training.** Text models can run their whole forward and backward pass on an
-  OpenCL GPU, several times faster than on the CPU. At the start one step of your data runs on
-  both and the results are compared; when the card is missing, disagrees or is too small,
-  training simply stays on the CPU.
+- **Graphics card training.** Text models can train on an OpenCL GPU, several times faster
+  than on the CPU: the weights, gradients and optimizer stay on the card for the whole run, and
+  batches that don't fit run in parts. An 85-million-parameter model trains on a 4 GB laptop
+  GPU. At the start one step of your data runs on both and the results are compared; when the
+  card is missing or disagrees, training simply stays on the CPU.
 - **Chat page.** Finished models are saved automatically; pick any `.kor` model and talk to it,
   with temperature, answer length and conversation memory settings.
 - **Local OpenAI-compatible API.** `kor-cli serve` (or *Serve as API* on the chat page) offers a
@@ -295,11 +296,18 @@ partner; in plain text it removes repeated lines of 24 characters or more.
 With `--gpu` (or *Train on the graphics card* in the training settings) a text model runs its
 whole training step on the GPU through OpenCL, which comes with the drivers of most graphics
 cards; nothing extra is installed. Embeddings, layer norms, attention, the MLP, dropout and the
-loss all run on the card and the activations never leave it; only the weights go in and the
-gradients come back each step, and the optimizer stays on the CPU. At the start one step of
-your data runs on both and the results are compared. A model that does not fit in GPU memory
-sends only its attention and large products to the card; LoRA fine-tuning and table models do
-the same. Any GPU error switches back to the CPU.
+loss all run on the card. The weights, gradients and AdamW or SGD moments stay there for the
+whole run, with gradient clipping on the card too, so each step only sends tokens; the CPU copy
+is refreshed every 20 seconds and for tests, checkpoints and plugins. A batch that does not fit
+in GPU memory runs in several passes whose gradients add up on the card. At the start one step
+of your data runs on both and the results are compared. LoRA fine-tuning and table models send
+only their large products to the card, and with an average of the weights (EMA) the optimizer
+stays on the CPU. Any GPU error switches back to the CPU.
+
+With the GPU turned on, the automatic plan sizes text models to the GPU memory, the RAM and the
+amount of text: about 14M, 38M, 86M or 200M parameters. An 85,567,565-parameter model (768 wide,
+12 layers, context 512) trains on a 4 GB RTX 3050 Ti Laptop GPU. Generation and question tests
+still run on the CPU, which is slow for models of this size.
 
 `kor-cli gpu` checks every GPU kernel against the CPU (attention against a plain
 double-precision version, dropout and loss weights against finite differences) and times one
@@ -369,7 +377,9 @@ transformers up to a few million parameters, which train in seconds to minutes o
 Image and sound models are slower: every pixel or sample is a token, so expect tens of minutes
 to hours for good results. It is a tool for learning, experimentation and small, focused models. It will not
 train a large language model. GPU training covers text (and image and sound) models; it needs
-an OpenCL driver and enough GPU memory for the activations of one batch.
+an OpenCL driver and enough GPU memory for the model, its optimizer and one sequence. With a
+graphics card, text models of tens of millions of parameters train too, but they need hundreds
+of millions of tokens of text to learn rather than memorize.
 
 ## Project layout
 
@@ -390,7 +400,8 @@ scripts/     release packaging
 
 ## Roadmap
 
-- Optimizer and generation on the GPU, and int8 quantized export
+- Generation on the GPU, and int8 quantized export
+- Load pretrained GGUF models (Qwen, Llama) and fine-tune them with LoRA on a 4-bit base
 - Larger image and sound models (patches instead of single pixels and samples)
 - Convolutional layers
 - More dataset tools: splitting and augmentation

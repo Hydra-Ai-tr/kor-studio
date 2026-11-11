@@ -5,6 +5,7 @@
 #include "platform.h"
 #include "plugins.h"
 
+#include "../core/gpu.h"
 #include "../core/kernels.h"
 #include "../core/media.h"
 #include "../core/sysinfo.h"
@@ -674,6 +675,18 @@ void scan_runs() {
         for (size_t i = 0; i < A.runs.size() && i < 3; ++i) A.runs[i].selected = true;
 }
 
+// The trainer writes its GPU notes in English.
+std::string gpu_note(std::string s) {
+    static const S keys[] = {S::GpuFull,     S::GpuPartial, S::GpuChecked,  S::GpuDiffers, S::GpuDiffersTail,
+                             S::GpuResident, S::GpuOptCpu,  S::GpuProblem,  S::GpuFailed};
+    for (S k : keys) {
+        const char* en = tr_en(k);
+        size_t at = s.find(en);
+        if (at != std::string::npos) s.replace(at, std::strlen(en), tr(k));
+    }
+    return s;
+}
+
 void pump_events() {
     std::vector<TrainEvent> ev;
     A.trainer.drain_events(ev);
@@ -728,7 +741,8 @@ void pump_events() {
                 break;
             case EV_HOOK_LOG: {
                 static const int tones[] = {State::T_NORMAL, State::T_GOOD, State::T_ACCENT, State::T_BAD, State::T_MUTED};
-                log_line(t + "[" + e.source + "] " + e.text, tones[e.n1 >= 0 && e.n1 < 5 ? e.n1 : 0]);
+                log_line(t + "[" + e.source + "] " + (e.source == "GPU" ? gpu_note(e.text) : e.text),
+                         tones[e.n1 >= 0 && e.n1 < 5 ? e.n1 : 0]);
                 break;
             }
             case EV_HOOK_STOP:
@@ -829,10 +843,18 @@ void finalize_spec() {
     A.spec.lora_rank = 0;
 }
 
+// Memory (MB) of training: text models on the GPU keep their activations on
+// the card, the host holds weights, gradients, moments and a best-weights copy.
+double train_ram_mb(const ModelSpec& s, int batch) {
+    if (A.use_gpu && s.kind == MODEL_GPT && s.lora_rank == 0 && gpu_probe().found)
+        return (double)estimate_params(s) * 4 * 5 / (1024.0 * 1024.0);
+    return (double)estimate_train_bytes(s, batch) / (1024.0 * 1024.0);
+}
+
 void auto_configure() {
     if (A.data.kind == DATA_NONE) return;
     A.sys = detect_system();  // free memory changes over time
-    A.plan = autotune(A.sys, A.data);
+    A.plan = autotune(A.sys, A.data, A.use_gpu ? gpu_probe().mem_gb : 0);
     A.spec = A.plan.spec;
     TrainConfig old = A.cfg;
     A.cfg = A.plan.cfg;
@@ -2921,20 +2943,23 @@ void arch_controls(ModelSpec& s) {
     float lw = std::min(px(230), ImGui::GetContentRegionAvail().x * 0.45f);
     if (s.kind == MODEL_GPT) {
         int per = std::max(4, s.dim / std::max(1, s.heads));
-        int max_ctx = std::max(8, std::min(512, (int)A.data.n_train - 2));
+        // a GPU trains far larger text models than the CPU
+        const bool big = A.use_gpu && A.data.media == MEDIA_TEXT;
+        const int max_heads = big ? 32 : 12, max_layers = big ? 48 : 12;
+        int max_ctx = std::max(8, std::min(big ? 2048 : 512, (int)A.data.n_train - 2));
         field_label(tr(S::Heads), lw);
-        slider_int("##heads", &s.heads, 1, 12);
+        slider_int("##heads", &s.heads, 1, max_heads);
         field_label(tr(S::HeadDim), lw);
         slider_int("##hdim", &per, 8, 64);
         field_label(tr(S::Layers), lw);
-        slider_int("##layers", &s.nlayer, 1, 12);
+        slider_int("##layers", &s.nlayer, 1, max_layers);
         field_label(tr(S::Context), lw);
         bool image = A.data.media == MEDIA_IMAGE;
         ImGui::BeginDisabled(image);
         slider_int("##ctx", &s.ctx, 8, image ? s.ctx : max_ctx);
         ImGui::EndDisabled();
-        s.heads = std::max(1, std::min(12, s.heads));
-        s.nlayer = std::max(1, std::min(12, s.nlayer));
+        s.heads = std::max(1, std::min(max_heads, s.heads));
+        s.nlayer = std::max(1, std::min(max_layers, s.nlayer));
         s.dim = s.heads * std::max(4, std::min(64, per));
         if (image) s.ctx = A.data.img_size * A.data.img_size + 1;
         else s.ctx = std::max(8, std::min(max_ctx, s.ctx));
@@ -2997,7 +3022,7 @@ void arch_controls(ModelSpec& s) {
 
 void fit_card(float min_h, float width, float* natural) {
     begin_card("fit", tr(S::MemoryFit), min_h, width);
-    double mb = (double)estimate_train_bytes(A.spec, A.cfg.batch) / (1024.0 * 1024.0);
+    double mb = train_ram_mb(A.spec, A.cfg.batch);
     double budget = A.has_plan ? A.plan.budget_mb : 512;
     text(tr(S::Params), C::muted);
     {
@@ -3600,7 +3625,11 @@ void train_settings(bool run) {
     }
     if (A.data.kind == DATA_TEXT) {
         ImGui::SameLine(0, px(28));
-        checkbox(tr(S::UseGpu), &A.use_gpu);
+        const ModelSpec& ps = A.plan.spec;
+        bool planned = A.has_plan && A.spec.dim == ps.dim && A.spec.nlayer == ps.nlayer && A.spec.heads == ps.heads &&
+                       A.spec.ctx == ps.ctx;
+        // the automatic plan follows the switch (a GPU trains larger models); own settings stay
+        if (checkbox(tr(S::UseGpu), &A.use_gpu) && planned) auto_configure();
         tooltip(tr(S::UseGpuHelp));
     }
     A.cfg.patience = std::max(0, std::min(1000, A.cfg.patience));
@@ -3617,7 +3646,7 @@ void train_settings(bool run) {
     A.cfg.warmup = std::min(100, A.cfg.steps / 10);
     ImGui::EndDisabled();
     const ModelSpec& ms = A.model && model_matches_data() ? A.model->spec : A.spec;
-    double mb = (double)estimate_train_bytes(ms, A.cfg.batch) / (1024.0 * 1024.0);
+    double mb = train_ram_mb(ms, A.cfg.batch);
     std::string info = strf(tr(S::EffBatch), A.cfg.batch * A.cfg.accum) + "   \xC2\xB7   " + tr(S::EstRam) + ": " + fmt_mb(mb);
     text_wrapped(info.c_str(), C::subtle, F.small);
 }

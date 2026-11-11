@@ -275,6 +275,15 @@
     X(LogHookSampling, "training rows: %.0f%% start at examples, question weight %.2f", "eğitim satırları: %%%.0f örnek başından, soru ağırlığı %.2f", "обучающие строки: %.0f%% с начала примеров, вес вопросов %.2f") \
     X(LogHookDropout, "dropout set to %.2f", "dropout %.2f yapıldı", "dropout изменён на %.2f") \
     X(LogHookStop, "stopping training: %s", "eğitim durduruluyor: %s", "обучение останавливается: %s") \
+    X(GpuFull, "text models train fully on the GPU", "metin modelleri tamamen ekran kartında eğitilir", "текстовые модели полностью обучаются на GPU") \
+    X(GpuPartial, "; this model does not fit in GPU memory, so only parts of it run there", "; bu model ekran kartı belleğine sığmıyor, yalnızca bazı kısımları orada çalışır", "; модель не помещается в память GPU, там выполняется только её часть") \
+    X(GpuChecked, "; checked against the CPU on this data (difference ", "; bu veride CPU ile karşılaştırıldı (fark ", "; проверено по CPU на этих данных (разница ") \
+    X(GpuDiffers, "; the GPU results differ from the CPU (", "; ekran kartı sonuçları CPU'dan farklı (", "; результаты GPU отличаются от CPU (") \
+    X(GpuDiffersTail, "), the model trains on the CPU", "), model CPU'da eğitilir", "), модель обучается на CPU") \
+    X(GpuResident, "weights, gradients and optimizer stay on the GPU", "ağırlıklar, gradyanlar ve optimizer ekran kartında kalır", "веса, градиенты и оптимизатор остаются на GPU") \
+    X(GpuOptCpu, "the optimizer runs on the CPU: ", "optimizer CPU'da çalışır: ", "оптимизатор работает на CPU: ") \
+    X(GpuProblem, "the GPU ran into a problem; training continues with the optimizer on the CPU", "ekran kartında sorun çıktı; eğitim, optimizer CPU'da çalışarak sürüyor", "на GPU возникла проблема; обучение продолжается с оптимизатором на CPU") \
+    X(GpuFailed, "the GPU failed; training continues on the CPU from the last weights it handed over", "ekran kartı çalışmayı bıraktı; eğitim, kartın son verdiği ağırlıklarla CPU'da sürüyor", "GPU отказал; обучение продолжается на CPU с последних переданных весов") \
     X(PythonChecking, "Looking for Python...", "Python aranıyor...", "Поиск Python...") \
     X(PythonFound, "%s is ready", "%s hazır", "%s готов") \
     X(PythonMissing, "Python 3 was not found. Install it from python.org (tick \"Add python.exe to PATH\"), then press Check again.", "Python 3 bulunamadı. python.org adresinden kur (\"Add python.exe to PATH\" kutusunu işaretle), sonra Tekrar dene'ye bas.", "Python 3 не найден. Установите его с python.org (отметьте \"Add python.exe to PATH\") и нажмите «Проверить снова».") \
@@ -487,3 +496,4 @@ void set_language(int lang);
 int get_language();
 const char* language_name(int lang);  // in its own language
 const char* tr(S id);
+const char* tr_en(S id);
