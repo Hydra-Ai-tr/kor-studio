@@ -86,9 +86,13 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Dependencies
+        timeout-minutes: 15
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build xorg-dev libgl1-mesa-dev libwayland-dev libxkbcommon-dev wayland-protocols
+          # The runner's Azure Ubuntu mirror sometimes stalls on every package.
+          if [ -f /etc/apt/apt-mirrors.txt ]; then echo "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt; fi
+          sudo sed -i 's|http://azure.archive.ubuntu.com|http://archive.ubuntu.com|g' /etc/apt/sources.list
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y ninja-build xorg-dev libgl1-mesa-dev libwayland-dev libxkbcommon-dev wayland-protocols
 
       - name: Build
         run: |
