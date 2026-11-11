@@ -43,8 +43,10 @@ static std::string file_dialog(int kind, bool save) {
     ofn.hwndOwner = GetActiveWindow();
     ofn.lpstrFile = buf;
     ofn.nMaxFile = 4096;
-    ofn.lpstrFilter = kind == DLG_MODEL     ? L"Kor model (*.kor)\0*.kor\0All files\0*.*\0"
-                      : kind == DLG_PROJECT ? L"Kor project (project.korproj)\0*.korproj\0All files\0*.*\0"
+    ofn.lpstrFilter = kind == DLG_MODEL        ? L"Kor model (*.kor)\0*.kor\0All files\0*.*\0"
+                      : kind == DLG_CHAT_MODEL ? L"Text model (*.kor;*.gguf)\0*.kor;*.gguf\0All files\0*.*\0"
+                      : kind == DLG_GGUF       ? L"GGUF (*.gguf)\0*.gguf\0All files\0*.*\0"
+                      : kind == DLG_PROJECT    ? L"Kor project (project.korproj)\0*.korproj\0All files\0*.*\0"
                                             : L"Data (*.txt;*.csv;*.tsv;*.jsonl;*.json;*.png;*.bmp;*.ppm;*.pgm;*.wav)\0"
                                               L"*.txt;*.csv;*.tsv;*.jsonl;*.json;*.png;*.bmp;*.ppm;*.pgm;*.wav\0"
                                               L"All files\0*.*\0";

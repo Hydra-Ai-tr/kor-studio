@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-enum DialogKind { DLG_DATA = 0, DLG_MODEL = 1, DLG_PROJECT = 2 };
+enum DialogKind { DLG_DATA = 0, DLG_MODEL = 1, DLG_PROJECT = 2, DLG_CHAT_MODEL = 3, DLG_GGUF = 4 };
 
 // Native "open file" / "save file" dialogs. Return "" if cancelled or if
 // the platform has no native dialog (the user can type a path instead).

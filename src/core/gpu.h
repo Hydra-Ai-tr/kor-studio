@@ -43,9 +43,17 @@ bool gpu_attention(bool backward, const float* qkv, const float* dout, float* re
 double gpu_attention_check(int B, int T, int H, int hd, std::string* err);
 
 // A text model (MODEL_GPT without LoRA) for gpu_gpt_step; params in the order
-// of Model::params(): token and position embedding, 12 per block, final norm, head.
+// of Model::params(): classic: token and position embedding, 12 per block,
+// final norm (g, b), head; modern: token embedding, 10 per block (the norms
+// have no b), final norm g, head.
 struct GpuGpt {
     int vocab = 0, ctx = 0, dim = 0, heads = 0, nlayer = 0;
+    bool modern = false;
+    int ffn = 0;  // MLP hidden width (classic: 4 * dim)
+    float rope_theta = 10000.f;
+    // Training keeps only the input of every block and runs the block again in
+    // the backward pass: 1 = always, -1 = only when one sequence does not fit otherwise.
+    int recompute = -1;
     std::vector<Param*> params;
 };
 
@@ -83,5 +91,14 @@ bool gpu_resident_pull(bool moments);
 bool gpu_resident_push();
 // Ends the run, with `pull` after copying its state to the host.
 bool gpu_resident_end(bool pull);
+
+// Text generation on the card (Model::generate with gen_on_gpu), also without
+// gpu_use(): begin uploads the weights of `m` (they stay while unchanged) and
+// gpu_gen_feed runs one token at position `pos` of the window, returning its
+// logits (valid until the next call). nullptr means a GPU error; the copy is
+// then gone and the caller continues on the CPU. Training frees the copy.
+bool gpu_gen_begin(const GpuGpt& m, std::string* err = nullptr);
+const float* gpu_gen_feed(int token, int pos);
+void gpu_gen_release();
 
 }  // namespace kor

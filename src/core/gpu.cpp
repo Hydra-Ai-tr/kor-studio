@@ -219,11 +219,152 @@ __kernel void add_to(__global const float* a, __global float* b, const int n) {
 }
 
 __kernel void embed(__global const int* ids, __global const float* tok, __global const float* pos, __global float* x,
-                    const int T, const int C, const int n) {
+                    const int T, const int C, const int n, const int has_pos) {
     const int i = get_global_id(0);
     if (i >= n) return;
     const int r = i / C, j = i % C;
-    x[i] = tok[ids[r] * C + j] + pos[(r % T) * C + j];
+    x[i] = tok[ids[r] * C + j] + (has_pos ? pos[(r % T) * C + j] : 0.0f);
+}
+
+// RMSNorm: y = g * x / sqrt(mean(x^2) + 1e-5); st keeps (0, 1 / rms) per row.
+__kernel __attribute__((reqd_work_group_size(WG, 1, 1)))
+void rmsnorm(__global const float* x, __global const float* g, __global float* y, __global float* st, const int C) {
+    __local float red[WG];
+    const int row = get_group_id(0), l = get_local_id(0);
+    __global const float* a = x + row * C;
+    __global float* o = y + row * C;
+    float s = 0.0f;
+    for (int j = l; j < C; j += WG) s += a[j] * a[j];
+    const float is = 1.0f / sqrt(wg_sum(red, s) / C + 1e-5f);
+    for (int j = l; j < C; j += WG) o[j] = g[j] * a[j] * is;
+    if (l == 0) { st[2 * row] = 0.0f; st[2 * row + 1] = is; }
+}
+
+__kernel __attribute__((reqd_work_group_size(WG, 1, 1)))
+void rmsnorm_back(__global const float* dy, __global const float* x, __global const float* st, __global const float* g,
+                  __global float* dx, __global float* dyxh, const int C) {
+    __local float red[WG];
+    const int row = get_group_id(0), l = get_local_id(0);
+    const float is = st[2 * row + 1];
+    __global const float* d = dy + row * C;
+    __global const float* a = x + row * C;
+    float m2 = 0.0f;
+    for (int j = l; j < C; j += WG) m2 += d[j] * g[j] * a[j] * is;
+    m2 = wg_sum(red, m2) / C;
+    for (int j = l; j < C; j += WG) {
+        const float xh = a[j] * is;
+        dx[row * C + j] = is * (d[j] * g[j] - xh * m2);
+        dyxh[row * C + j] = d[j] * xh;
+    }
+}
+
+// Rotary embedding of the query and key of every head in rows of [q | k | v]
+// (3C); row r is position r % T, tab holds per position hd/2 cosines, then hd/2
+// sines. sg = -1 rotates back (the gradient).
+__kernel void rope(__global float* m, __global const float* tab, const int T, const int C, const int H, const int hd,
+                   const float sg, const int n) {
+    const int i = get_global_id(0);
+    if (i >= n) return;
+    const int hh = hd / 2, k = i % hh;
+    int t = i / hh;
+    const int h = t % H;
+    t /= H;
+    const int part = t % 2, r = t / 2, p = r % T;
+    const float c = tab[p * hd + k], s = sg * tab[p * hd + hh + k];
+    __global float* v = m + (long)r * 3 * C + part * C + h * hd;
+    const float x1 = v[k], x2 = v[k + hh];
+    v[k] = x1 * c - x2 * s;
+    v[k + hh] = x1 * s + x2 * c;
+}
+
+// ---- generation: one position at a time, weights and keys/values stay on the card
+
+// y = x W + b for one row: W is [in x out], one work-item per output.
+__kernel void gemv(__global const float* x, __global const float* W, __global const float* b, __global float* y,
+                   const int in, const int out) {
+    const int j = get_global_id(0);
+    if (j >= out) return;
+    float s = b[j];
+    for (int i = 0; i < in; ++i) s = mad(x[i], W[(long)i * out + j], s);
+    y[j] = s;
+}
+
+__kernel void embed_at(__global const float* tok, __global const float* pos, __global float* x, const int id, const int p,
+                       const int C, const int has_pos) {
+    const int j = get_global_id(0);
+    if (j < C) x[j] = tok[(long)id * C + j] + (has_pos ? pos[(long)p * C + j] : 0.0f);
+}
+
+// Rotary embedding of the query and key of one row at position p (tab: per position hd/2 cosines, hd/2 sines).
+__kernel void rope_at(__global float* q, __global const float* tab, const int p, const int C, const int H, const int hd) {
+    const int i = get_global_id(0), hh = hd / 2;
+    if (i >= 2 * H * hh) return;
+    const int k = i % hh, h = (i / hh) % H, part = i / (hh * H);
+    const float c = tab[p * hd + k], s = tab[p * hd + hh + k];
+    __global float* v = q + part * C + h * hd;
+    const float x1 = v[k], x2 = v[k + hh];
+    v[k] = x1 * c - x2 * s;
+    v[k + hh] = x1 * s + x2 * c;
+}
+
+// Attention of one new position: work-group h stores the key and value of head h
+// at row p of kv ([ctx x 2C]) and attends over rows 0..p; S is scratch [H x ctx].
+__kernel __attribute__((reqd_work_group_size(WG, 1, 1)))
+void attn_step(__global const float* qkv, __global float* kv, __global float* S, __global float* o, const int p, const int C,
+               const int hd, const int ctx, const float scale) {
+    __local float red[WG];
+    const int h = get_group_id(0), l = get_local_id(0);
+    __global const float* q = qkv + h * hd;
+    __global float* row = kv + (long)p * 2 * C;
+    for (int d = l; d < hd; d += WG) {
+        row[h * hd + d] = qkv[C + h * hd + d];
+        row[C + h * hd + d] = qkv[2 * C + h * hd + d];
+    }
+    barrier(CLK_GLOBAL_MEM_FENCE);
+    __global float* s = S + (long)h * ctx;
+    float mx = -INFINITY;
+    for (int j = l; j <= p; j += WG) {
+        __global const float* k = kv + (long)j * 2 * C + h * hd;
+        float a = 0.0f;
+        for (int d = 0; d < hd; ++d) a = mad(q[d], k[d], a);
+        a *= scale;
+        s[j] = a;
+        mx = fmax(mx, a);
+    }
+    mx = wg_max(red, mx);
+    float sum = 0.0f;
+    for (int j = l; j <= p; j += WG) {
+        const float e = exp(s[j] - mx);
+        s[j] = e;
+        sum += e;
+    }
+    const float is = 1.0f / wg_sum(red, sum);
+    barrier(CLK_GLOBAL_MEM_FENCE);
+    for (int d = l; d < hd; d += WG) {
+        float a = 0.0f;
+        for (int j = 0; j <= p; ++j) a = mad(s[j], kv[(long)j * 2 * C + C + h * hd + d], a);
+        o[h * hd + d] = a * is;
+    }
+}
+
+// SwiGLU: rows of a are [gate | up] (2F); o = silu(gate) * up (F per row).
+__kernel void swiglu(__global const float* a, __global float* o, const int F, const int n) {
+    const int i = get_global_id(0);
+    if (i >= n) return;
+    const int r = i / F, j = i % F;
+    const float gt = a[(long)r * 2 * F + j], up = a[(long)r * 2 * F + F + j];
+    o[i] = gt / (1.0f + exp(-gt)) * up;
+}
+
+// da = gradient of swiglu for d (F per row) into [dgate | dup] (2F per row).
+__kernel void swiglu_back(__global const float* a, __global const float* d, __global float* da, const int F, const int n) {
+    const int i = get_global_id(0);
+    if (i >= n) return;
+    const int r = i / F, j = i % F;
+    const long o = (long)r * 2 * F + j;
+    const float gt = a[o], up = a[o + F], sg = 1.0f / (1.0f + exp(-gt));
+    da[o] = d[i] * up * sg * (1.0f + gt * (1.0f - sg));
+    da[o + F] = d[i] * gt * sg;
 }
 
 // y = g * (x - mean) / sqrt(var + 1e-5) + b; st keeps (mean, 1 / std) per row.
@@ -416,7 +557,18 @@ struct GptBufs {
     std::vector<DBuf> x, a1, st1, qkv, ho, h, a3, st2, a4;
     DBuf xf, stf, logits, ids, tgt, wt, rows, ones;
     DBuf s1, s4, S, dS, dy, dx, t1, t2, t3, yx, dq, d4;
-    DBuf order, ustart, utok, part;
+    DBuf order, ustart, utok, part, rtab;
+};
+
+// Text generation: a copy of the weights, the keys and values of every layer and
+// the scratch of one position. `print` samples the weights it was made from.
+struct GenState {
+    bool on = false;
+    GpuGpt m;
+    std::vector<float> print;
+    std::vector<DBuf> w, kv;
+    DBuf x, a, qkv, ho, t, f1, f2, st, S, logits, rtab;
+    std::vector<float> out;
 };
 
 // A training run whose weights, gradients and optimizer state stay on the card.
@@ -436,11 +588,14 @@ struct Gpu {
     cl_command_queue q = nullptr;
     cl_kernel kgemm = nullptr, ksoft = nullptr, ksoftb = nullptr, kfill = nullptr, kadd = nullptr, kembed = nullptr, kln = nullptr,
               klnb = nullptr, kgelu = nullptr, kgelub = nullptr, kresid = nullptr, kdropb = nullptr, kxent = nullptr,
-              kembt = nullptr, kembp = nullptr, ksumsq = nullptr, kadam = nullptr, ksgd = nullptr;
+              kembt = nullptr, kembp = nullptr, ksumsq = nullptr, kadam = nullptr, ksgd = nullptr, krms = nullptr,
+              krmsb = nullptr, krope = nullptr, kswi = nullptr, kswib = nullptr, kgemv = nullptr, kembat = nullptr,
+              kropeat = nullptr, kattstep = nullptr;
     // products and attention of the CPU layers
     DBuf pa, pb, pc, aq, as, ad, ao, adq;
     GptBufs gpt;
     Resident res;
+    GenState gen;
     int gpt_cap = 1 << 30;  // most sequences per pass after running out of memory
     // page-locked host memory: copies to and from it run at full bus speed
     cl_mem pin = nullptr;
@@ -563,7 +718,9 @@ void init(Gpu& g) {
         {&g.kadd, "add_to"}, {&g.kembed, "embed"}, {&g.kln, "layernorm"}, {&g.klnb, "layernorm_back"},
         {&g.kgelu, "gelu"}, {&g.kgelub, "gelu_back"}, {&g.kresid, "resid_drop"}, {&g.kdropb, "drop_back"},
         {&g.kxent, "xent"}, {&g.kembt, "embed_tok_back"}, {&g.kembp, "embed_pos_back"}, {&g.ksumsq, "sumsq"},
-        {&g.kadam, "adamw"}, {&g.ksgd, "sgd"}};
+        {&g.kadam, "adamw"}, {&g.ksgd, "sgd"}, {&g.krms, "rmsnorm"}, {&g.krmsb, "rmsnorm_back"}, {&g.krope, "rope"},
+        {&g.kswi, "swiglu"}, {&g.kswib, "swiglu_back"}, {&g.kgemv, "gemv"}, {&g.kembat, "embed_at"},
+        {&g.kropeat, "rope_at"}, {&g.kattstep, "attn_step"}};
     for (auto& k : ks)
         if (e == 0) *k.k = cl.CreateKernel(prog, k.name, &e);
     if (e != 0) {
@@ -832,6 +989,7 @@ struct GptJob {
     float dropout;
     uint64_t seed;
     float base;  // gradient of a row of weight 1: scale / (sum of the row weights of the whole batch)
+    bool rc;     // recompute the block activations in the backward pass
 };
 
 double param_floats(const GpuGpt& m) {
@@ -840,24 +998,46 @@ double param_floats(const GpuGpt& m) {
     return n;
 }
 
-// Device memory (floats) of the activations of one pass over B x T tokens.
-double gpt_act_floats(const GpuGpt& m, int B, int T, bool train) {
-    double N = (double)B * T, C = m.dim, att = (double)B * m.heads * T * T;
-    double f = m.nlayer * N * (12 * C + 4) + N * C * 7 + N * (double)m.vocab + N * 11 + att;
-    if (train) f += att + N * C * 13;
+// Width of the MLP output of fc1 and of the input of fc2.
+int mlp_w1(const GpuGpt& m) { return m.modern ? 2 * m.ffn : 4 * m.dim; }
+int mlp_w2(const GpuGpt& m) { return m.modern ? m.ffn : 4 * m.dim; }
+
+size_t gpt_param_count(const GpuGpt& m) { return m.modern ? 1 + 10 * (size_t)m.nlayer + 3 : 2 + 12 * (size_t)m.nlayer + 4; }
+
+bool gpt_shape_ok(const GpuGpt& m) {
+    if (m.params.size() != gpt_param_count(m) || m.heads < 1 || m.dim % m.heads != 0) return false;
+    return !m.modern || (m.ffn > 0 && (m.dim / m.heads) % 2 == 0);
+}
+
+// Device memory (floats) of the activations of one pass over B x T tokens; with
+// `rc` (recompute) only the block inputs are kept per layer, plus one set of
+// block activations.
+double gpt_act_floats(const GpuGpt& m, int B, int T, bool train, bool rc) {
+    double N = (double)B * T, C = m.dim, att = (double)B * m.heads * T * T, F1 = mlp_w1(m), F2 = mlp_w2(m);
+    double block = N * (7 * C + F1 + 4);  // a1, st1, qkv, ho, h, a3, st2, a4
+    double f = (rc ? m.nlayer * N * C + block : m.nlayer * (N * C + block)) + N * (3 * C + F2) + N * (double)m.vocab + N * 11 +
+               att + (double)T * C;
+    if (train) f += att + N * (9 * C + F1);
     return f;
 }
 
 // The most sequences per pass that fit next to `fixed` floats of parameters (0 = none).
-int gpt_rows(Gpu& g, const GpuGpt& m, int B, int T, bool train, double fixed) {
+int gpt_rows(Gpu& g, const GpuGpt& m, int B, int T, bool train, double fixed, bool rc) {
     const double budget = (double)g.mem * 0.85 / 4 - fixed, cap = (double)g.max_alloc / 4;
     for (int b = std::min(B, g.gpt_cap); b >= 1; --b) {
         double N = (double)b * T;
-        if (gpt_act_floats(m, b, T, train) <= budget && N * m.vocab <= cap && (double)b * m.heads * T * T <= cap &&
-            N * m.dim * 4 <= cap)
+        if (gpt_act_floats(m, b, T, train, rc) <= budget && N * m.vocab <= cap && (double)b * m.heads * T * T <= cap &&
+            N * mlp_w1(m) <= cap)
             return b;
     }
     return 0;
+}
+
+// Recompute for this pass: when asked, or (auto) when not even one sequence fits without it.
+bool gpt_recompute(Gpu& g, const GpuGpt& m, int T, bool train, double fixed) {
+    if (!train || m.recompute == 0) return false;
+    if (m.recompute > 0) return true;
+    return gpt_rows(g, m, 1, T, train, fixed, false) < 1;
 }
 
 void release_acts(Gpu& g) {
@@ -865,7 +1045,7 @@ void release_acts(Gpu& g) {
     for (auto* v : {&d.x, &d.a1, &d.st1, &d.qkv, &d.ho, &d.h, &d.a3, &d.st2, &d.a4})
         for (DBuf& b : *v) release(g, b);
     for (DBuf* b : {&d.xf, &d.stf, &d.logits, &d.ids, &d.tgt, &d.wt, &d.rows, &d.ones, &d.s1, &d.s4, &d.S, &d.dS, &d.dy, &d.dx,
-                    &d.t1, &d.t2, &d.t3, &d.yx, &d.dq, &d.d4, &d.order, &d.ustart, &d.utok, &d.part})
+                    &d.t1, &d.t2, &d.t3, &d.yx, &d.dq, &d.d4, &d.order, &d.ustart, &d.utok, &d.part, &d.rtab})
         release(g, *b);
 }
 
@@ -890,25 +1070,29 @@ bool gpt_param_bufs(Gpu& g, const std::vector<Param*>& ps, bool grads, int momen
     return true;
 }
 
-// The buffers of a pass over B x T tokens.
-bool gpt_act_bufs(Gpu& g, const GpuGpt& m, int B, int T, bool train) {
-    const size_t N = (size_t)B * T, C = m.dim, C3 = 3 * C, C4 = 4 * C, L = m.nlayer, S = (size_t)B * m.heads * T * T;
+// The buffers of a pass over B x T tokens (with rc one set of block activations).
+bool gpt_act_bufs(Gpu& g, const GpuGpt& m, int B, int T, bool train, bool rc) {
+    const size_t N = (size_t)B * T, C = m.dim, C3 = 3 * C, F1 = mlp_w1(m), F2 = mlp_w2(m), L = m.nlayer,
+                 S = (size_t)B * m.heads * T * T;
     GptBufs& d = g.gpt;
     for (auto* v : {&d.x, &d.a1, &d.st1, &d.qkv, &d.ho, &d.h, &d.a3, &d.st2, &d.a4})
         if (v->size() < L + 1) v->resize(L + 1);
     for (size_t l = 0; l <= L; ++l)
         if (!need(g, d.x[l], N * C)) return false;
-    for (size_t l = 0; l < L; ++l)
+    if (rc)  // the per-layer activations of an earlier pass without recompute are not needed
+        for (auto* v : {&d.a1, &d.st1, &d.qkv, &d.ho, &d.h, &d.a3, &d.st2, &d.a4})
+            for (size_t l = 1; l < v->size(); ++l) release(g, (*v)[l]);
+    for (size_t l = 0; l < (rc ? 1 : L); ++l)
         if (!need(g, d.a1[l], N * C) || !need(g, d.st1[l], N * 2) || !need(g, d.qkv[l], N * C3) || !need(g, d.ho[l], N * C) ||
-            !need(g, d.h[l], N * C) || !need(g, d.a3[l], N * C) || !need(g, d.st2[l], N * 2) || !need(g, d.a4[l], N * C4))
+            !need(g, d.h[l], N * C) || !need(g, d.a3[l], N * C) || !need(g, d.st2[l], N * 2) || !need(g, d.a4[l], N * F1))
             return false;
     if (!need(g, d.xf, N * C) || !need(g, d.stf, N * 2) || !need(g, d.logits, N * m.vocab) || !need(g, d.ids, N) ||
         !need(g, d.tgt, N) || !need(g, d.wt, N) || !need(g, d.rows, N * 2) || !need(g, d.ones, N) || !need(g, d.s1, N * C) ||
-        !need(g, d.s4, N * C4) || !need(g, d.S, S))
+        !need(g, d.s4, N * F2) || !need(g, d.S, S) || (m.modern && !need(g, d.rtab, (size_t)T * (C / m.heads))))
         return false;
     if (train && (!need(g, d.dS, S) || !need(g, d.dy, N * C) || !need(g, d.dx, N * C) || !need(g, d.t1, N * C) ||
                   !need(g, d.t2, N * C) || !need(g, d.t3, N * C) || !need(g, d.yx, N * C) || !need(g, d.dq, N * C3) ||
-                  !need(g, d.d4, N * C4) || !need(g, d.order, N) || !need(g, d.ustart, N + 1) || !need(g, d.utok, N)))
+                  !need(g, d.d4, N * F1) || !need(g, d.order, N) || !need(g, d.ustart, N + 1) || !need(g, d.utok, N)))
         return false;
     return true;
 }
@@ -929,7 +1113,9 @@ cl_int gpt_upload(Gpu& g, const std::vector<Param*>& ps, bool train) {
 // *loss_sum and the correct predictions to *hits.
 cl_int gpt_pass(Gpu& g, const GptJob& j, double* loss_sum, int* hits) {
     const GpuGpt& m = *j.m;
-    const int B = j.B, T = j.T, N = B * T, C = m.dim, H = m.heads, hd = C / H, L = m.nlayer, V = m.vocab, C3 = 3 * C, C4 = 4 * C;
+    const int B = j.B, T = j.T, N = B * T, C = m.dim, H = m.heads, hd = C / H, L = m.nlayer, V = m.vocab, C3 = 3 * C;
+    const int F1 = mlp_w1(m), F2 = mlp_w2(m);
+    const bool modern = m.modern;
     GptBufs& d = g.gpt;
     const std::vector<Param*>& ps = m.params;
     Cl& cl = g.cl;
@@ -937,12 +1123,33 @@ cl_int gpt_pass(Gpu& g, const GptJob& j, double* loss_sum, int* hits) {
     if (!e) e = cl.EnqueueWriteBuffer(g.q, d.tgt.m, 0, 0, (size_t)N * 4, j.tgt, 0, nullptr, nullptr);
     if (!e && j.w) e = cl.EnqueueWriteBuffer(g.q, d.wt.m, 0, 0, (size_t)N * 4, j.w, 0, nullptr, nullptr);
     if (!e) e = Args(g, g.kfill).m(d.ones).i(N).f(1.f).flat(N);
+    // rotary table: per position hd/2 cosines, then hd/2 sines (the angles of Attention::rope)
+    std::vector<float> rtab;
+    if (modern) {
+        const int half = hd / 2;
+        rtab.resize((size_t)T * hd);
+        for (int p = 0; p < T; ++p)
+            for (int i = 0; i < half; ++i) {
+                double a = p * std::pow((double)m.rope_theta, -2.0 * i / hd);
+                rtab[(size_t)p * hd + i] = (float)std::cos(a);
+                rtab[(size_t)p * hd + half + i] = (float)std::sin(a);
+            }
+        if (!e) e = cl.EnqueueWriteBuffer(g.q, d.rtab.m, 1, 0, rtab.size() * 4, rtab.data(), 0, nullptr, nullptr);
+    }
 
-    // parameter index: tok, pos, then 12 per block, then lnf g, b, head W, b
-    auto P = [&](int l, int k) -> DBuf& { return d.w[2 + l * 12 + k]; };
-    auto Gd = [&](int l, int k) -> DBuf& { return d.g[2 + l * 12 + k]; };
+    // parameter index: classic: tok, pos, 12 per block, lnf g, b, head W, b;
+    // modern: tok, 10 per block (no norm b), lnf g, head W, b
     enum { LN1G, LN1B, QKVW, QKVB, PROJW, PROJB, LN2G, LN2B, FC1W, FC1B, FC2W, FC2B };
-    const int tail = 2 + 12 * L;
+    static const int kClassic[12] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};
+    static const int kModern[12] = {0, -1, 1, 2, 3, 4, 5, -1, 6, 7, 8, 9};
+    const int* slot = modern ? kModern : kClassic;
+    const int first = modern ? 1 : 2, per = modern ? 10 : 12;
+    auto P = [&](int l, int k) -> DBuf& { return d.w[first + l * per + slot[k]]; };
+    auto Gd = [&](int l, int k) -> DBuf& { return d.g[first + l * per + slot[k]]; };
+    const int tail = first + per * L;
+    DBuf& lnfg = d.w[tail];
+    DBuf& lnfgg = d.g[tail];
+    const int hw = tail + (modern ? 1 : 2);  // head W, then head b
     auto linear = [&](DBuf& x, int in, DBuf& W, DBuf& b, DBuf& y, int out) {
         return gemm(g, N, out, in, 1, 1, rowmajor(x, in), rowmajor(W, out), rowmajor(y, out), 1.f, 0, 0, b.m);
     };
@@ -953,57 +1160,83 @@ cl_int gpt_pass(Gpu& g, const GptJob& j, double* loss_sum, int* hits) {
         if (!r && dx) r = gemm(g, N, in, out, 1, 1, rowmajor(dy, out), transposed(W, out), rowmajor(*dx, in), 1.f, 0, 0);
         return r;
     };
-    auto layernorm = [&](DBuf& x, DBuf& gw, DBuf& bw, DBuf& y, DBuf& st) {
-        return Args(g, g.kln).m(x).m(gw).m(bw).m(y).m(st).i(C).rows(N);
+    // classic: LayerNorm with (g, b); modern: RMSNorm with g (bw, db unused)
+    auto layernorm = [&](DBuf& x, DBuf& gw, DBuf* bw, DBuf& y, DBuf& st) {
+        if (modern) return Args(g, g.krms).m(x).m(gw).m(y).m(st).i(C).rows(N);
+        return Args(g, g.kln).m(x).m(gw).m(*bw).m(y).m(st).i(C).rows(N);
     };
     // dx = LN'(dy); dg, db accumulate
-    auto layernorm_back = [&](DBuf& dy, DBuf& x, DBuf& st, DBuf& gw, DBuf& dg, DBuf& db, DBuf& dx) {
-        cl_int r = Args(g, g.klnb).m(dy).m(x).m(st).m(gw).m(dx).m(d.yx).i(C).rows(N);
+    auto layernorm_back = [&](DBuf& dy, DBuf& x, DBuf& st, DBuf& gw, DBuf& dg, DBuf* db, DBuf& dx) {
+        cl_int r = Args(g, modern ? g.krmsb : g.klnb).m(dy).m(x).m(st).m(gw).m(dx).m(d.yx).i(C).rows(N);
         View ones{d.ones.m, 0, 0, 1, 0, 0};
         if (!r) r = gemm(g, 1, C, N, 1, 1, ones, rowmajor(d.yx, C), rowmajor(dg, C), 1.f, 1, 0);
-        if (!r) r = gemm(g, 1, C, N, 1, 1, ones, rowmajor(dy, C), rowmajor(db, C), 1.f, 1, 0);
+        if (!r && !modern) r = gemm(g, 1, C, N, 1, 1, ones, rowmajor(dy, C), rowmajor(*db, C), 1.f, 1, 0);
         return r;
     };
+    auto rope = [&](DBuf& qkv, float sg) {
+        const int n = N * 2 * H * (hd / 2);
+        return Args(g, g.krope).m(qkv).m(d.rtab).i(T).i(C).i(H).i(hd).f(sg).i(n).flat((size_t)n);
+    };
+    auto mlp_act = [&](DBuf& a, DBuf& o) {
+        if (modern) return Args(g, g.kswi).m(a).m(o).i(F2).i(N * F2).flat((size_t)N * F2);
+        return Args(g, g.kgelu).m(a).m(o).i(N * F1).flat((size_t)N * F1);
+    };
+    auto nb = [&](int l, int k) -> DBuf* { return modern ? nullptr : &P(l, k); };
+    auto gb = [&](int l, int k) -> DBuf* { return modern ? nullptr : &Gd(l, k); };
     const float p = j.train ? j.dropout : 0.f;
     auto seed_of = [&](int l, int site) { return mix32(j.seed * 0x9E3779B97F4A7C15ull + (uint64_t)l * 2 + site); };
     const int NC = N * C;
 
-    // forward
-    if (!e) e = Args(g, g.kembed).m(d.ids).m(d.w[0]).m(d.w[1]).m(d.x[0]).i(T).i(C).i(NC).flat(NC);
-    for (int l = 0; l < L && !e; ++l) {
-        e = layernorm(d.x[l], P(l, LN1G), P(l, LN1B), d.a1[l], d.st1[l]);
-        if (!e) e = linear(d.a1[l], C, P(l, QKVW), P(l, QKVB), d.qkv[l], C3);
-        if (!e) e = attn_dev(g, d.qkv[l], d.S, &d.ho[l], B, T, H, hd);
-        if (!e) e = linear(d.ho[l], C, P(l, PROJW), P(l, PROJB), d.s1, C);
-        if (!e) e = Args(g, g.kresid).m(d.x[l]).m(d.s1).m(d.h[l]).i(NC).f(p).u(seed_of(l, 0)).flat(NC);
-        if (!e) e = layernorm(d.h[l], P(l, LN2G), P(l, LN2B), d.a3[l], d.st2[l]);
-        if (!e) e = linear(d.a3[l], C, P(l, FC1W), P(l, FC1B), d.a4[l], C4);
-        if (!e) e = Args(g, g.kgelu).m(d.a4[l]).m(d.s4).i(N * C4).flat((size_t)N * C4);
-        if (!e) e = linear(d.s4, C4, P(l, FC2W), P(l, FC2B), d.s1, C);
-        if (!e) e = Args(g, g.kresid).m(d.h[l]).m(d.s1).m(d.x[l + 1]).i(NC).f(p).u(seed_of(l, 1)).flat(NC);
-    }
-    if (!e) e = layernorm(d.x[L], d.w[tail], d.w[tail + 1], d.xf, d.stf);
-    if (!e) e = linear(d.xf, C, d.w[tail + 2], d.w[tail + 3], d.logits, V);
+    // forward; the activations of block l live in set k(l) (one shared set with recompute)
+    auto k = [&](int l) { return j.rc ? 0 : l; };
+    auto block_fwd = [&](int l) {
+        const int s = k(l);
+        cl_int r = layernorm(d.x[l], P(l, LN1G), nb(l, LN1B), d.a1[s], d.st1[s]);
+        if (!r) r = linear(d.a1[s], C, P(l, QKVW), P(l, QKVB), d.qkv[s], C3);
+        if (!r && modern) r = rope(d.qkv[s], 1.f);
+        if (!r) r = attn_dev(g, d.qkv[s], d.S, &d.ho[s], B, T, H, hd);
+        if (!r) r = linear(d.ho[s], C, P(l, PROJW), P(l, PROJB), d.s1, C);
+        if (!r) r = Args(g, g.kresid).m(d.x[l]).m(d.s1).m(d.h[s]).i(NC).f(p).u(seed_of(l, 0)).flat(NC);
+        if (!r) r = layernorm(d.h[s], P(l, LN2G), nb(l, LN2B), d.a3[s], d.st2[s]);
+        if (!r) r = linear(d.a3[s], C, P(l, FC1W), P(l, FC1B), d.a4[s], F1);
+        if (!r) r = mlp_act(d.a4[s], d.s4);
+        if (!r) r = linear(d.s4, F2, P(l, FC2W), P(l, FC2B), d.s1, C);
+        if (!r) r = Args(g, g.kresid).m(d.h[s]).m(d.s1).m(d.x[l + 1]).i(NC).f(p).u(seed_of(l, 1)).flat(NC);
+        return r;
+    };
+    if (!e) e = Args(g, g.kembed).m(d.ids).m(d.w[0]).m(modern ? d.w[0] : d.w[1]).m(d.x[0]).i(T).i(C).i(NC).i(modern ? 0 : 1).flat(NC);
+    for (int l = 0; l < L && !e; ++l) e = block_fwd(l);
+    if (!e) e = layernorm(d.x[L], lnfg, modern ? nullptr : &d.w[tail + 1], d.xf, d.stf);
+    if (!e) e = linear(d.xf, C, d.w[hw], d.w[hw + 1], d.logits, V);
     if (!e) e = Args(g, g.kxent).m(d.logits).m(d.tgt).m(d.wt).m(d.rows).i(V).f(j.base).i(j.w ? 1 : 0).i(j.train ? 1 : 0).rows(N);
 
     // backward
     if (j.train && !e) {
-        e = linear_back(d.xf, C, d.w[tail + 2], d.g[tail + 2], d.g[tail + 3], d.logits, V, &d.t1);
-        if (!e) e = layernorm_back(d.t1, d.x[L], d.stf, d.w[tail], d.g[tail], d.g[tail + 1], d.dy);
+        e = linear_back(d.xf, C, d.w[hw], d.g[hw], d.g[hw + 1], d.logits, V, &d.t1);
+        if (!e) e = layernorm_back(d.t1, d.x[L], d.stf, lnfg, lnfgg, modern ? nullptr : &d.g[tail + 1], d.dy);
         for (int l = L - 1; l >= 0 && !e; --l) {
+            const int s = k(l);
+            if (j.rc) e = block_fwd(l);  // the same values (and dropout masks) as in the forward pass
             // dy: gradient of the block output
-            e = Args(g, g.kdropb).m(d.dy).m(d.t1).i(NC).f(p).u(seed_of(l, 1)).flat(NC);
-            if (!e) e = Args(g, g.kgelu).m(d.a4[l]).m(d.s4).i(N * C4).flat((size_t)N * C4);
-            if (!e) e = linear_back(d.s4, C4, P(l, FC2W), Gd(l, FC2W), Gd(l, FC2B), d.t1, C, &d.d4);
-            if (!e) e = Args(g, g.kgelub).m(d.a4[l]).m(d.d4).i(N * C4).flat((size_t)N * C4);
-            if (!e) e = linear_back(d.a3[l], C, P(l, FC1W), Gd(l, FC1W), Gd(l, FC1B), d.d4, C4, &d.t2);
-            if (!e) e = layernorm_back(d.t2, d.h[l], d.st2[l], P(l, LN2G), Gd(l, LN2G), Gd(l, LN2B), d.t3);
+            if (!e) e = Args(g, g.kdropb).m(d.dy).m(d.t1).i(NC).f(p).u(seed_of(l, 1)).flat(NC);
+            if (!e) e = mlp_act(d.a4[s], d.s4);
+            if (modern) {
+                // the gradient of the SwiGLU output may overwrite s4: dW reads it first
+                if (!e) e = linear_back(d.s4, F2, P(l, FC2W), Gd(l, FC2W), Gd(l, FC2B), d.t1, C, &d.s4);
+                if (!e) e = Args(g, g.kswib).m(d.a4[s]).m(d.s4).m(d.d4).i(F2).i(N * F2).flat((size_t)N * F2);
+            } else {
+                if (!e) e = linear_back(d.s4, F2, P(l, FC2W), Gd(l, FC2W), Gd(l, FC2B), d.t1, C, &d.d4);
+                if (!e) e = Args(g, g.kgelub).m(d.a4[s]).m(d.d4).i(N * F1).flat((size_t)N * F1);
+            }
+            if (!e) e = linear_back(d.a3[s], C, P(l, FC1W), Gd(l, FC1W), Gd(l, FC1B), d.d4, F1, &d.t2);
+            if (!e) e = layernorm_back(d.t2, d.h[s], d.st2[s], P(l, LN2G), Gd(l, LN2G), gb(l, LN2B), d.t3);
             if (!e) e = Args(g, g.kadd).m(d.dy).m(d.t3).i(NC).flat(NC);  // t3 = dh
             if (!e) e = Args(g, g.kdropb).m(d.t3).m(d.t1).i(NC).f(p).u(seed_of(l, 0)).flat(NC);
-            if (!e) e = linear_back(d.ho[l], C, P(l, PROJW), Gd(l, PROJW), Gd(l, PROJB), d.t1, C, &d.t2);
-            if (!e) e = attn_dev_back(g, d.qkv[l], d.S, d.dS, d.t2, d.dq, B, T, H, hd);
-            if (!e) e = linear_back(d.a1[l], C, P(l, QKVW), Gd(l, QKVW), Gd(l, QKVB), d.dq, C3, &d.t1);
-            if (!e) e = layernorm_back(d.t1, d.x[l], d.st1[l], P(l, LN1G), Gd(l, LN1G), Gd(l, LN1B), d.dx);
+            if (!e) e = linear_back(d.ho[s], C, P(l, PROJW), Gd(l, PROJW), Gd(l, PROJB), d.t1, C, &d.t2);
+            if (!e) e = attn_dev_back(g, d.qkv[s], d.S, d.dS, d.t2, d.dq, B, T, H, hd);
+            if (!e && modern) e = rope(d.dq, -1.f);
+            if (!e) e = linear_back(d.a1[s], C, P(l, QKVW), Gd(l, QKVW), Gd(l, QKVB), d.dq, C3, &d.t1);
+            if (!e) e = layernorm_back(d.t1, d.x[l], d.st1[s], P(l, LN1G), Gd(l, LN1G), gb(l, LN1B), d.dx);
             if (!e) e = Args(g, g.kadd).m(d.t3).m(d.dx).i(NC).flat(NC);
             std::swap(d.dy, d.dx);
         }
@@ -1027,7 +1260,7 @@ cl_int gpt_pass(Gpu& g, const GptJob& j, double* loss_sum, int* hits) {
         if (!e) e = cl.EnqueueWriteBuffer(g.q, d.utok.m, 1, 0, (size_t)U * 4, utok.data(), 0, nullptr, nullptr);
         if (!e && ps[0]->trainable)
             e = Args(g, g.kembt).m(d.dy).m(d.order).m(d.ustart).m(d.utok).m(d.g[0]).i(C).i(U * C).flat((size_t)U * C);
-        if (!e && ps[1]->trainable) e = Args(g, g.kembp).m(d.dy).m(d.g[1]).i(B).i(T * C).flat((size_t)T * C);
+        if (!e && !modern && ps[1]->trainable) e = Args(g, g.kembp).m(d.dy).m(d.g[1]).i(B).i(T * C).flat((size_t)T * C);
     }
 
     // results (the blocking read also waits for everything above)
@@ -1185,6 +1418,37 @@ void ref_attention(const std::vector<float>& qkv, const std::vector<float>& dout
             }
 }
 
+void gen_release_locked(Gpu& g) {
+    GenState& s = g.gen;
+    for (auto* v : {&s.w, &s.kv})
+        for (DBuf& b : *v) release(g, b);
+    for (DBuf* b : {&s.x, &s.a, &s.qkv, &s.ho, &s.t, &s.f1, &s.f2, &s.st, &s.S, &s.logits, &s.rtab}) release(g, *b);
+    s = GenState();
+}
+
+// The shape and a few weights of every parameter: changes when the model is trained or swapped.
+std::vector<float> fingerprint(const GpuGpt& m) {
+    std::vector<float> f = {(float)m.vocab, (float)m.ctx, (float)m.dim, (float)m.heads, (float)m.nlayer, (float)m.modern,
+                            (float)m.ffn, m.rope_theta};
+    for (Param* p : m.params) {
+        size_t n = p->w.size();
+        f.push_back((float)n);
+        for (uint32_t k = 0; k < 16 && n; ++k) f.push_back(p->w.v[(size_t)((k * 2654435761u + 7u) % n)]);
+    }
+    return f;
+}
+
+// The parameter of block l (k as in gpt_pass), or of the end of the model with l = -1
+// (k: 0 = final norm g, 1 = its b, 2 = head W, 3 = head b).
+int gen_index(const GpuGpt& m, int l, int k) {
+    static const int kClassic[12] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};
+    static const int kModern[12] = {0, -1, 1, 2, 3, 4, 5, -1, 6, 7, 8, 9};
+    const int first = m.modern ? 1 : 2, per = m.modern ? 10 : 12, tail = first + per * m.nlayer;
+    if (l >= 0) return first + l * per + (m.modern ? kModern : kClassic)[k];
+    if (m.modern) return k == 0 ? tail : k == 2 ? tail + 1 : k == 3 ? tail + 2 : -1;
+    return tail + k;
+}
+
 }  // namespace
 
 const GpuInfo& gpu_probe() {
@@ -1248,7 +1512,7 @@ bool gpu_gpt_step(const GpuGpt& m, const int* ids, const int* tgt, const float* 
         if (err) *err = "the GPU is not turned on";
         return false;
     }
-    if ((int)m.params.size() != 2 + 12 * m.nlayer + 4 || m.dim % m.heads != 0 || B < 1 || T < 1) return false;
+    if (!gpt_shape_ok(m) || B < 1 || T < 1) return false;
     std::unique_lock<std::mutex> lk(g.mu, std::try_to_lock);
     if (!lk.owns_lock()) {
         if (err) *err = "the GPU is busy";
@@ -1270,13 +1534,19 @@ bool gpu_gpt_step(const GpuGpt& m, const int* ids, const int* tgt, const float* 
     }
     cl_int e = 0;
     int bc = 0;
-    // As many sequences per pass as fit; after running out of memory, half as many.
+    bool rc = gpt_recompute(g, m, T, train, fixed);
+    // As many sequences per pass as fit; after running out of memory, half as
+    // many, and at one sequence (when allowed) the same with recompute.
     for (;;) {
-        bc = gpt_rows(g, m, B, T, train, fixed);
-        if (bc >= 1 && (resident || gpt_param_bufs(g, ps, train, 0)) && gpt_act_bufs(g, m, bc, T, train)) break;
+        bc = gpt_rows(g, m, B, T, train, fixed, rc);
+        if (bc >= 1 && (resident || gpt_param_bufs(g, ps, train, 0)) && gpt_act_bufs(g, m, bc, T, train, rc)) break;
         release_acts(g);
         if (!resident) release_params(g);
         if (bc <= 1) {
+            if (train && !rc && m.recompute != 0) {
+                rc = true;
+                continue;
+            }
             e = CL_MEM_OBJECT_ALLOCATION_FAILURE;
             break;
         }
@@ -1289,7 +1559,7 @@ bool gpu_gpt_step(const GpuGpt& m, const int* ids, const int* tgt, const float* 
     for (int r0 = 0; r0 < B && !e; r0 += bc) {
         const size_t o = (size_t)r0 * T;
         GptJob j{&m, ids + o, tgt + o, w ? w + o : nullptr, std::min(bc, B - r0), T, train, dropout,
-                 seed + (uint64_t)r0 * 0x9E3779B97F4A7C15ull, base};
+                 seed + (uint64_t)r0 * 0x9E3779B97F4A7C15ull, base, rc};
         e = gpt_pass(g, j, &lsum, &hits);
     }
     if (!e && train && !resident)
@@ -1325,15 +1595,18 @@ bool gpu_resident_begin(const GpuGpt& m, int moments, int B, int T, std::string*
         if (err) *err = "the GPU is not turned on";
         return false;
     }
-    if ((int)m.params.size() != 2 + 12 * m.nlayer + 4 || m.dim % m.heads != 0) return false;
+    if (!gpt_shape_ok(m)) return false;
     std::lock_guard<std::mutex> lk(g.mu);
     end_resident_locked(g, false);
+    gen_release_locked(g);  // training needs the memory
     release_acts(g);
     release_params(g);
     g.gpt_cap = 1 << 30;
     moments = std::max(0, std::min(2, moments));
     const double P = param_floats(m);
-    if (gpt_rows(g, m, std::max(1, B), T, true, P * (2 + moments)) < 1 || !gpt_param_bufs(g, m.params, true, moments)) {
+    const double fixed = P * (2 + moments);
+    if (gpt_rows(g, m, std::max(1, B), T, true, fixed, gpt_recompute(g, m, T, true, fixed)) < 1 ||
+        !gpt_param_bufs(g, m.params, true, moments)) {
         release_params(g);
         if (err) *err = "the model and its optimizer state do not fit in GPU memory";
         return false;
@@ -1446,6 +1719,104 @@ bool gpu_resident_end(bool pull) {
     return end_resident_locked(g, pull);
 }
 
+bool gpu_gen_begin(const GpuGpt& m, std::string* err) {
+    auto fail = [&](const char* why) {
+        if (err) *err = why;
+        return false;
+    };
+    if (!gpu_probe().found) return fail("no usable GPU");
+    if (!gpt_shape_ok(m)) return fail("this model cannot generate on the GPU");
+    Gpu& g = G();
+    std::unique_lock<std::mutex> lk(g.mu, std::try_to_lock);
+    if (!lk.owns_lock() || g.res.on) return fail("the GPU is busy");
+    GenState& s = g.gen;
+    std::vector<float> print = fingerprint(m);
+    if (s.on && s.print == print) return true;  // the same weights are still on the card
+    gen_release_locked(g);
+    const size_t C = m.dim, L = m.nlayer, ctx = m.ctx, H = m.heads;
+    s.w.resize(m.params.size());
+    s.kv.resize(L);
+    bool ok = true;
+    for (size_t i = 0; i < m.params.size() && ok; ++i) ok = need(g, s.w[i], m.params[i]->w.size());
+    for (size_t l = 0; l < L && ok; ++l) ok = need(g, s.kv[l], ctx * 2 * C);
+    ok = ok && need(g, s.x, C) && need(g, s.a, C) && need(g, s.qkv, 3 * C) && need(g, s.ho, C) && need(g, s.t, C) &&
+         need(g, s.f1, mlp_w1(m)) && need(g, s.f2, mlp_w2(m)) && need(g, s.st, 2) && need(g, s.S, H * ctx) &&
+         need(g, s.logits, m.vocab) && (!m.modern || need(g, s.rtab, ctx * (C / H)));
+    cl_int e = ok ? 0 : CL_MEM_OBJECT_ALLOCATION_FAILURE;
+    for (size_t i = 0; i < m.params.size() && !e; ++i) e = upload(g, s.w[i], m.params[i]->w.data(), m.params[i]->w.size());
+    if (!e && m.modern) {
+        const int hd = (int)(C / H), half = hd / 2;
+        std::vector<float> tab(ctx * hd);
+        for (size_t p = 0; p < ctx; ++p)
+            for (int i = 0; i < half; ++i) {
+                double a = p * std::pow((double)m.rope_theta, -2.0 * i / hd);
+                tab[p * hd + i] = (float)std::cos(a);
+                tab[p * hd + half + i] = (float)std::sin(a);
+            }
+        e = upload(g, s.rtab, tab.data(), tab.size());
+    }
+    if (e) {
+        g.cl.Finish(g.q);
+        gen_release_locked(g);
+        return fail(is_memory_error(e) ? "the model does not fit in GPU memory" : "OpenCL error");
+    }
+    s.on = true;
+    s.m = m;
+    s.print = std::move(print);
+    s.out.resize(m.vocab);
+    return true;
+}
+
+const float* gpu_gen_feed(int token, int pos) {
+    Gpu& g = G();
+    std::lock_guard<std::mutex> lk(g.mu);
+    GenState& s = g.gen;
+    if (!s.on || g.res.on || pos < 0 || pos >= s.m.ctx || token < 0 || token >= s.m.vocab) return nullptr;
+    const GpuGpt& m = s.m;
+    const int C = m.dim, H = m.heads, hd = C / H, V = m.vocab, F1 = mlp_w1(m), F2 = mlp_w2(m);
+    const bool modern = m.modern;
+    enum { LN1G, LN1B, QKVW, QKVB, PROJW, PROJB, LN2G, LN2B, FC1W, FC1B, FC2W, FC2B };
+    auto W = [&](int l, int k) -> DBuf& { return s.w[gen_index(m, l, k)]; };
+    auto norm = [&](DBuf& gw, DBuf* bw) {
+        if (modern) return Args(g, g.krms).m(s.x).m(gw).m(s.a).m(s.st).i(C).rows(1);
+        return Args(g, g.kln).m(s.x).m(gw).m(*bw).m(s.a).m(s.st).i(C).rows(1);
+    };
+    auto gemv = [&](DBuf& x, DBuf& w, DBuf& b, DBuf& y, int in, int out) {
+        return Args(g, g.kgemv).m(x).m(w).m(b).m(y).i(in).i(out).flat((size_t)out);
+    };
+    cl_int e = Args(g, g.kembat).m(s.w[0]).m(modern ? s.w[0] : s.w[1]).m(s.x).i(token).i(pos).i(C).i(modern ? 0 : 1).flat(C);
+    for (int l = 0; l < m.nlayer && !e; ++l) {
+        e = norm(W(l, LN1G), modern ? nullptr : &W(l, LN1B));
+        if (!e) e = gemv(s.a, W(l, QKVW), W(l, QKVB), s.qkv, C, 3 * C);
+        if (!e && modern) e = Args(g, g.kropeat).m(s.qkv).m(s.rtab).i(pos).i(C).i(H).i(hd).flat((size_t)H * hd);
+        if (!e)
+            e = Args(g, g.kattstep).m(s.qkv).m(s.kv[l]).m(s.S).m(s.ho).i(pos).i(C).i(hd).i(m.ctx).f(1.f / std::sqrt((float)hd))
+                    .rows(H);
+        if (!e) e = gemv(s.ho, W(l, PROJW), W(l, PROJB), s.t, C, C);
+        if (!e) e = Args(g, g.kadd).m(s.t).m(s.x).i(C).flat(C);
+        if (!e) e = norm(W(l, LN2G), modern ? nullptr : &W(l, LN2B));
+        if (!e) e = gemv(s.a, W(l, FC1W), W(l, FC1B), s.f1, C, F1);
+        if (!e) e = modern ? Args(g, g.kswi).m(s.f1).m(s.f2).i(F2).i(F2).flat(F2) : Args(g, g.kgelu).m(s.f1).m(s.f2).i(F1).flat(F1);
+        if (!e) e = gemv(s.f2, W(l, FC2W), W(l, FC2B), s.t, F2, C);
+        if (!e) e = Args(g, g.kadd).m(s.t).m(s.x).i(C).flat(C);
+    }
+    if (!e) e = norm(s.w[gen_index(m, -1, 0)], modern ? nullptr : &s.w[gen_index(m, -1, 1)]);
+    if (!e) e = gemv(s.a, s.w[gen_index(m, -1, 2)], s.w[gen_index(m, -1, 3)], s.logits, C, V);
+    if (!e) e = g.cl.EnqueueReadBuffer(g.q, s.logits.m, 1, 0, (size_t)V * 4, s.out.data(), 0, nullptr, nullptr);
+    if (e) {
+        g.cl.Finish(g.q);
+        gen_release_locked(g);
+        return nullptr;
+    }
+    return s.out.data();
+}
+
+void gpu_gen_release() {
+    Gpu& g = G();
+    std::lock_guard<std::mutex> lk(g.mu);
+    gen_release_locked(g);
+}
+
 bool gpu_active() { return g_on; }
 
 bool gpu_use(bool on, std::string* msg) {
@@ -1460,6 +1831,7 @@ bool gpu_use(bool on, std::string* msg) {
         if (msg) *msg = in.error;
         return false;
     }
+    gpu_gen_release();  // training needs the memory
     std::string err;
     // Same results as the CPU (odd sizes cover the tile edges)?
     unsigned s = 12345;

@@ -2,13 +2,17 @@
 // so other programs (chat front-ends, bots, scripts) can use a .kor text model.
 //
 //   GET  /v1/models
-//   POST /v1/chat/completions   {"messages": [...], "max_tokens", "temperature", "stream"}
-//   POST /v1/completions        {"prompt": "...", "max_tokens", "temperature", "stream"}
+//   POST /v1/chat/completions   {"messages": [...], "max_tokens", "temperature", "top_p", "stream"}
+//   POST /v1/completions        {"prompt": "...", "max_tokens", "temperature", "top_p", "stream"}
+//   (also "top_k" and "repetition_penalty", as in other local servers)
 //
 // One request is handled at a time; every response closes the connection.
 #include "serve.h"
 
+#include "../core/gguf.h"
 #include "../core/model.h"
+#include "../core/parallel.h"
+#include "../core/sysinfo.h"
 #include "../skills/json.h"
 
 #include <algorithm>
@@ -21,6 +25,7 @@
 #include <ctime>
 #include <filesystem>
 #include <string>
+#include <thread>
 #include <vector>
 
 #if defined(_WIN32)
@@ -138,6 +143,7 @@ const char* status_text(int code) {
 
 struct Server {
     std::shared_ptr<Model> model;
+    std::shared_ptr<GgufModel> llm;  // a GGUF model instead of a .kor one
     std::string model_id, q_tag, a_tag, api_key;
     bool cors = false;
     int newline = -1;
@@ -213,8 +219,13 @@ struct Server {
     void complete(socket_t s, const json::Value& body, bool chat) {
         int max_tokens = (int)body["max_tokens"].num(body["max_completion_tokens"].num(200));
         max_tokens = std::max(1, std::min(max_tokens, 4096));
-        float temp = (float)std::max(0.0, body["temperature"].num(0.8));
+        Sampling smp;
+        smp.temperature = (float)std::max(0.0, body["temperature"].num(0.8));
+        smp.top_p = (float)std::max(0.0, std::min(1.0, body["top_p"].num(1.0)));
+        smp.top_k = std::max(0, (int)body["top_k"].num(0));
+        smp.repeat_penalty = (float)std::max(0.1, std::min(10.0, body["repetition_penalty"].num(1.0)));
         bool stream = body["stream"].flag();
+        if (llm) return complete_llm(s, body, chat, max_tokens, smp, stream);
         std::vector<int> ids;
         if (chat) {
             if (body["messages"].type != json::Value::ARR || body["messages"].a.empty()) return error(s, 400, "messages must be a non-empty array");
@@ -234,7 +245,7 @@ struct Server {
         int produced = 0;
         bool ended = false, alive = true, first = true;
         if (stream) alive = send_all(s, headers(200, "text/event-stream", -1));
-        model->generate(ids, max_tokens, temp, rng, one_line ? newline : -1, [&](int t) {
+        model->generate(ids, max_tokens, smp, rng, one_line ? newline : -1, [&](int t) {
             ++produced;
             if (one_line && t == newline) {
                 ended = true;
@@ -262,6 +273,58 @@ struct Server {
         int completion = produced - (ended ? 1 : 0);
         w.key("usage").begin_object().field("prompt_tokens", (int)ids.size()).field("completion_tokens", completion)
             .field("total_tokens", (int)ids.size() + completion).end_object();
+        w.end_object();
+        reply(s, 200, w.str());
+    }
+
+    void complete_llm(socket_t s, const json::Value& body, bool chat, int max_tokens, const Sampling& smp, bool stream) {
+        std::vector<int> ids;
+        if (chat) {
+            if (body["messages"].type != json::Value::ARR || body["messages"].a.empty()) return error(s, 400, "messages must be a non-empty array");
+            std::vector<LlmMsg> msgs;
+            for (const json::Value& m : body["messages"].a) {
+                const json::Value& c = m["content"];
+                std::string text;
+                if (c.type == json::Value::ARR) {
+                    for (const json::Value& part : c.a) text += part["text"].str();
+                } else {
+                    text = c.str();
+                }
+                msgs.push_back({m["role"].str(), text});
+            }
+            ids = llm->chat_prompt(msgs, max_tokens);
+        } else {
+            const json::Value& p = body["prompt"];
+            ids = llm->encode(p.type == json::Value::ARR && !p.a.empty() ? p.a[0].str() : p.str(), true, false);
+            int keep = std::max(1, llm->ctx - std::min(max_tokens, llm->ctx / 2));
+            if ((int)ids.size() > keep) ids.erase(ids.begin(), ids.end() - keep);
+        }
+        if (ids.empty()) return error(s, 400, "empty prompt");
+        std::string id = (chat ? "chatcmpl-" : "cmpl-") + std::to_string(rng.next() % 1000000000ull);
+        const char* object = chat ? (stream ? "chat.completion.chunk" : "chat.completion") : "text_completion";
+        bool alive = true, first = true;
+        if (stream) alive = send_all(s, headers(200, "text/event-stream", -1));
+        int produced = 0;
+        std::string text = llm->reply(ids, max_tokens, smp, rng, [&](const std::string& piece) {
+            if (stream && alive) {
+                alive = send_all(s, "data: " + chunk_json(object, id, chat, piece, first, nullptr) + "\n\n");
+                first = false;
+            }
+            return alive && !g_stop.load();
+        }, &produced);
+        const char* finish = produced < max_tokens ? "stop" : "length";
+        if (stream) {
+            if (alive) send_all(s, "data: " + chunk_json(object, id, chat, "", first, finish) + "\n\ndata: [DONE]\n\n");
+            return;
+        }
+        json::Writer w;
+        w.begin_object().field("id", id).field("object", object).field("created", (long long)std::time(nullptr)).field("model", model_id);
+        w.key("choices").begin_array().begin_object().field("index", 0);
+        if (chat) w.key("message").begin_object().field("role", "assistant").field("content", text).end_object();
+        else w.field("text", text);
+        w.field("finish_reason", finish).end_object().end_array();
+        w.key("usage").begin_object().field("prompt_tokens", (int)ids.size()).field("completion_tokens", produced)
+            .field("total_tokens", (int)ids.size() + produced).end_object();
         w.end_object();
         reply(s, 200, w.str());
     }
@@ -301,26 +364,51 @@ struct Server {
 
 int serve(const std::vector<std::string>& a) {
     std::string path = a.size() > 2 ? a[2] : "", err;
-    auto m = Model::load(path, &err);
-    if (!m) {
-        std::printf("error: %s\n", err.c_str());
-        return 1;
-    }
-    if (m->spec.kind != MODEL_GPT || m->spec.media != MEDIA_TEXT) {
-        std::printf("error: %s is not a text model\n", path.c_str());
-        return 1;
-    }
     Server sv;
-    sv.model = m;
-    sv.model_id = arg_value(a, "--name", std::filesystem::u8path(path).stem().u8string().c_str());
-    auto qi = m->meta.find("q_tag"), ai = m->meta.find("a_tag");
-    bool stored = qi != m->meta.end() && ai != m->meta.end();
-    sv.q_tag = arg_value(a, "--q-tag", stored ? qi->second.c_str() : "Kullanıcı: ");
-    sv.a_tag = arg_value(a, "--a-tag", stored ? ai->second.c_str() : "Asistan: ");
+    std::string ext = std::filesystem::u8path(path).extension().u8string();
+    for (char& c : ext) c = (char)std::tolower((unsigned char)c);
+    std::string params;
+    if (ext == ".gguf") {
+        int threads = std::atoi(arg_value(a, "--threads", "0").c_str());
+        set_threads(threads > 0 ? threads : recommended_threads(detect_system()));
+        sv.llm = GgufModel::load(path, &err, std::max(64, std::atoi(arg_value(a, "--ctx", "4096").c_str())));
+        if (sv.llm)
+            for (size_t i = 0; i + 1 < a.size(); ++i)
+                if (a[i] == "--lora" && !sv.llm->lora_load(a[i + 1], &err)) {
+                    sv.llm = nullptr;
+                    break;
+                }
+        if (!sv.llm) {
+            std::printf("error: %s\n", err.c_str());
+            return 1;
+        }
+        sv.model_id = arg_value(a, "--name", sv.llm->name.c_str());
+        params = std::to_string((long long)sv.llm->n_params);
+    } else {
+        auto m = Model::load(path, &err);
+        if (!m) {
+            std::printf("error: %s\n", err.c_str());
+            return 1;
+        }
+        if (m->spec.kind != MODEL_GPT || m->spec.media != MEDIA_TEXT) {
+            std::printf("error: %s is not a text model\n", path.c_str());
+            return 1;
+        }
+        sv.model = m;
+        auto ni = m->meta.find("name");
+        std::string stem = ni != m->meta.end() && !ni->second.empty() ? ni->second : std::filesystem::u8path(path).stem().u8string();
+        sv.model_id = arg_value(a, "--name", stem.c_str());
+        auto qi = m->meta.find("q_tag"), ai = m->meta.find("a_tag");
+        bool stored = qi != m->meta.end() && ai != m->meta.end();
+        sv.q_tag = arg_value(a, "--q-tag", stored ? qi->second.c_str() : "Kullanıcı: ");
+        sv.a_tag = arg_value(a, "--a-tag", stored ? ai->second.c_str() : "Asistan: ");
+        m->gen_on_gpu = arg_flag(a, "--gpu");
+        for (size_t i = 0; i < m->vocab.size(); ++i)
+            if (m->vocab[i] == "\n") sv.newline = (int)i;
+        params = std::to_string((long long)m->param_count());
+    }
     sv.api_key = arg_value(a, "--api-key", "");
     sv.cors = arg_flag(a, "--cors");
-    for (size_t i = 0; i < m->vocab.size(); ++i)
-        if (m->vocab[i] == "\n") sv.newline = (int)i;
     std::string host = arg_value(a, "--host", "127.0.0.1");
     int port = std::atoi(arg_value(a, "--port", "8080").c_str());
 
@@ -354,10 +442,10 @@ int serve(const std::vector<std::string>& a) {
 #if !defined(_WIN32)
     std::signal(SIGPIPE, SIG_IGN);  // a client that hangs up must not end the server
 #endif
-    std::printf("Serving %s (%s parameters) at http://%s:%d/v1\n", sv.model_id.c_str(), std::to_string((long long)m->param_count()).c_str(),
-                host.c_str(), port);
+    std::printf("Serving %s (%s parameters) at http://%s:%d/v1\n", sv.model_id.c_str(), params.c_str(), host.c_str(), port);
     if (host != "127.0.0.1") std::printf("warning: reachable from other computers on the network%s\n", sv.api_key.empty() ? " without an API key" : "");
-    std::printf("Chat format: \"%s...\" / \"%s...\"   Ctrl+C stops.\n", sv.q_tag.c_str(), sv.a_tag.c_str());
+    if (sv.llm) std::printf("Chat format: %s   Ctrl+C stops.\n", sv.llm->chat_format().c_str());
+    else std::printf("Chat format: \"%s...\" / \"%s...\"   Ctrl+C stops.\n", sv.q_tag.c_str(), sv.a_tag.c_str());
     std::fflush(stdout);
     while (!g_stop) {
         fd_set set;

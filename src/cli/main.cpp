@@ -1,5 +1,6 @@
 // kor-cli: headless companion to Kor Studio (system info, training, self-test,
 // generation and question tests). Also used by Python plugins.
+#include "../core/gguf.h"
 #include "../core/gpu.h"
 #include "../core/kernels.h"
 #include "../core/media.h"
@@ -18,6 +19,8 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
+#include <map>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -247,7 +250,288 @@ static float resume_check(bool gpu, std::string& err) {
     return pass ? diff : -1.f;
 }
 
-static int selftest() {
+// quick leaves out the checks that train a model for a while.
+// ---- GGUF: our modern transformer written as a llama / qwen2 GGUF file must give the same results.
+
+struct TestVocab {
+    std::string model = "gpt2", pre = "qwen2", tmpl;
+    std::vector<std::string> toks, merges;
+    std::vector<int32_t> types;
+    std::vector<float> scores;
+};
+
+static bool export_gguf_test(Model& m, const std::string& path, const std::string& arch, int type, const TestVocab& tv,
+                             std::string* err) {
+    const ModelSpec& s = m.spec;
+    int C = s.dim, F = s.mlp_hidden(), V = s.vocab, hd = C / s.heads, hh = hd / 2;
+    std::map<std::string, Param*> P;
+    for (Param* p : m.params()) P[p->name] = p;
+    GgufWriter w;
+    w.set_str("general.architecture", arch);
+    w.set_str("general.name", "kor-selftest");
+    std::string a = arch + ".";
+    w.set_u32(a + "context_length", s.ctx);
+    w.set_u32(a + "embedding_length", C);
+    w.set_u32(a + "block_count", s.nlayer);
+    w.set_u32(a + "feed_forward_length", F);
+    w.set_u32(a + "attention.head_count", s.heads);
+    w.set_u32(a + "attention.head_count_kv", s.heads);
+    w.set_f32(a + "rope.freq_base", s.rope_theta);
+    w.set_f32(a + "attention.layer_norm_rms_epsilon", 1e-5f);
+    w.set_str("tokenizer.ggml.model", tv.model);
+    w.set_str("tokenizer.ggml.pre", tv.pre);
+    w.set_strs("tokenizer.ggml.tokens", tv.toks);
+    w.set_i32s("tokenizer.ggml.token_type", tv.types);
+    if (!tv.scores.empty()) w.set_f32s("tokenizer.ggml.scores", tv.scores);
+    if (!tv.merges.empty()) w.set_strs("tokenizer.ggml.merges", tv.merges);
+    if (!tv.tmpl.empty()) w.set_str("tokenizer.chat_template", tv.tmpl);
+    if (tv.model == "llama") {
+        w.set_u32("tokenizer.ggml.bos_token_id", 1);
+        w.set_u32("tokenizer.ggml.eos_token_id", 2);
+    }
+    // rows of `out` values taken from columns [c0, c0 + out) of W [in x out_all]; llama rotates (2i, 2i+1) pairs, we rotate (i, i + hd/2)
+    auto rows_of = [&](const Tensor& W, int c0, int out, bool perm) {
+        std::vector<float> r((size_t)out * W.rows);
+        for (int o = 0; o < out; ++o) {
+            int src = o;
+            if (perm) {
+                int head = o / hd, j = o % hd;
+                src = head * hd + (j % 2 ? j / 2 + hh : j / 2);
+            }
+            for (int i = 0; i < W.rows; ++i) r[(size_t)o * W.rows + i] = W.v[(size_t)i * W.cols + c0 + src];
+        }
+        return r;
+    };
+    auto add = [&](const std::string& name, const std::vector<float>& v, int64_t cols, int64_t rows, int t) {
+        std::vector<uint8_t> b;
+        ggml_quantize(t, v.data(), (int64_t)v.size(), b);
+        if (rows > 1) w.add_tensor(name, {cols, rows}, t, std::move(b));
+        else w.add_tensor(name, {cols}, t, std::move(b));
+    };
+    bool perm = arch == "llama";
+    const Tensor& tok = P["emb.tok"]->w;
+    add("token_embd.weight", tok.v, C, V, type);
+    for (int l = 0; l < s.nlayer; ++l) {
+        std::string h = "h" + std::to_string(l) + ".", b = "blk." + std::to_string(l) + ".";
+        const Tensor& qkv = P[h + "attn.qkv.W"]->w;
+        const Tensor& qb = P[h + "attn.qkv.b"]->w;
+        add(b + "attn_norm.weight", P[h + "ln1.g"]->w.v, C, 1, GGML_F32);
+        add(b + "attn_q.weight", rows_of(qkv, 0, C, perm), C, C, type);
+        add(b + "attn_k.weight", rows_of(qkv, C, C, perm), C, C, type);
+        add(b + "attn_v.weight", rows_of(qkv, 2 * C, C, false), C, C, type);
+        add(b + "attn_q.bias", rows_of(qb, 0, C, perm), C, 1, GGML_F32);
+        add(b + "attn_k.bias", rows_of(qb, C, C, perm), C, 1, GGML_F32);
+        add(b + "attn_v.bias", rows_of(qb, 2 * C, C, false), C, 1, GGML_F32);
+        add(b + "attn_output.weight", rows_of(P[h + "attn.proj.W"]->w, 0, C, false), C, C, type);
+        add(b + "attn_output.bias", P[h + "attn.proj.b"]->w.v, C, 1, GGML_F32);
+        add(b + "ffn_norm.weight", P[h + "ln2.g"]->w.v, C, 1, GGML_F32);
+        add(b + "ffn_gate.weight", rows_of(P[h + "fc1.W"]->w, 0, F, false), C, F, type);
+        add(b + "ffn_up.weight", rows_of(P[h + "fc1.W"]->w, F, F, false), C, F, type);
+        add(b + "ffn_down.weight", rows_of(P[h + "fc2.W"]->w, 0, C, false), F, C, type);
+    }
+    add("output_norm.weight", P["lnf.g"]->w.v, C, 1, GGML_F32);
+    add("output.weight", rows_of(P["head.W"]->w, 0, V, false), C, V, type);
+    return w.save(path, err);
+}
+
+// A small modern model whose biases outside attention are zero (GGUF llama/qwen2 have none there).
+static std::unique_ptr<Model> gguf_test_model(int vocab, Rng& rng) {
+    ModelSpec s;
+    s.kind = MODEL_GPT; s.vocab = vocab; s.ctx = 32; s.dim = 32; s.heads = 4; s.nlayer = 2; s.arch = ARCH_MODERN;
+    auto m = std::make_unique<Model>(s, 5);
+    for (Param* p : m->params()) {
+        bool zero = p->name.find(".fc1.b") != std::string::npos || p->name.find(".fc2.b") != std::string::npos || p->name == "head.b";
+        for (auto& v : p->w.v) v = zero ? 0.f : v + rng.normal() * 0.15f;
+    }
+    return m;
+}
+
+static int gguf_selftest() {
+    int fails = 0;
+    Rng rng(11);
+    std::string dir = std::filesystem::temp_directory_path().u8string(), err;
+    auto tmp = [&](const char* n) { return (std::filesystem::u8path(dir) / n).u8string(); };
+    {   // number formats
+        std::vector<float> x(256);
+        for (auto& v : x) v = rng.normal();
+        bool pass = true;
+        for (int t : {GGML_F16, GGML_Q8_0, GGML_Q4_0}) {
+            std::vector<uint8_t> b;
+            std::vector<float> y(x.size());
+            ggml_quantize(t, x.data(), (int64_t)x.size(), b);
+            ggml_dequantize(t, b.data(), (int64_t)x.size(), y.data());
+            double worst = 0;
+            for (size_t i = 0; i < x.size(); ++i) worst = std::max(worst, (double)std::fabs(x[i] - y[i]));
+            double lim = t == GGML_F16 ? 2e-3 : t == GGML_Q8_0 ? 0.02 : 0.4;
+            std::printf("gguf %s round trip: largest error %.4f %s\n", ggml_type_name(t), worst, worst < lim ? "OK" : "FAIL");
+            pass = pass && worst < lim;
+        }
+        if (!pass) ++fails;
+    }
+    TestVocab num;
+    for (int i = 0; i < 40; ++i) { num.toks.push_back("t" + std::to_string(i)); num.types.push_back(1); }
+    auto ref = gguf_test_model(40, rng);
+    Batch b;
+    b.B = 3; b.T = 12;
+    for (int i = 0; i < 36; ++i) { b.ids.push_back(rng.below(40)); b.tgt.push_back(rng.below(40)); }
+    float ref_loss = ref->step(b, false, 1.f);
+    std::vector<int> prompt = {3, 7, 1, 9}, ref_gen;
+    {
+        Sampling greedy;
+        greedy.temperature = 0.f;
+        Rng r(1);
+        ref->generate(prompt, 20, greedy, r, -1, [&](int t) { ref_gen.push_back(t); return true; });
+    }
+    std::vector<float> w(36, 1.f);
+    static const std::pair<const char*, int> kinds[] = {{"qwen2", GGML_F32}, {"llama", GGML_F32}, {"llama", GGML_Q8_0}};
+    for (const auto& [arch, type] : kinds) {
+        std::string path = tmp("kor-selftest.gguf");
+        bool pass = export_gguf_test(*ref, path, arch, type, num, &err);
+        auto g = pass ? GgufModel::load(path, &err) : nullptr;
+        float loss = g ? g->lora_loss(b.ids.data(), b.tgt.data(), w.data(), 3, 12, false) : 1e9f;
+        std::vector<int> gen;
+        if (g) {
+            Sampling greedy;
+            greedy.temperature = 0.f;
+            Rng r(1);
+            g->generate(prompt, 20, greedy, r, [&](int t) { gen.push_back(t); return true; });
+        }
+        bool exact = type == GGML_F32;
+        pass = g && std::fabs(loss - ref_loss) < (exact ? 2e-4 : 0.03) && (!exact || gen == ref_gen);
+        std::printf("gguf %s %s: loss %.5f vs %.5f, greedy text %s %s %s\n", arch, ggml_type_name(type), loss, ref_loss,
+                    exact ? (gen == ref_gen ? "same" : "DIFFERENT") : "-", pass ? "OK" : "FAIL", err.c_str());
+        if (!pass) ++fails;
+        if (g && std::string(arch) == "qwen2") {
+            // LoRA: gradients against finite differences, then a save / load round trip
+            LoraConfig lc;
+            lc.rank = 2;
+            lc.mlp = true;
+            g->lora_init(lc);
+            auto ps = g->lora_params();
+            for (Param* p : ps)
+                for (auto& v : p->w.v) v = rng.normal() * 0.3f;
+            for (Param* p : ps) p->g.zero();
+            double l0 = g->lora_loss(b.ids.data(), b.tgt.data(), w.data(), 3, 12, true), worst = 0;
+            for (int k = 0; k < 24; ++k) {
+                Param* p = ps[rng.below((int)ps.size())];
+                size_t i = (size_t)rng.below((int)p->w.v.size());
+                float keep = p->w.v[i], eps = 2e-3f;
+                p->w.v[i] = keep + eps;
+                double up = g->lora_loss(b.ids.data(), b.tgt.data(), w.data(), 3, 12, false);
+                p->w.v[i] = keep - eps;
+                double dn = g->lora_loss(b.ids.data(), b.tgt.data(), w.data(), 3, 12, false);
+                p->w.v[i] = keep;
+                double num_g = (up - dn) / (2 * eps), an = p->g.v[i];
+                worst = std::max(worst, std::fabs(num_g - an) / std::max(1e-2, std::fabs(num_g) + std::fabs(an)));
+            }
+            std::printf("gguf LoRA gradient check: worst relative error %.4f %s\n", worst, worst < 0.05 ? "OK" : "FAIL");
+            if (worst >= 0.05) ++fails;
+            std::string lp = tmp("kor-selftest-lora.gguf");
+            bool ok = g->lora_save(lp, &err);
+            auto g2 = ok ? GgufModel::load(path, &err) : nullptr;
+            ok = g2 && g2->lora_load(lp, &err);
+            double l1 = ok ? g2->lora_loss(b.ids.data(), b.tgt.data(), w.data(), 3, 12, false) : 1e9;
+            bool same = ok && std::fabs(l1 - l0) < 1e-5;
+            std::printf("gguf LoRA adapter save / load: loss %.5f vs %.5f %s %s\n", l1, l0, same ? "OK" : "FAIL", err.c_str());
+            if (!same) ++fails;
+            std::error_code ec;
+            std::filesystem::remove(std::filesystem::u8path(lp), ec);
+        }
+        std::error_code ec;
+        std::filesystem::remove(std::filesystem::u8path(path), ec);
+    }
+    {   // byte-level BPE (qwen2 split), special tokens, ChatML
+        TestVocab tv;
+        tv.tmpl = "{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n{% endfor %}";
+        std::vector<std::string> bytes(256);
+        {
+            int n = 0;
+            for (int c = 0; c < 256; ++c) {
+                bool keep = (c >= '!' && c <= '~') || (c >= 0xA1 && c <= 0xAC) || (c >= 0xAE && c <= 0xFF);
+                uint32_t cp = keep ? (uint32_t)c : (uint32_t)(256 + n++);
+                std::string s;
+                if (cp < 0x80) s += (char)cp;
+                else { s += (char)(0xC0 | (cp >> 6)); s += (char)(0x80 | (cp & 0x3F)); }
+                bytes[c] = s;
+            }
+        }
+        for (auto& s : bytes) { tv.toks.push_back(s); tv.types.push_back(1); }
+        std::string G = bytes[' '];
+        static const char* const merged[] = {"Gw", "or", "ld", "Gwor", "Gworld", "He", "ll", "Hell", "Hello"};
+        for (const char* t : merged) {
+            std::string s = t;
+            if (s[0] == 'G') s = G + s.substr(1);
+            tv.toks.push_back(s);
+            tv.types.push_back(1);
+        }
+        tv.merges = {G + " w", "o r", "l d", G + "w or", G + "wor ld", "H e", "l l", "He ll", "Hell o"};
+        tv.toks.push_back("<|im_start|>");
+        tv.toks.push_back("<|im_end|>");
+        tv.types.insert(tv.types.end(), 2, 3);
+        int V = (int)tv.toks.size();
+        auto m = gguf_test_model(V, rng);
+        std::string path = tmp("kor-selftest-bpe.gguf");
+        auto g = export_gguf_test(*m, path, "qwen2", GGML_F32, tv, &err) ? GgufModel::load(path, &err) : nullptr;
+        bool pass = false;
+        if (g) {
+            auto id = [&](const std::string& s) {
+                for (int i = 0; i < V; ++i) if (tv.toks[i] == s) return i;
+                return -1;
+            };
+            std::vector<int> ids = g->encode("Hellod world<|im_end|>12", true), want = {id("Hello"), id("d"), id(G + "world"), id("<|im_end|>"), id("1"), id("2")};
+            std::vector<LlmMsg> hi(1);
+            hi[0].role = "user";
+            hi[0].text = "Hi";
+            std::string chat = g->chat_text(hi);
+            pass = ids == want && g->decode(ids) == "Hellod world12" && g->is_end(id("<|im_end|>")) &&
+                   chat == "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n" && g->chat_ids(hi)[0] == id("<|im_start|>") &&
+                   g->decode(g->encode("Çağrı 2024, şimdi!\n\n  ok", false)) == "Çağrı 2024, şimdi!\n\n  ok";
+            LoraData ld = lora_data(*g, "Q: Hi\nA: Hello\nQ: Hello\nA: Hi\n", "Q: ", "A: ");
+            pass = pass && ld.chat && ld.ex.size() == 2 && ld.w[0].front() == 0.f && ld.w[0].back() == 1.f;
+        }
+        std::printf("gguf BPE tokenizer, special tokens, chat format %s %s\n", pass ? "OK" : "FAIL", err.c_str());
+        if (!pass) ++fails;
+        std::error_code ec;
+        std::filesystem::remove(std::filesystem::u8path(path), ec);
+    }
+    {   // sentencepiece with byte fallback
+        TestVocab tv;
+        tv.model = "llama";
+        tv.pre = "default";
+        auto addt = [&](const std::string& s, int type, float score) { tv.toks.push_back(s); tv.types.push_back(type); tv.scores.push_back(score); };
+        addt("<unk>", 2, 0);
+        addt("<s>", 3, 0);
+        addt("</s>", 3, 0);
+        for (int c = 0; c < 256; ++c) {
+            char n[8];
+            std::snprintf(n, sizeof n, "<0x%02X>", c);
+            addt(n, 6, 0);
+        }
+        std::string U = "\xE2\x96\x81";
+        addt(U + "Hello", 1, -1);
+        addt(U + "Hel", 1, -2);
+        addt(U + "H", 1, -3);
+        addt("el", 1, -4);
+        addt("lo", 1, -5);
+        addt(U, 1, -6);
+        int V = (int)tv.toks.size();
+        auto m = gguf_test_model(V, rng);
+        std::string path = tmp("kor-selftest-spm.gguf");
+        auto g = export_gguf_test(*m, path, "llama", GGML_F32, tv, &err) ? GgufModel::load(path, &err) : nullptr;
+        bool pass = false;
+        if (g) {
+            std::vector<int> ids = g->encode("Hello Hi", true), want = {1, V - 6, V - 4, 3 + 'i'};
+            pass = ids == want && g->decode(ids) == " Hello Hi" && g->is_end(2);
+        }
+        std::printf("gguf sentencepiece tokenizer %s %s\n", pass ? "OK" : "FAIL", err.c_str());
+        if (!pass) ++fails;
+        std::error_code ec;
+        std::filesystem::remove(std::filesystem::u8path(path), ec);
+    }
+    return fails;
+}
+
+static int selftest(bool quick) {
     int fails = 0;
     set_threads(4);
     std::printf("kernels: %s\n", K().name);
@@ -280,15 +564,42 @@ static int selftest() {
         for (auto& v : b.y.v) v = rng.normal();
         if (gradcheck(m, b, "regression") >= 0.08) ++fails;
     }
-    {   // transformer
+    for (int arch : {ARCH_CLASSIC, ARCH_MODERN}) {   // transformer
+        const bool modern = arch == ARCH_MODERN;
+        std::printf("-- %s transformer\n", modern ? "modern (RMSNorm, RoPE, SwiGLU)" : "classic");
         ModelSpec s;
-        s.kind = MODEL_GPT; s.vocab = 11; s.ctx = 6; s.dim = 16; s.heads = 2; s.nlayer = 2;
+        s.kind = MODEL_GPT; s.vocab = 11; s.ctx = 6; s.dim = 16; s.heads = 2; s.nlayer = 2; s.arch = arch;
         Model m(s);
         for (Param* p : m.params()) for (auto& v : p->w.v) v += rng.normal() * 0.15f;  // leave the flat init region
         Batch b;
         b.B = 3; b.T = 6;
         for (int i = 0; i < 18; ++i) { b.ids.push_back(rng.below(11)); b.tgt.push_back(rng.below(11)); }
-        if (gradcheck(m, b, "transformer") >= 0.08) ++fails;
+        if (gradcheck(m, b, modern ? "modern" : "transformer") >= 0.08) ++fails;
+        if (modern) {
+            size_t n = m.param_count();
+            bool pass = n == estimate_params(s);
+            std::printf("modern parameter count %zu vs estimate %zu %s\n", n, estimate_params(s), pass ? "OK" : "FAIL");
+            if (!pass) ++fails;
+        }
+        {   // recomputing the blocks in the backward pass (with dropout) changes nothing
+            Model ma(s, 77), mb(s, 77);
+            ma.set_dropout(0.2f);
+            mb.set_dropout(0.2f);
+            mb.recompute = true;
+            ma.zero_grad();
+            mb.zero_grad();
+            float la = ma.step(b, true, 1.f), lb = mb.step(b, true, 1.f);
+            la += ma.step(b, true, 1.f);  // a second step: the dropout state goes on the same way
+            lb += mb.step(b, true, 1.f);
+            double worst = 0;
+            auto pa = ma.params(), pb = mb.params();
+            for (size_t i = 0; i < pa.size(); ++i)
+                for (size_t k = 0; k < pa[i]->g.v.size(); ++k) worst = std::max(worst, (double)std::fabs(pa[i]->g.v[k] - pb[i]->g.v[k]));
+            bool pass = la == lb && worst == 0;
+            std::printf("recompute in the backward pass: loss %.5f vs %.5f, largest gradient difference %.1e %s\n", la, lb, worst,
+                        pass ? "OK" : "FAIL");
+            if (!pass) ++fails;
+        }
 
         // Checkpoint round trip (full and half precision) and LoRA merge.
         m.vocab = {"a", "b"};
@@ -306,7 +617,7 @@ static int selftest() {
         m.enable_lora(4);
         for (Param* p : m.params())
             if (p->trainable) for (auto& v : p->w.v) v = rng.normal() * 0.2f;
-        if (gradcheck(m, b, "gpt+lora") >= 0.08) ++fails;
+        if (gradcheck(m, b, modern ? "modern+lora" : "gpt+lora") >= 0.08) ++fails;
         double before = m.step(b, false, 1.f);
         m.merge_lora();
         double after = m.step(b, false, 1.f);
@@ -401,11 +712,73 @@ static int selftest() {
         std::printf("tokenizer: %zu tokens %s\n", ref.size(), pass ? "OK" : "FAIL");
         if (!pass) ++fails;
     }
-    {   // crash-safe training: a run stopped halfway and resumed ends like an uninterrupted one
+    if (!quick) {   // crash-safe training: a run stopped halfway and resumed ends like an uninterrupted one
         std::string err;
         float diff = resume_check(false, err);
         bool pass = diff >= 0 && diff < 1e-4f;
         std::printf("resume after stop: weight difference %.2g %s %s\n", diff, pass ? "OK" : "FAIL", err.c_str());
+        if (!pass) ++fails;
+    }
+    {   // sampling: top-k, top-p and the repeat penalty on fixed logits
+        ModelSpec sp;
+        sp.kind = MODEL_GPT; sp.dim = 8; sp.heads = 2; sp.nlayer = 1; sp.ctx = 8; sp.vocab = 5;
+        Model m(sp);
+        const float z[5] = {2.f, 1.9f, 0.5f, -1.f, 1.f};
+        Rng r(5);
+        Sampling s;
+        s.temperature = 1.f;
+        bool pass = true;
+        int counts[5] = {0};
+        s.top_k = 2;
+        for (int i = 0; i < 400; ++i) ++counts[m.sample(z, s, nullptr, 0, r)];
+        pass &= counts[0] > 0 && counts[1] > 0 && counts[2] + counts[3] + counts[4] == 0;
+        s.top_k = 0;
+        s.top_p = 0.3f;
+        for (int i = 0; i < 100; ++i) pass &= m.sample(z, s, nullptr, 0, r) == 0;
+        s.top_p = 1.f;
+        s.temperature = 0.f;
+        s.repeat_penalty = 1.5f;
+        const int recent[2] = {0, 0};
+        pass &= m.sample(z, s, recent, 2, r) == 1 && m.sample(z, s, recent, 2, r, 0) == 0;
+        std::printf("sampling (top-k, top-p, repeat penalty) %s\n", pass ? "OK" : "FAIL");
+        if (!pass) ++fails;
+    }
+    {   // the model's name: language guess, identity lines in front of the training text, kept in the file
+        bool pass = text_language("Kullanıcı: Nasılsın?\nAsistan: İyiyim, teşekkürler.\n") == LANG_TEXT_TR &&
+                    text_language("User: How are you?\nAssistant: Fine, thanks.\n") == LANG_TEXT_EN &&
+                    text_language("Пользователь: Как дела?\nАссистент: Хорошо.\n") == LANG_TEXT_RU;
+        std::string block = identity_dialogue("Atlas", "Ada", "Kullanıcı: ", "Asistan: ", LANG_TEXT_TR);
+        pass = pass && block.find("Kullanıcı: Adın ne?\nAsistan: Benim adım Atlas.\n") == 0 &&
+               block.find("Beni Ada yaptı.") != std::string::npos && block.find('{') == std::string::npos;
+        std::string path = (std::filesystem::temp_directory_path() / "kor-selftest-name.txt").u8string(), err;
+        {
+            std::ofstream f(upath(path), std::ios::binary);
+            for (int i = 0; i < 400; ++i) f << "Kullanıcı: Merhaba\nAsistan: Selam, nasılsın?\n";
+        }
+        Dataset d;
+        if (d.load_text(path, &err)) {
+            ModelSpec sp;
+            sp.kind = MODEL_GPT; sp.dim = 16; sp.heads = 2; sp.nlayer = 1; sp.ctx = 16; sp.vocab = (int)d.vocab.size();
+            Model m(sp);
+            m.vocab = d.vocab;
+            m.meta["name"] = "Atlas";
+            size_t n0 = d.n_train, v0 = m.vocab.size();
+            m.extend_vocab(text_chars(block));
+            d.vocab = m.vocab;
+            int reps = d.add_training_text(block, 0.01);
+            std::string front, want = "Kullanıcı: Adın ne?\nAsistan: Benim adım Atlas.";
+            for (size_t i = 0; i < 60; ++i) front += d.vocab[d.ids[i]];
+            pass = pass && reps >= 3 && m.vocab.size() > v0 && d.n_train > n0 && front.compare(0, want.size(), want) == 0 &&
+                   d.layout.starts.size() > 400;
+            std::string mp = path + ".kor";
+            auto back = m.save(mp, true, &err) ? Model::load(mp, &err) : nullptr;
+            pass = pass && back && back->meta["name"] == "Atlas";
+            std::error_code ec;
+            std::filesystem::remove(upath(mp), ec);
+        } else pass = false;
+        std::error_code ec;
+        std::filesystem::remove(upath(path), ec);
+        std::printf("model name and identity lines %s\n", pass ? "OK" : "FAIL");
         if (!pass) ++fails;
     }
     {   // half-float conversion
@@ -432,6 +805,8 @@ static int selftest() {
         std::printf("dataset tools (JSONL import, cleaning) %s\n", pass ? "OK" : "FAIL");
         if (!pass) ++fails;
     }
+    std::printf("-- GGUF models\n");
+    fails += gguf_selftest();
     std::printf(fails ? "SELFTEST FAILED (%d)\n" : "SELFTEST PASSED\n", fails);
     return fails ? 1 : 0;
 }
@@ -538,6 +913,15 @@ static int train(const std::vector<std::string>& a) {
         num("--layers", plan.spec.nlayer);
         num("--heads", plan.spec.heads);
         num("--ctx", plan.spec.ctx);
+        std::string arch = flag(a, "--arch");
+        if (arch == "classic") plan.spec.arch = ARCH_CLASSIC;
+        else if (arch == "modern") plan.spec.arch = ARCH_MODERN;
+        else if (!arch.empty()) { std::printf("error: --arch is classic or modern\n"); return 1; }
+        num("--ffn", plan.spec.ffn);
+        if (plan.spec.arch == ARCH_MODERN && (plan.spec.dim / std::max(1, plan.spec.heads)) % 2 != 0) {
+            std::printf("error: the modern architecture needs an even --dim / --heads\n");
+            return 1;
+        }
         if (media == MEDIA_IMAGE) plan.spec.ctx = data.img_size * data.img_size + 1;  // one whole image
         if (plan.spec.dim % plan.spec.heads != 0) { std::printf("error: --dim must be a multiple of --heads\n"); return 1; }
         plan.params = estimate_params(plan.spec);
@@ -583,12 +967,14 @@ static int train(const std::vector<std::string>& a) {
     std::printf("auto plan: %zu parameters, ~%.0f MB RAM, batch %d x%d, %d steps, %d threads, kernels %s\n",
                 plan.params, plan.est_ram_mb, plan.cfg.batch, plan.cfg.accum, plan.cfg.steps, plan.cfg.threads, K().name);
     if (kind == DATA_TEXT)
-        std::printf("model: dim %d, %d layers, %d heads, context %d; lr %g; aligned rows %.0f%%, question weight %g, dropout %g, weight decay %g, ema %g\n",
-                    plan.spec.dim, plan.spec.nlayer, plan.spec.heads, plan.spec.ctx, plan.cfg.lr, plan.cfg.align * 100,
+        std::printf("model: %s, dim %d, %d layers, %d heads, context %d; lr %g; aligned rows %.0f%%, question weight %g, dropout %g, weight decay %g, ema %g\n",
+                    plan.spec.arch == ARCH_MODERN ? "modern (RMSNorm, RoPE, SwiGLU)" : "classic", plan.spec.dim, plan.spec.nlayer,
+                    plan.spec.heads, plan.spec.ctx, plan.cfg.lr, plan.cfg.align * 100,
                     plan.cfg.prompt_weight, plan.cfg.dropout, plan.cfg.weight_decay, plan.cfg.ema);
     if (media == MEDIA_IMAGE) std::printf("image model: %dx%d pixels, %zu colours\n", data.img_size, data.img_size, data.vocab.size() - 1);
     if (media == MEDIA_AUDIO) std::printf("sound model: %d Hz, 256 levels (mu-law)\n", data.rate);
     auto model = base ? base : std::make_shared<Model>(plan.spec);
+    model->recompute = has_flag(a, "--recompute");
     if (!base) {
         if (kind == DATA_TEXT) model->vocab = data.vocab;
         else { model->vocab = data.labels; model->norm_mean = data.mean; model->norm_std = data.stdv; }
@@ -603,6 +989,17 @@ static int train(const std::vector<std::string>& a) {
         }
         if (int held = data.hold_out(plan.cfg.probes))
             std::printf("test questions held out: %d lines removed from the training data\n", held);
+        std::string name = flag(a, "--name"), maker = flag(a, "--maker"), qt, at;
+        if (!name.empty()) model->meta["name"] = name;
+        if (!maker.empty()) model->meta["maker"] = maker;
+        auto ni = model->meta.find("name"), mi = model->meta.find("maker");
+        if (ni != model->meta.end() && !has_flag(a, "--no-teach-name") && model->spec.lora_rank == 0 && data.dialogue_tags(qt, at)) {
+            std::string block = identity_dialogue(ni->second, mi == model->meta.end() ? "" : mi->second, qt, at, text_language(data.raw));
+            model->extend_vocab(text_chars(block));
+            data.vocab = model->vocab;
+            int reps = data.add_training_text(block, 0.01);
+            std::printf("teaching the name \"%s\": its question-answer lines were added %d times\n", ni->second.c_str(), reps);
+        }
         if (data.n_train < (size_t)plan.spec.ctx + 2) {
             std::printf("error: too little training text is left after removing the test questions\n");
             return 1;
@@ -748,6 +1145,7 @@ static int generate(const std::vector<std::string>& a) {
     bool line = has_flag(a, "--line");
     std::string seed = flag(a, "--seed");
     Rng rng(seed.empty() ? (uint64_t)std::chrono::steady_clock::now().time_since_epoch().count() : std::strtoull(seed.c_str(), nullptr, 10));
+    m->gen_on_gpu = has_flag(a, "--gpu");
     if (m->spec.media == MEDIA_IMAGE) {
         std::string out = flag(a, "--out", "generated.png");
         int count = std::max(1, std::min(64, std::atoi(flag(a, "--count", "16").c_str())));
@@ -788,7 +1186,12 @@ static int generate(const std::vector<std::string>& a) {
     std::vector<int> ids = m->encode(prompt);
     if (ids.empty()) ids.push_back(rng.below(std::max(1, m->spec.vocab)));
     std::string out;
-    for (int t : m->generate(ids, len, temp, rng, -1, [&](int t) { return !(line && m->vocab[t] == "\n"); })) {
+    Sampling smp;
+    smp.temperature = temp;
+    smp.top_p = (float)std::atof(flag(a, "--top-p", "1").c_str());
+    smp.top_k = std::atoi(flag(a, "--top-k", "0").c_str());
+    smp.repeat_penalty = (float)std::atof(flag(a, "--repeat", "1").c_str());
+    for (int t : m->generate(ids, len, smp, rng, -1, [&](int t) { return !(line && m->vocab[t] == "\n"); })) {
         if (line && m->vocab[t] == "\n") break;
         out += m->vocab[t];
     }
@@ -870,19 +1273,19 @@ static int data_tool(const std::vector<std::string>& a) {
 
 // Dropout and per-row loss weights cannot be compared with the CPU (other masks),
 // so the GPU gradient is checked against finite differences of the GPU loss.
-static double gpt_numeric_check() {
+static double gpt_numeric_check(int arch, bool recompute) {
     ModelSpec s;
     s.kind = MODEL_GPT;
-    s.vocab = 20; s.ctx = 24; s.dim = 32; s.heads = 4; s.nlayer = 2;
+    s.vocab = 20; s.ctx = 24; s.dim = 32; s.heads = 4; s.nlayer = 2; s.arch = arch;
     Model m(s, 5);
+    m.recompute = recompute;
     const int B = 3, T = 24;
     Rng rng(11);
     std::vector<int> ids, tgt;
     std::vector<float> w;
     for (int i = 0; i < B * T; ++i) { ids.push_back(rng.below(s.vocab)); tgt.push_back(rng.below(s.vocab)); w.push_back(0.2f + rng.uniform()); }
     GpuGpt g;
-    g.vocab = s.vocab; g.ctx = s.ctx; g.dim = s.dim; g.heads = s.heads; g.nlayer = s.nlayer;
-    g.params = m.params();
+    if (!m.gpu_layout(g)) return 1;
     // bigger weights than at the start, so every part has a clear gradient
     for (Param* p : g.params)
         for (float& x : p->w.v) x += rng.normal() * 0.3f;
@@ -931,11 +1334,12 @@ static double rel_diff(const std::vector<Param*>& a, const std::vector<Param*>& 
 }
 
 // A batch split into passes of 3 sequences must give the loss and gradients of the CPU.
-static double gpt_split_check() {
+static double gpt_split_check(int arch, bool recompute) {
     ModelSpec s;
     s.kind = MODEL_GPT;
-    s.vocab = 40; s.ctx = 32; s.dim = 32; s.heads = 4; s.nlayer = 2;
+    s.vocab = 40; s.ctx = 32; s.dim = 32; s.heads = 4; s.nlayer = 2; s.arch = arch;
     Model cpu(s, 8), gpu(s, 8);
+    gpu.recompute = recompute;
     Batch b;
     b.B = 8; b.T = 32;
     Rng rng(21);
@@ -957,18 +1361,16 @@ static double gpt_split_check() {
 
 // Training steps with weights, gradients and optimizer on the card must end
 // with the weights of the same steps on the CPU (clipping included).
-static double resident_check(int opt) {
+static double resident_check(int opt, int arch) {
     ModelSpec s;
     s.kind = MODEL_GPT;
-    s.vocab = 40; s.ctx = 32; s.dim = 32; s.heads = 4; s.nlayer = 2;
+    s.vocab = 40; s.ctx = 32; s.dim = 32; s.heads = 4; s.nlayer = 2; s.arch = arch;
     Model cpu(s, 9), gpu(s, 9);
     cpu.use_gpu = false;
     Optimizer o(opt, 0.01f);
     const float lr = 3e-3f, clip = 0.5f;
     GpuGpt g;
-    g.vocab = s.vocab; g.ctx = s.ctx; g.dim = s.dim; g.heads = s.heads; g.nlayer = s.nlayer;
-    g.params = gpu.params();
-    if (!gpu_resident_begin(g, opt == OPT_SGD ? 1 : 2, 4, s.ctx)) return 1;
+    if (!gpu.gpu_layout(g) || !gpu_resident_begin(g, opt == OPT_SGD ? 1 : 2, 4, s.ctx)) return 1;
     Rng rng(5);
     double worst = 0;
     for (int t = 1; t <= 4; ++t) {
@@ -997,6 +1399,30 @@ static double resident_check(int opt) {
         for (size_t k = 0; k < g.params[i]->w.v.size(); ++k)
             worst = std::max(worst, (double)std::fabs(cpu.params()[i]->w.v[k] - g.params[i]->w.v[k]) / lr);
     return worst;
+}
+
+// Greedy generation with the weights and keys/values on the card must pick the
+// tokens of the CPU, also past the context (the window starts again). Returns the
+// number of differing tokens, -1 when the GPU did not generate.
+static int gen_check(int arch) {
+    ModelSpec s;
+    s.kind = MODEL_GPT;
+    s.vocab = 50; s.ctx = 24; s.dim = 64; s.heads = 4; s.nlayer = 2; s.arch = arch;
+    Model m(s, 13);
+    Rng rng(17);
+    for (Param* p : m.params())
+        for (float& x : p->w.v) x += rng.normal() * 0.2f;
+    Rng r1(1), r2(1);
+    std::vector<int> prompt = {3, 1, 4, 1, 5};
+    std::vector<int> cpu = m.generate(prompt, 40, 0.f, r1);
+    m.gen_on_gpu = true;
+    std::vector<int> gpu = m.generate(prompt, 40, 0.f, r2);
+    bool used = m.last_gen_on_gpu;
+    m.gen_on_gpu = false;
+    if (!used || gpu.size() != cpu.size()) return -1;
+    int diff = 0;
+    for (size_t i = 0; i < cpu.size(); ++i) diff += cpu[i] != gpu[i];
+    return diff;
 }
 
 // Times forward + backward of a text model on random tokens (no data, nothing saved).
@@ -1048,7 +1474,8 @@ static void step_bench(int dim, int heads, int layers, int ctx, int batch, bool 
 }
 
 // kor-cli gpu: finds the OpenCL GPU, checks its products against the CPU and times both.
-static int gpu_check() {
+// quick leaves out the short training run and the step timings.
+static int gpu_check(bool quick) {
     const GpuInfo& g = gpu_probe();
     if (!g.found) { std::printf("no usable GPU: %s\n", g.error.c_str()); return 1; }
     std::printf("GPU: %s (%s, %.1f GB, %s)\n", g.name.c_str(), g.vendor.c_str(), g.mem_gb, g.platform.c_str());
@@ -1110,17 +1537,24 @@ static int gpu_check() {
     }
     std::string msg;
     bool on = gpu_use(true, &msg);
-    if (on) {
-        double e = gpt_numeric_check();
-        bool ok = e < 0.05;
-        all_ok = all_ok && ok;
-        std::printf("text model with dropout and loss weights: gradient vs finite differences %.1e%s\n", e, ok ? "" : "  WRONG");
-        e = gpt_split_check();
-        ok = e < 1e-4;
-        all_ok = all_ok && ok;
-        std::printf("batch split into passes of 3 sequences: difference from the CPU %.1e%s\n", e, ok ? "" : "  WRONG");
+    for (int arch : {ARCH_CLASSIC, ARCH_MODERN}) {
+        if (!on) break;
+        std::printf("%s architecture:\n", arch == ARCH_MODERN ? "modern (RMSNorm, RoPE, SwiGLU)" : "classic");
+        double e = 0;
+        bool ok = true;
+        for (bool rc : {false, true}) {
+            const char* how = rc ? " (blocks recomputed)" : "";
+            e = gpt_numeric_check(arch, rc);
+            ok = e < 0.05;
+            all_ok = all_ok && ok;
+            std::printf("text model with dropout and loss weights%s: gradient vs finite differences %.1e%s\n", how, e, ok ? "" : "  WRONG");
+            e = gpt_split_check(arch, rc);
+            ok = e < 1e-4;
+            all_ok = all_ok && ok;
+            std::printf("batch split into passes of 3 sequences%s: difference from the CPU %.1e%s\n", how, e, ok ? "" : "  WRONG");
+        }
         for (int opt : {OPT_ADAMW, OPT_SGD}) {
-            e = resident_check(opt);
+            e = resident_check(opt, arch);
             ok = e < (opt == OPT_SGD ? 1e-4 : 1e-2);
             all_ok = all_ok && ok;
             std::printf("4 steps with weights and %s on the GPU: difference from the CPU %.1e%s\n", opt == OPT_SGD ? "SGD" : "AdamW", e,
@@ -1128,7 +1562,16 @@ static int gpu_check() {
         }
     }
     gpu_use(false);
-    if (on) {
+    for (int arch : {ARCH_CLASSIC, ARCH_MODERN}) {
+        int d = gen_check(arch);
+        bool ok = d == 0;
+        all_ok = all_ok && ok;
+        if (d < 0) std::printf("%s text generation on the GPU: did not run  WRONG\n", arch == ARCH_MODERN ? "modern" : "classic");
+        else std::printf("%s text generation on the GPU: %d of 40 greedy tokens differ from the CPU%s\n",
+                         arch == ARCH_MODERN ? "modern" : "classic", d, ok ? "" : "  WRONG");
+    }
+    gpu_gen_release();
+    if (on && !quick) {
         std::string err;
         float d = resume_check(true, err);
         bool ok = d >= 0 && d < 1e-4f;
@@ -1137,11 +1580,171 @@ static int gpu_check() {
     }
     std::printf("\n%s: %s\n", all_ok ? "results match the CPU" : "RESULTS DIFFER FROM THE CPU", msg.c_str());
     std::printf("training with --gpu %s\n", on ? "will use the GPU" : "stays on the CPU");
+    if (quick) return all_ok ? 0 : 1;
     std::printf("\none training step (forward + backward, random tokens):\n");
     step_bench(64, 4, 3, 112, 32, on);
     step_bench(128, 4, 4, 128, 32, on);
     step_bench(256, 8, 6, 256, 16, on);
     return all_ok ? 0 : 1;
+}
+
+// A line typed by the user, as UTF-8 (the Windows console needs the wide API for that).
+static bool read_line(std::string& out) {
+    out.clear();
+#if defined(_WIN32)
+    HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD mode;
+    if (GetConsoleMode(in, &mode)) {
+        std::wstring w;
+        wchar_t buf[512];
+        DWORD n = 0;
+        while (ReadConsoleW(in, buf, 512, &n, nullptr) && n > 0) {
+            w.append(buf, n);
+            if (w.back() == L'\n') break;
+        }
+        if (w.empty()) return false;
+        while (!w.empty() && (w.back() == L'\n' || w.back() == L'\r')) w.pop_back();
+        int len = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+        out.resize(len);
+        WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), out.data(), len, nullptr, nullptr);
+        return true;
+    }
+#endif
+    if (!std::getline(std::cin, out)) return false;
+    if (!out.empty() && out.back() == '\r') out.pop_back();
+    return true;
+}
+
+static Sampling sampling_flags(const std::vector<std::string>& a, const char* temp, const char* top_p, const char* top_k, const char* rep) {
+    Sampling s;
+    s.temperature = (float)std::atof(flag(a, "--temp", temp).c_str());
+    s.top_p = (float)std::atof(flag(a, "--top-p", top_p).c_str());
+    s.top_k = std::atoi(flag(a, "--top-k", top_k).c_str());
+    s.repeat_penalty = (float)std::atof(flag(a, "--repeat", rep).c_str());
+    return s;
+}
+
+// kor-cli gguf info|chat|generate|lora <model.gguf> ...
+static int gguf_cmd(const std::vector<std::string>& a) {
+    std::string sub = a[2], path = a[3], err;
+    int threads = std::atoi(flag(a, "--threads", "0").c_str());
+    set_threads(threads > 0 ? threads : recommended_threads(detect_system()));
+    int ctx = std::max(64, std::atoi(flag(a, "--ctx", "4096").c_str()));
+    auto t0 = std::chrono::steady_clock::now();
+    auto m = GgufModel::load(path, &err, ctx);
+    if (!m) {
+        std::printf("error: %s\n", err.c_str());
+        return 1;
+    }
+    double load_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    const auto& c = m->cfg;
+    std::printf("%s: %s, %.2f B parameters, %s, %d layers, width %d, %d/%d heads, vocabulary %d, context %d (using %d)\n",
+                m->name.c_str(), c.arch.c_str(), m->n_params / 1e9, m->quant.c_str(), c.layers, c.dim, c.heads, c.kv_heads,
+                c.vocab, c.ctx_train, m->ctx);
+    std::printf("weights: %s\nchat format: %s, file %.0f MB, opened in %.2f s\n", m->quant_mix.c_str(), m->chat_format().c_str(),
+                m->file_bytes / 1048576.0, load_s);
+    for (const std::string& lp : flags(a, "--lora")) {
+        if (!m->lora_load(lp, &err)) {
+            std::printf("error: %s: %s\n", lp.c_str(), err.c_str());
+            return 1;
+        }
+        std::printf("LoRA adapter %s (rank %d)\n", lp.c_str(), m->lora_cfg.rank);
+    }
+    if (sub == "info") return 0;
+    std::string seed = flag(a, "--seed");
+    Rng rng(seed.empty() ? (uint64_t)std::chrono::steady_clock::now().time_since_epoch().count() : std::strtoull(seed.c_str(), nullptr, 10));
+    int len = std::max(1, std::atoi(flag(a, "--len", "512").c_str()));
+    auto timed = [&](const std::vector<int>& ids, const Sampling& s) {
+        auto t = std::chrono::steady_clock::now();
+        m->reply(ids, len, s, rng, [&](const std::string& part) {
+            std::fputs(part.c_str(), stdout);
+            std::fflush(stdout);
+            return true;
+        });
+        double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count();
+        std::printf("\n[%zu prompt tokens, %.1f s]\n", ids.size(), sec);
+    };
+    if (sub == "generate") {
+        std::string prompt = a.size() > 4 && a[4].compare(0, 2, "--") != 0 ? a[4] : "";
+        timed(m->encode(prompt, true, false), sampling_flags(a, "0.8", "0.95", "40", "1.1"));
+        return 0;
+    }
+    if (sub == "chat") {
+        Sampling s = sampling_flags(a, "0.7", "0.9", "40", "1.1");
+        std::vector<LlmMsg> msgs;
+        std::string sys = flag(a, "--system");
+        if (!sys.empty()) msgs.push_back({"system", sys});
+        std::string once = flag(a, "--prompt");
+        std::string line;
+        while (true) {
+            if (once.empty()) {
+                std::printf("\n> ");
+                std::fflush(stdout);
+                if (!read_line(line) || line == "/exit" || line == "/quit") break;
+                if (line.empty()) continue;
+                if (line == "/clear") {
+                    msgs.resize(sys.empty() ? 0 : 1);
+                    continue;
+                }
+            } else {
+                line = once;
+            }
+            msgs.push_back({"user", line});
+            auto t = std::chrono::steady_clock::now();
+            std::string answer = m->reply(m->chat_prompt(msgs, len), len, s, rng, [&](const std::string& part) {
+                std::fputs(part.c_str(), stdout);
+                std::fflush(stdout);
+                return true;
+            });
+            double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count();
+            size_t n = m->encode(answer, false, false).size();
+            std::printf("\n[%zu tokens, %.1f s, %.1f tokens/s]\n", n, sec, n / std::max(1e-6, sec));
+            msgs.push_back({"assistant", answer});
+            if (!once.empty()) break;
+        }
+        return 0;
+    }
+    if (sub == "lora" && a.size() > 4 && a[4].compare(0, 2, "--") != 0) {
+        std::string text;
+        if (!read_text(a[4], text)) {
+            std::printf("error: cannot read %s\n", a[4].c_str());
+            return 1;
+        }
+        LoraConfig lc;
+        lc.rank = std::max(1, std::atoi(flag(a, "--rank", "8").c_str()));
+        lc.alpha = (float)std::atof(flag(a, "--alpha", std::to_string(2 * lc.rank).c_str()).c_str());
+        lc.mlp = has_flag(a, "--mlp");
+        lc.steps = std::max(1, std::atoi(flag(a, "--steps", "200").c_str()));
+        lc.batch = std::max(1, std::atoi(flag(a, "--batch", "4").c_str()));
+        lc.seq = std::max(8, std::atoi(flag(a, "--seq", "256").c_str()));
+        lc.lr = (float)std::atof(flag(a, "--lr", "2e-4").c_str());
+        lc.eval_every = std::max(1, std::atoi(flag(a, "--eval-every", "25").c_str()));
+        std::string out = flag(a, "--out", (upath(path).replace_extension("").u8string() + "-lora.gguf").c_str());
+        LoraData d = lora_data(*m, text, flag(a, "--q-tag", "Kullanıcı: "), flag(a, "--a-tag", "Asistan: "), flag(a, "--system"));
+        std::printf("training data: %zu %s, %zu tokens\n", d.ex.size(), d.chat ? "question-answer pairs (only answers are learned)" : "text",
+                    d.tokens());
+        static std::atomic<bool> stop{false};
+        std::signal(SIGINT, [](int) { stop = true; });
+        bool ok = lora_train(*m, d, lc, [&](const LoraProgress& p) {
+            char val[48] = "";
+            if (p.val >= 0) std::snprintf(val, sizeof val, "  validation %.4f", p.val);
+            std::printf("step %d/%d  loss %.4f%s  %.0f tokens/s\n", p.step, p.steps, p.loss, val, p.tok_s);
+            std::fflush(stdout);
+            return !stop.load();
+        }, &err);
+        if (!ok) {
+            std::printf("error: %s\n", err.c_str());
+            return 1;
+        }
+        if (!m->lora_save(out, &err)) {
+            std::printf("error: %s\n", err.c_str());
+            return 1;
+        }
+        std::printf("saved the LoRA adapter to %s (use it with --lora, or in llama.cpp with --lora)\n", out.c_str());
+        return 0;
+    }
+    std::printf("unknown gguf command\n");
+    return 1;
 }
 
 int main(int argc, char** argv) {
@@ -1151,8 +1754,8 @@ int main(int argc, char** argv) {
     std::vector<std::string> a = utf8_args(argc, argv);
     std::string cmd = a.size() > 1 ? a[1] : "";
     if (cmd == "sysinfo") { print_sysinfo(); return 0; }
-    if (cmd == "selftest") return selftest();
-    if (cmd == "gpu") return gpu_check();
+    if (cmd == "selftest") return selftest(has_flag(a, "--quick"));
+    if (cmd == "gpu") return gpu_check(has_flag(a, "--quick"));
     if (cmd == "demo-data" && a.size() > 2) {
         bool ok = write_spiral_csv(a[2]);
         std::printf(ok ? "wrote %s\n" : "cannot write %s\n", a[2].c_str());
@@ -1170,9 +1773,10 @@ int main(int argc, char** argv) {
     if (cmd == "test" && a.size() > 3) return test(a);
     if (cmd == "serve" && a.size() > 2) return serve(a);
     if (cmd == "data" && a.size() > 3) return data_tool(a);
+    if (cmd == "gguf" && a.size() > 3) return gguf_cmd(a);
     std::printf("Kor Studio CLI\n"
                 "  kor-cli sysinfo                      show detected hardware\n"
-                "  kor-cli selftest                     verify the training engine\n"
+                "  kor-cli selftest [--quick]           verify the training engine (--quick: no training runs)\n"
                 "  kor-cli gpu                          check the OpenCL GPU against the CPU (experimental)\n"
                 "  kor-cli demo-data <out.csv>          write a demo classification dataset\n"
                 "  kor-cli demo-images <folder>         write demo pictures (for an image model)\n"
@@ -1184,22 +1788,34 @@ int main(int argc, char** argv) {
                 "                [--rate 8000]                        sound (a WAV file or a folder of them)\n"
                 "                [--skill \"skill.py [args]\"]... [--python <command>] [--lang en|tr|ru]\n"
                 "                [--from model.kor [--lora R]]        fine-tune a saved model\n"
+                "                [--name NAME] [--maker WHO] [--no-teach-name]   the model's name; with dialogue\n"
+                "                      data it also learns to answer \"What is your name?\" with it\n"
                 "                [--dim N] [--layers N] [--heads N] [--ctx N]   text model size\n"
+                "                [--arch modern|classic] [--ffn N]   modern (text default): RMSNorm, RoPE, SwiGLU\n"
+                "                [--recompute]                        less memory: blocks run again in the backward pass\n"
                 "                [--lr X] [--batch N] [--threads N] [--seed N] [--wd X] [--gpu]\n"
                 "                [--align 0..1] [--prompt-weight 0..1] [--dropout X] [--ema 0.999]\n"
                 "                [--resume|--fresh] [--checkpoint file] [--checkpoint-every 60] [--no-checkpoint]\n"
                 "                      autosave (default <out>.autosave); Ctrl+C stops and saves\n"
                 "  kor-cli generate <model.kor> [prompt] [--len N] [--temp T] [--line] [--seed N]\n"
+                "                [--top-p 0.9] [--top-k 40] [--repeat 1.1]   sampling\n"
+                "                [--gpu]                              generate on the graphics card\n"
                 "                image model: [--count 16] [--out generated.png]\n"
                 "                sound model: [--seconds 3] [--out generated.wav]\n"
                 "  kor-cli test <model.kor> <tests.txt> [--data <text>] [--tsv]\n"
                 "  kor-cli serve <model.kor> [--port 8080] [--host 127.0.0.1] [--api-key KEY] [--cors]\n"
-                "                [--name ID] [--q-tag \"Kullanıcı: \"] [--a-tag \"Asistan: \"]\n"
+                "                [--name ID] [--q-tag \"Kullanıcı: \"] [--a-tag \"Asistan: \"] [--gpu]\n"
                 "                      OpenAI-compatible API: /v1/chat/completions, /v1/completions, /v1/models\n"
                 "  kor-cli data clean <text> [--out file] [--keep-duplicates] [--keep-empty]\n"
                 "                      tidy spaces, drop repeated and broken question-answer pairs\n"
                 "  kor-cli data import <file.jsonl> [--out file] [--q-tag \"Kullanıcı: \"] [--a-tag \"Asistan: \"]\n"
                 "                      chat datasets (messages, ShareGPT, Alpaca, prompt/completion) to training text\n"
+                "  kor-cli gguf info|chat|generate <model.gguf> [prompt]   ready-made Llama / Mistral / Qwen2 models\n"
+                "                [--prompt \"...\"] [--system \"...\"] [--lora adapter.gguf] [--ctx 4096] [--len N]\n"
+                "                [--temp T] [--top-p P] [--top-k K] [--repeat R] [--threads N] [--seed N]\n"
+                "  kor-cli gguf lora <model.gguf> <data.txt> [--out adapter.gguf] [--rank 8] [--alpha 16] [--mlp]\n"
+                "                [--steps 200] [--batch 4] [--seq 256] [--lr 2e-4] [--q-tag ...] [--a-tag ...]\n"
+                "                      LoRA fine-tuning on the frozen model; dialogue data trains the answers only\n"
                 "\n"
                 "Question tests are written one per line as: question => expected answer\n");
     return cmd.empty() ? 0 : 1;

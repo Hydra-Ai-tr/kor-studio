@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(KorStudio VERSION 0.8.0 LANGUAGES C CXX)
+project(KorStudio VERSION 0.9.0 LANGUAGES C CXX)
 
 option(KOR_BUILD_GUI "Build the Kor Studio desktop application" ON)
 
@@ -27,6 +27,8 @@ add_library(korcore STATIC
   src/core/data.cpp
   src/core/media.cpp
   src/core/trainer.cpp
+  src/core/gguf.cpp
+  src/core/gguf_dequant_base.cpp
   src/core/sysinfo.cpp)
 target_include_directories(korcore PUBLIC src)
 target_compile_definitions(korcore PUBLIC KOR_VERSION="${PROJECT_VERSION}")
@@ -38,17 +40,18 @@ endif()
 # The AVX2 kernels live in their own translation unit so the rest of the
 # program still runs on CPUs without AVX2 (selected at runtime).
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|i[3-6]86|x86)$")
-  target_sources(korcore PRIVATE src/core/kernels_avx2.cpp)
+  target_sources(korcore PRIVATE src/core/kernels_avx2.cpp src/core/gguf_dequant_avx2.cpp)
   target_compile_definitions(korcore PRIVATE KOR_HAVE_AVX2_TU)
   if(MSVC)
-    set_source_files_properties(src/core/kernels_avx2.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
+    set_source_files_properties(src/core/kernels_avx2.cpp src/core/gguf_dequant_avx2.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
   else()
-    set_source_files_properties(src/core/kernels_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
+    set_source_files_properties(src/core/kernels_avx2.cpp src/core/gguf_dequant_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
   endif()
 endif()
 if(NOT MSVC)
   # Let the compiler vectorize the hot loops in the kernel files.
-  set_property(SOURCE src/core/kernels_base.cpp src/core/kernels_avx2.cpp
+  set_property(SOURCE src/core/kernels_base.cpp src/core/kernels_avx2.cpp src/core/gguf.cpp
+               src/core/gguf_dequant_base.cpp src/core/gguf_dequant_avx2.cpp
                APPEND PROPERTY COMPILE_OPTIONS "-O3;-fno-math-errno;-fno-trapping-math")
 endif()
 

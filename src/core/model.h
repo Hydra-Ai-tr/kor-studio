@@ -17,6 +17,9 @@ struct GpuGpt;
 enum ModelKind { MODEL_MLP = 0, MODEL_GPT = 1 };
 // What the tokens of a sequence model (MODEL_GPT) stand for.
 enum MediaKind { MEDIA_TEXT = 0, MEDIA_IMAGE = 1, MEDIA_AUDIO = 2 };
+enum ArchKind { ARCH_CLASSIC = 0, ARCH_MODERN = 1 };
+// MLP width of a modern block with about the parameters of a classic one: 8/3 * dim, a multiple of 32.
+int default_ffn(int dim);
 enum LayerType { L_DENSE = 0, L_RELU, L_GELU, L_TANH, L_SIGMOID, L_DROPOUT, L_LAYERNORM, L_TYPE_COUNT };
 
 struct LayerSpec {
@@ -38,8 +41,17 @@ struct ModelSpec {
     int media = MEDIA_TEXT;
     int img_size = 0;  // images: width = height in pixels
     int rate = 0;      // sound: samples per second
+    // ARCH_CLASSIC: GPT-2 style (LayerNorm, learned positions, GELU MLP of 4 * dim).
+    // ARCH_MODERN: Llama style (RMSNorm, rotary positions, SwiGLU MLP of `ffn`).
+    int arch = ARCH_CLASSIC;
+    int ffn = 0;                 // modern: hidden width of the MLP (0 = default_ffn(dim))
+    float rope_theta = 10000.f;  // modern: base of the rotary angles
     // LoRA rank of adapters attached to every Linear (0 = none)
     int lora_rank = 0;
+
+    // Hidden width of the MLP and the output width of its first layer.
+    int mlp_hidden() const;
+    int mlp_in_width() const { return arch == ARCH_MODERN ? 2 * mlp_hidden() : mlp_hidden(); }
 
     std::string to_text() const;
     bool from_text(const std::string& s);
@@ -59,6 +71,21 @@ struct Batch {
 };
 
 std::filesystem::path upath(const std::string& utf8);
+
+// How text models pick the next token.
+struct Sampling {
+    float temperature = 0.8f;  // <= 0.01: always the most likely token
+    int top_k = 0;             // only the k most likely tokens (0 = all)
+    float top_p = 1.f;         // only the most likely tokens that together reach this probability
+    // > 1 makes tokens that appeared in the last `repeat_window` tokens less
+    // likely (logits divided, or multiplied when negative).
+    float repeat_penalty = 1.f;
+    int repeat_window = 64;
+};
+
+// Picks a token from the V logits z; `recent` are the tokens before it (for the
+// repeat penalty, which leaves `spare`, e.g. the stop token, alone).
+int sample_logits(const float* z, int V, const Sampling& s, const int* recent, size_t n_recent, Rng& r, int spare = -1);
 
 class Model {
 public:
@@ -80,6 +107,14 @@ public:
     // Text models run step() entirely on the GPU while gpu_use() is on, unless this is false.
     bool use_gpu = true;
     bool last_step_on_gpu = false;
+    // Text models: keep only the input of every block while training and run the
+    // block again during the backward pass (less memory, about a third more work,
+    // the same results). On the GPU this also turns on by itself when not even
+    // one sequence fits otherwise.
+    bool recompute = false;
+    // generate() runs on the GPU when one is found (falls back to the CPU on any problem).
+    bool gen_on_gpu = false;
+    bool last_gen_on_gpu = false;
     void zero_grad();
     // Frees the activations a CPU step left behind (they come back on the next one).
     void release_scratch();
@@ -107,6 +142,11 @@ public:
     // `on_token` (optional) sees each new token and can return false to stop.
     std::vector<int> generate(const std::vector<int>& prompt, int n, float temperature, Rng& rng, int stop = -1,
                               const std::function<bool(int)>& on_token = nullptr);
+    std::vector<int> generate(const std::vector<int>& prompt, int n, const Sampling& s, Rng& rng, int stop = -1,
+                              const std::function<bool(int)>& on_token = nullptr);
+    // Picks a token from logits z; `recent` are the tokens before it (for the
+    // repeat penalty, which leaves `spare`, e.g. the stop token, alone).
+    int sample(const float* z, const Sampling& s, const int* recent, size_t n_recent, Rng& r, int spare = -1) const;
     std::vector<int> encode(const std::string& text) const;
 
     bool save(const std::string& path, bool half_precision, std::string* err);
@@ -127,12 +167,15 @@ private:
     std::unique_ptr<LayerNorm> lnf;
     std::unique_ptr<Linear> head;
     std::vector<Tensor> xs;
+    std::vector<std::pair<Rng, Rng>> drop_rng_;  // dropout state before each block (recompute)
+    bool recomputing_ = false;                    // the last forward kept no block activations
     Tensor xf, logits;
     // incremental generation
     const float* gen_feed(int token);
     int sample(const float* z, float temperature, Rng& r) const;
     std::vector<Tensor> kv_;
     int gen_pos_ = 0;
+    bool gen_gpu_ = false;  // this generate() call feeds the GPU copy
     Tensor gx_, gy_, gf_, glog_;
     // scratch
     Tensor dout, d1, d2;

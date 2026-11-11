@@ -25,6 +25,8 @@
     X(Gpu, "Graphics", "Ekran kartı", "Видеокарта") \
     X(GpuNote, "Training runs on the CPU by default; text models can train on the graphics card (OpenCL), usually several times faster.", "Eğitim varsayılan olarak işlemcide çalışır; metin modelleri ekran kartında (OpenCL) eğitilebilir, genelde birkaç kat daha hızlıdır.", "По умолчанию обучение идёт на процессоре; текстовые модели можно обучать на видеокарте (OpenCL), обычно в разы быстрее.") \
     X(UseGpu, "Train on the graphics card", "Ekran kartında eğit", "Обучать на видеокарте") \
+    X(Recompute, "Save memory", "Bellek tasarrufu", "Экономить память") \
+    X(RecomputeHelp, "Keeps only the input of every block and runs the block again during the backward pass (gradient checkpointing): far less memory, about a third more computing, the same results. On the graphics card it turns on by itself when the model would not fit otherwise.", "Her bloğun yalnızca girdisini saklar ve geri geçişte bloğu yeniden çalıştırır (gradient checkpointing): çok daha az bellek, yaklaşık üçte bir fazla hesap, aynı sonuç. Ekran kartında, model başka türlü sığmayacaksa kendiliğinden açılır.", "Хранит только вход каждого блока и снова прогоняет блок при обратном проходе (gradient checkpointing): намного меньше памяти, примерно на треть больше вычислений, тот же результат. На видеокарте включается сам, если иначе модель не помещается.") \
     X(UseGpuHelp, "Text models run their whole forward and backward pass on the graphics card through OpenCL; the optimizer stays on the CPU. At the start one step of your data runs on both and the results are compared; if the card is missing, gives other results or the model does not fit in its memory, training falls back to the CPU. The log says what is used. 'kor-cli gpu' measures the speed-up on this computer.", "Metin modellerinin ileri ve geri geçişinin tamamı OpenCL ile ekran kartında çalışır; optimizer işlemcide kalır. Başta verinizden bir adım ikisinde de çalıştırılıp sonuçlar karşılaştırılır; kart yoksa, farklı sonuç verirse ya da model belleğine sığmazsa eğitim işlemciye döner. Neyin kullanıldığı günlükte yazar. 'kor-cli gpu' bu bilgisayardaki hızlanmayı ölçer.", "Прямой и обратный проход текстовых моделей целиком идёт на видеокарте через OpenCL; оптимизатор остаётся на процессоре. В начале один шаг ваших данных считается на обоих и результаты сравниваются; если карты нет, она даёт другие результаты или модель не помещается в её память, обучение возвращается на процессор. Что используется, видно в журнале. 'kor-cli gpu' измеряет ускорение на этом компьютере.") \
     X(QuickStart, "Quick start", "Hızlı başlangıç", "Быстрый старт") \
     X(Step1, "Load text, a CSV table, images or sound", "Metin, CSV tablosu, resim veya ses yükle", "Загрузите текст, таблицу CSV, изображения или звук") \
@@ -102,6 +104,10 @@
     X(Layers, "Layers", "Katman", "Слои") \
     X(Context, "Context length (characters)", "Bağlam uzunluğu (karakter)", "Длина контекста (символы)") \
     X(Width, "Model width: %d", "Model genişliği: %d", "Ширина модели: %d") \
+    X(BlockKind, "Block type", "Blok türü", "Тип блока") \
+    X(BlockKindHelp, "Modern is the block of Llama, Qwen and Mistral: RMSNorm, rotary positions (RoPE) and a SwiGLU layer. Classic is the block of GPT-2: LayerNorm, learned positions and GELU.", "Modern, Llama, Qwen ve Mistral'in bloğudur: RMSNorm, dönen konum (RoPE) ve SwiGLU katmanı. Klasik, GPT-2'nin bloğudur: LayerNorm, öğrenilen konum ve GELU.", "Современный — блок Llama, Qwen и Mistral: RMSNorm, вращательные позиции (RoPE) и слой SwiGLU. Классический — блок GPT-2: LayerNorm, обучаемые позиции и GELU.") \
+    X(ArchModern, "Modern (Llama style)", "Modern (Llama tarzı)", "Современный (как Llama)") \
+    X(ArchClassic, "Classic (GPT-2 style)", "Klasik (GPT-2 tarzı)", "Классический (как GPT-2)") \
     X(AddLayer, "Add layer", "Katman ekle", "Добавить слой") \
     X(Units, "units", "nöron", "нейронов") \
     X(LDense, "Dense", "Yoğun (Dense)", "Полносвязный") \
@@ -275,6 +281,16 @@
     X(LogHookSampling, "training rows: %.0f%% start at examples, question weight %.2f", "eğitim satırları: %%%.0f örnek başından, soru ağırlığı %.2f", "обучающие строки: %.0f%% с начала примеров, вес вопросов %.2f") \
     X(LogHookDropout, "dropout set to %.2f", "dropout %.2f yapıldı", "dropout изменён на %.2f") \
     X(LogHookStop, "stopping training: %s", "eğitim durduruluyor: %s", "обучение останавливается: %s") \
+    X(IdentityTitle, "Name", "Ad ve kimlik", "Имя") \
+    X(IdentityHelp, "Saved in the model file; the chat and the API show it", "Model dosyasına kaydedilir; sohbet ve API'de görünür", "Сохраняется в файле модели; его показывают чат и API") \
+    X(ModelNameLbl, "Model name", "Model adı", "Имя модели") \
+    X(ModelNameHint, "e.g. Atlas", "ör. Atlas", "напр. Атлас") \
+    X(ModelMakerLbl, "Made by", "Yapımcı", "Создатель") \
+    X(ModelMakerHint, "optional", "isteğe bağlı", "необязательно") \
+    X(TeachName, "Teach the model its name", "Modele adını öğret", "Научить модель её имени") \
+    X(TeachNameHelp, "Training adds questions like \"What is your name?\" with their answers to the text (about 1% of it), in the language of the data.", "Eğitim, metne \"Adın ne?\" gibi soruları cevaplarıyla ekler (metnin yaklaşık %1'i), verinin dilinde.", "Обучение добавляет в текст вопросы вроде «Как тебя зовут?» с ответами (около 1% текста) на языке данных.") \
+    X(TeachNameNeedsDialogue, "Teaching the name needs question-answer text such as \"User: ...\" / \"Assistant: ...\" lines.", "Adı öğretmek için \"Kullanıcı: ...\" / \"Asistan: ...\" gibi soru-cevap metni gerekir.", "Чтобы научить имени, нужен текст вопрос-ответ, например строки «Пользователь: ...» / «Ассистент: ...».") \
+    X(LogIdentity, "teaching the name \"%s\": its question-answer lines were added %d times", "\"%s\" adı öğretiliyor: soru-cevap satırları %d kez eklendi", "обучение имени «%s»: строки вопрос-ответ добавлены %d раз") \
     X(GpuFull, "text models train fully on the GPU", "metin modelleri tamamen ekran kartında eğitilir", "текстовые модели полностью обучаются на GPU") \
     X(GpuPartial, "; this model does not fit in GPU memory, so only parts of it run there", "; bu model ekran kartı belleğine sığmıyor, yalnızca bazı kısımları orada çalışır", "; модель не помещается в память GPU, там выполняется только её часть") \
     X(GpuChecked, "; checked against the CPU on this data (difference ", "; bu veride CPU ile karşılaştırıldı (fark ", "; проверено по CPU на этих данных (разница ") \
@@ -326,10 +342,32 @@
     X(MemoryFit, "Memory", "Bellek", "Память") \
     X(Latest, "latest: %d / %d", "son: %d / %d", "последний: %d / %d") \
     X(NavChat, "Chat", "Sohbet", "Чат") \
-    X(ChatHelp, "Load a trained text model (.kor) and talk to it to see how it answers.", "Eğitimi bitmiş bir metin modelini (.kor) yükle ve onunla sohbet ederek nasıl cevap verdiğini dene.", "Загрузите обученную текстовую модель (.kor) и поговорите с ней, чтобы увидеть, как она отвечает.") \
+    X(ChatHelp, "Load a trained text model (.kor) or a ready-made GGUF model (Llama, Mistral, Qwen2) and talk to it.", "Eğitimi bitmiş bir metin modelini (.kor) ya da hazır bir GGUF modelini (Llama, Mistral, Qwen2) yükle ve onunla sohbet et.", "Загрузите обученную текстовую модель (.kor) или готовую модель GGUF (Llama, Mistral, Qwen2) и поговорите с ней.") \
     X(ChatModels, "Models", "Modeller", "Модели") \
-    X(ChatModelsHelp, "Finished trainings are saved here automatically. You can also open any .kor file.", "Biten eğitimler buraya otomatik kaydedilir. İstediğin başka bir .kor dosyasını da açabilirsin.", "Завершённые обучения сохраняются сюда автоматически. Можно открыть и любой другой файл .kor.") \
-    X(ChatNoModels, "No saved models yet. Finish a training or open a .kor file.", "Henüz kayıtlı model yok. Bir eğitimi bitir ya da bir .kor dosyası aç.", "Сохранённых моделей пока нет. Завершите обучение или откройте файл .kor.") \
+    X(ChatModelsHelp, "Finished trainings are saved here automatically. You can also open any .kor or .gguf file (or put GGUF files in this folder).", "Biten eğitimler buraya otomatik kaydedilir. İstediğin başka bir .kor ya da .gguf dosyasını da açabilirsin (GGUF dosyalarını bu klasöre de koyabilirsin).", "Завершённые обучения сохраняются сюда автоматически. Можно открыть и любой файл .kor или .gguf (или положить файлы GGUF в эту папку).") \
+    X(ChatNoModels, "No saved models yet. Finish a training or open a .kor or .gguf file.", "Henüz kayıtlı model yok. Bir eğitimi bitir ya da bir .kor veya .gguf dosyası aç.", "Сохранённых моделей пока нет. Завершите обучение или откройте файл .kor или .gguf.") \
+    X(ChatGgufFmt, "%s parameters, %s, %s format, context %d tokens", "%s parametre, %s, %s biçimi, bağlam %d token", "%s параметров, %s, формат %s, контекст %d токенов") \
+    X(ChatSystem, "System message", "Sistem mesajı", "Системное сообщение") \
+    X(ChatSystemHelp, "Instructions given to the model before the conversation, e.g. 'Answer in Turkish, briefly.' Empty uses the model's default.", "Sohbetten önce modele verilen talimat, örn. 'Türkçe ve kısa cevap ver.' Boş bırakılırsa modelin varsayılanı kullanılır.", "Указания модели перед разговором, например «Отвечай по-русски и кратко». Пусто — используется вариант модели по умолчанию.") \
+    X(GgufLoraTitle, "Fine-tuning (LoRA)", "İnce ayar (LoRA)", "Дообучение (LoRA)") \
+    X(GgufLoraHelp, "The model file never changes: a small add-on (adapter) is trained on your text and saved as its own .gguf file, which llama.cpp can also use. With question/answer tags only the answers are learned. Runs on the processor; large models are slow.", "Model dosyası hiç değişmez: metninle küçük bir ek (adaptör) eğitilir ve ayrı bir .gguf dosyası olarak kaydedilir; llama.cpp de bunu kullanabilir. Soru/cevap etiketleriyle yalnızca cevaplar öğrenilir. İşlemcide çalışır; büyük modellerde yavaştır.", "Файл модели не меняется: на вашем тексте обучается небольшая добавка (адаптер) и сохраняется отдельным файлом .gguf, который понимает и llama.cpp. С метками вопрос/ответ учатся только ответы. Работает на процессоре; большие модели медленные.") \
+    X(LoraNone, "no adapter", "adaptör yok", "без адаптера") \
+    X(LoraOpen, "Open adapter", "Adaptör aç", "Открыть адаптер") \
+    X(LoraRemove, "Remove adapter", "Adaptörü kaldır", "Убрать адаптер") \
+    X(LoraData, "Training text", "Eğitim metni", "Текст для обучения") \
+    X(LoraSteps, "Steps", "Adım", "Шаги") \
+    X(LoraRank, "Rank", "Rank", "Ранг") \
+    X(LoraRankHelp, "The size of the adapter. Higher learns more and needs more memory; 8 is a common choice.", "Adaptörün boyutu. Yüksek değer daha çok öğrenir ve daha çok bellek ister; 8 yaygın bir seçimdir.", "Размер адаптера. Больше — учит больше и требует больше памяти; 8 — частый выбор.") \
+    X(LoraSeq, "Sequence length", "Dizi uzunluğu", "Длина последовательности") \
+    X(LoraBatch, "Batch size", "Toplu boyut", "Размер пакета") \
+    X(LoraMlp, "Also adapt the feed-forward layers", "İleri besleme katmanlarını da ayarla", "Настраивать и слои прямого распространения") \
+    X(LoraStart, "Start fine-tuning", "İnce ayarı başlat", "Начать дообучение") \
+    X(LoraProgressFmt, "Step %d / %d   loss %.3f%s   %.0f tokens/s", "Adım %d / %d   kayıp %.3f%s   %.0f token/sn", "Шаг %d / %d   потери %.3f%s   %.0f токенов/с") \
+    X(LoraValFmt, "   validation %.3f", "   doğrulama %.3f", "   проверка %.3f") \
+    X(LoraSaved, "Adapter saved and in use: %s", "Adaptör kaydedildi ve kullanımda: %s", "Адаптер сохранён и используется: %s") \
+    X(LoraBusy, "Fine-tuning is running; messages wait until it ends.", "İnce ayar sürüyor; mesajlar bitene kadar bekler.", "Идёт дообучение; сообщения ждут его окончания.") \
+    X(LoraPairsFmt, "%d question-answer pairs, %d tokens", "%d soru-cevap çifti, %d token", "%d пар вопрос-ответ, %d токенов") \
+    X(LoraTextFmt, "plain text, %d tokens", "düz metin, %d token", "обычный текст, %d токенов") \
     X(ChatUseCurrent, "Use the model in training", "Eğitimdeki modeli kullan", "Взять модель из обучения") \
     X(Refresh, "Refresh", "Yenile", "Обновить") \
     X(ChatInputHint, "Write a message and press Enter...", "Bir mesaj yaz ve Enter'a bas...", "Напишите сообщение и нажмите Enter...") \
@@ -339,11 +377,20 @@
     X(ChatNoModel, "Choose a model above to start chatting.", "Sohbete başlamak için yukarıdan bir model seç.", "Выберите модель выше, чтобы начать разговор.") \
     X(ChatNotText, "This is not a text model. Picture and sound models can be tried on the Test page.", "Bu bir metin modeli değil. Resim ve ses modellerini Dene sayfasında deneyebilirsin.", "Это не текстовая модель. Модели картинок и звука можно попробовать на странице проверки.") \
     X(ChatMemory, "Remember the conversation", "Konuşmayı hatırla", "Помнить разговор") \
+    X(ChatGpu, "Generate on the graphics card", "Ekran kartında üret", "Генерировать на видеокарте") \
+    X(ChatGpuHelp, "The weights and the model's memory of the conversation stay on the graphics card, so large models answer faster. If anything goes wrong there, the answer continues on the processor.", "Ağırlıklar ve modelin konuşma hafızası ekran kartında kalır; büyük modeller daha hızlı cevap verir. Orada bir sorun olursa cevap işlemcide devam eder.", "Веса и память модели о разговоре остаются на видеокарте, поэтому большие модели отвечают быстрее. Если там что-то пойдёт не так, ответ продолжится на процессоре.") \
     X(ChatMemoryHelp, "Earlier messages are given to the model too, as far as its context reaches. Turn it off to ask every question on its own, like the question tests do.", "Önceki mesajlar da modele verilir (bağlamının yettiği kadar). Kapatırsan her soru tek başına sorulur, soru testlerindeki gibi.", "Предыдущие сообщения тоже передаются модели (сколько вмещает контекст). Выключите, чтобы каждый вопрос задавался отдельно, как в проверке вопросами.") \
     X(ChatTags, "Dialogue tags", "Diyalog etiketleri", "Метки диалога") \
     X(ChatTagsHelp, "The line beginnings the model learned, e.g. 'Kullanıcı: ' and 'Asistan: '. Models trained with this version remember them by themselves.", "Modelin öğrendiği satır başları, örn. 'Kullanıcı: ' ve 'Asistan: '. Bu sürümle eğitilen modeller bunları kendileri hatırlar.", "Начала строк, которые выучила модель, например 'Kullanıcı: ' и 'Asistan: '. Модели, обученные этой версией, помнят их сами.") \
     X(ChatUser, "You", "Sen", "Вы") \
     X(ChatBot, "Model", "Model", "Модель") \
+    X(TopP, "Top-p", "Top-p", "Top-p") \
+    X(TopPHelp, "Picks only from the most likely tokens that together reach this probability. Lower gives safer, less varied answers; 1 turns it off.", "Yalnızca toplam olasılığı bu değere ulaşan en olası tokenlar arasından seçer. Düşük değer daha güvenli, daha az çeşitli cevap verir; 1 kapatır.", "Выбирает только из самых вероятных токенов, которые вместе дают эту вероятность. Меньше — надёжнее и однообразнее; 1 выключает.") \
+    X(TopK, "Top-k", "Top-k", "Top-k") \
+    X(TopKHelp, "Picks only from this many of the most likely tokens (0 = all).", "Yalnızca en olası bu kadar token arasından seçer (0 = hepsi).", "Выбирает только из стольких самых вероятных токенов (0 = все).") \
+    X(TopKAll, "all", "hepsi", "все") \
+    X(RepeatPenalty, "Repeat penalty", "Tekrar cezası", "Штраф за повторы") \
+    X(RepeatPenaltyHelp, "Above 1, tokens used in the last 64 become less likely, against answers that loop. Best with subword models; character models repeat letters all the time, so keep it low there.", "1'in üstünde, son 64 tokende geçenler daha az olası olur; kendini tekrarlayan cevaplara karşı. En iyisi alt kelime modellerinde; karakter modelleri harfleri sürekli tekrarlar, orada düşük tut.", "Больше 1 — токены из последних 64 становятся менее вероятными, против зацикленных ответов. Лучше для моделей с подсловами; в символьных моделях буквы повторяются постоянно, там держите низким.") \
     X(ChatMaxLen, "Longest answer (tokens)", "En uzun cevap (token)", "Самый длинный ответ (токены)") \
     X(ChatModelFmt, "%s parameters, context %d tokens", "%s parametre, bağlam %d token", "%s параметров, контекст %d токенов") \
     X(ChatUnknown, "(the model knows none of these characters)", "(model bu karakterlerin hiçbirini bilmiyor)", "(модель не знает ни одного из этих символов)") \

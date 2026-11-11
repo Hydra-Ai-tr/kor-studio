@@ -38,7 +38,8 @@ struct AutoPlan {
 AutoPlan autotune(const SysInfo& s, const Dataset& d, double gpu_gb = 0);
 
 // GPU memory (bytes) to train a text model resident on the card: parameters,
-// gradients, two optimizer moments and the activations of one sequence.
-double estimate_gpu_train_bytes(const ModelSpec& s);
+// gradients, two optimizer moments and the activations of one sequence (with
+// `recompute` only the block inputs, see Model::recompute).
+double estimate_gpu_train_bytes(const ModelSpec& s, bool recompute = false);
 
 }  // namespace kor

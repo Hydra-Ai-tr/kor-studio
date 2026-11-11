@@ -17,6 +17,7 @@ bool chat_load(const char* utf8_path);   // opens a model on the chat page
 bool open_project(const char* utf8_path);  // a project folder or its project.korproj
 bool save_project_to(const char* utf8_dir);  // saves the current work there as a project and opens it
 void chat_say(const char* utf8_text);    // sends a chat message
+void chat_show_lora();                   // opens the LoRA fine-tuning card of the chat page
 void generate_media();                   // playground: new pictures or sound from the model
 void start_training();
 // Scripted runs: number of steps (> 0) and the graphics card (0 off, 1 on, -1 as set).

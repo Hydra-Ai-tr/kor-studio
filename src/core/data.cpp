@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <new>
 #include <set>
@@ -409,6 +410,109 @@ void Dataset::encode_with(const std::vector<std::string>& fixed) {
     vocab = fixed;
     ids = encode(raw, vocab);
     split_text();
+}
+
+int Dataset::add_training_text(const std::string& block, double share) {
+    if (kind != DATA_TEXT || media != MEDIA_TEXT) return 0;
+    std::vector<int> one = encode(block, vocab);
+    if (one.empty()) return 0;
+    double want = share * (double)n_train / (double)one.size();
+    int reps = (int)std::max(3.0, std::min(2000.0, std::round(want)));
+    std::vector<int> add;
+    add.reserve(one.size() * reps);
+    for (int r = 0; r < reps; ++r) add.insert(add.end(), one.begin(), one.end());
+    size_t keep = n_train + add.size();
+    ids.insert(ids.begin(), add.begin(), add.end());
+    split_text();
+    n_train = keep;
+    return reps;
+}
+
+std::vector<std::string> text_chars(const std::string& text) { return distinct_chars(text, nullptr); }
+
+int text_language(const std::string& text) {
+    size_t n = std::min(text.size(), (size_t)1 << 20), letters = 0, tr = 0, ru = 0;
+    for (size_t i = 0; i < n; ++i) {
+        unsigned char c = (unsigned char)text[i], d = i + 1 < n ? (unsigned char)text[i + 1] : 0;
+        if ((c | 0x20) >= 'a' && (c | 0x20) <= 'z') ++letters;
+        else if ((c == 0xD0 || c == 0xD1) && (d & 0xC0) == 0x80) { ++letters; ++ru; }
+        // ı İ ğ Ğ ş Ş: letters only Turkish (and Azerbaijani) use
+        else if ((c == 0xC4 && (d == 0xB1 || d == 0xB0 || d == 0x9F || d == 0x9E)) || (c == 0xC5 && (d == 0x9F || d == 0x9E))) {
+            ++letters;
+            ++tr;
+        }
+    }
+    if (letters == 0) return LANG_TEXT_EN;
+    if (ru * 5 > letters) return LANG_TEXT_RU;
+    if (tr * 300 > letters) return LANG_TEXT_TR;
+    return LANG_TEXT_EN;
+}
+
+std::string identity_dialogue(const std::string& name, const std::string& maker, const std::string& q_tag,
+                              const std::string& a_tag, int lang) {
+    struct QA { const char* q; const char* a; };
+    // {n} is the name, {m} the maker. `who` answers are used without a maker.
+    static const QA tr_name[] = {
+        {"Adın ne?", "Benim adım {n}."},
+        {"Senin adın ne?", "Adım {n}."},
+        {"İsmin ne?", "İsmim {n}."},
+        {"Sen kimsin?", "Ben {n}, bir yapay zekâ asistanıyım."},
+        {"Kimsin?", "Ben {n}."},
+        {"Kendini tanıtır mısın?", "Merhaba, ben {n}. Sorularını yanıtlamaya çalışan bir yapay zekâ asistanıyım."},
+        {"Sana nasıl hitap edeyim?", "Bana {n} diyebilirsin."},
+    };
+    static const QA tr_maker[] = {
+        {"Seni kim yaptı?", "Beni {m} yaptı."},
+        {"Seni kim geliştirdi?", "{m} tarafından geliştirildim."},
+        {"Yapımcın kim?", "Yapımcım {m}."},
+    };
+    static const QA tr_who[] = {{"Seni kim yaptı?", "Kor Studio ile eğitildim."}};
+    static const QA en_name[] = {
+        {"What is your name?", "My name is {n}."},
+        {"What's your name?", "I'm {n}."},
+        {"Who are you?", "I am {n}, an AI assistant."},
+        {"Introduce yourself.", "Hi, I'm {n}. I'm an AI assistant here to answer your questions."},
+        {"What should I call you?", "You can call me {n}."},
+        {"Do you have a name?", "Yes, my name is {n}."},
+    };
+    static const QA en_maker[] = {
+        {"Who made you?", "I was made by {m}."},
+        {"Who created you?", "{m} created me."},
+        {"Who developed you?", "I was developed by {m}."},
+    };
+    static const QA en_who[] = {{"Who made you?", "I was trained with Kor Studio."}};
+    static const QA ru_name[] = {
+        {"Как тебя зовут?", "Меня зовут {n}."},
+        {"Как твоё имя?", "Моё имя {n}."},
+        {"Кто ты?", "Я {n}, ИИ-ассистент."},
+        {"Представься.", "Привет, я {n}. Я ИИ-ассистент и отвечаю на твои вопросы."},
+        {"Как к тебе обращаться?", "Можешь называть меня {n}."},
+    };
+    static const QA ru_maker[] = {
+        {"Кто тебя создал?", "Меня создал {m}."},
+        {"Кто тебя разработал?", "Меня разработал {m}."},
+    };
+    static const QA ru_who[] = {{"Кто тебя создал?", "Меня обучили в Kor Studio."}};
+    struct Set { const QA* name; size_t nn; const QA* maker; size_t nm; const QA* who; size_t nw; };
+    static const Set sets[] = {
+        {en_name, std::size(en_name), en_maker, std::size(en_maker), en_who, std::size(en_who)},
+        {tr_name, std::size(tr_name), tr_maker, std::size(tr_maker), tr_who, std::size(tr_who)},
+        {ru_name, std::size(ru_name), ru_maker, std::size(ru_maker), ru_who, std::size(ru_who)},
+    };
+    const Set& s = sets[lang >= 0 && lang < 3 ? lang : 0];
+    auto fill = [&](std::string t) {
+        for (auto [key, value] : {std::pair<const char*, const std::string*>{"{n}", &name}, {"{m}", &maker}})
+            for (size_t p; (p = t.find(key)) != std::string::npos;) t.replace(p, 3, *value);
+        return t;
+    };
+    std::string out;
+    auto add = [&](const QA* qa, size_t n) {
+        for (size_t i = 0; i < n; ++i) out += q_tag + fill(qa[i].q) + "\n" + a_tag + fill(qa[i].a) + "\n";
+    };
+    add(s.name, s.nn);
+    if (maker.empty()) add(s.who, s.nw);
+    else add(s.maker, s.nm);
+    return out;
 }
 
 // -------------------------------------------------------------- dialogue

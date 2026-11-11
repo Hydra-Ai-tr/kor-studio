@@ -40,8 +40,16 @@ işlemcide eğitilir.
   batch parçalar halinde işlenir. 85 milyon parametreli bir model 4 GB'lık dizüstü kartında
   eğitilir. Başta verinden bir adım ikisinde de çalıştırılıp sonuçlar karşılaştırılır; kart yoksa
   ya da farklı sonuç verirse eğitim işlemcide kalır.
-- **Sohbet** – eğitimi biten modeller otomatik kaydedilir; Sohbet sayfasında bir `.kor` modeli seç
-  ve onunla konuşarak dene (sıcaklık, cevap uzunluğu, konuşmayı hatırlama ayarlarıyla).
+- **Hazır GGUF modelleri** – Hugging Face'ten bir Llama, Qwen2, SmolLM ya da Mistral `.gguf`
+  dosyası aç (2–16 bit ağırlıklar), işlemcide onunla sohbet et, API olarak sun ve donuk 4-bit
+  ağırlıkları üzerinde LoRA ile ince ayar yap. Adaptörler llama.cpp biçiminde kaydedilir.
+- **Modern transformer** – yeni metin modelleri Llama gibi RMSNorm, dönen konum (RoPE) ve SwiGLU
+  kullanır; GPT-2 düzeni bir seçimle geri gelir. Metin üretimi ekran kartında çalışabilir,
+  `--recompute` ek hesap karşılığında daha az ara bellek kullanır.
+- **Sohbet** – eğitimi biten modeller otomatik kaydedilir; Sohbet sayfasında bir `.kor` ya da
+  `.gguf` modeli seç ve onunla konuşarak dene (sıcaklık, top-k, top-p, tekrar cezası, cevap
+  uzunluğu, sistem istemi ve konuşmayı hatırlama ayarlarıyla). Modeline bir ad ver; diyalog
+  verisinde adını söylemeyi de öğrenir.
 - **Yerel, OpenAI uyumlu API** – `kor-cli serve` (ya da Sohbet sayfasındaki *API olarak sun*)
   modeli `http://127.0.0.1:8080/v1` adresinde sunar; OpenAI API'si için yazılmış araçlar onu
   kullanabilir.
@@ -150,6 +158,9 @@ kor-cli data clean sohbetler.txt                          # temiz kopya: sohbetl
 kor-cli serve sohbet.kor --port 8080                      # OpenAI uyumlu API
 kor-cli gpu                                               # ekran kartını işlemciyle karşılaştır ve ölç
 kor-cli train buyuk.txt --gpu --out llm.kor               # ekran kartında eğit
+kor-cli gguf chat SmolLM2-135M-Instruct-Q4_K_M.gguf       # hazır bir modelle sohbet
+kor-cli gguf lora model.gguf sohbet.txt --out benim.gguf  # donuk model üzerinde LoRA adaptörü
+kor-cli serve model.gguf --lora benim.gguf                # model ve adaptörü API olarak
 ```
 
 **Yerel API.** `kor-cli serve model.kor`, `http://127.0.0.1:8080/v1` adresinde OpenAI'nin

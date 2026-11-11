@@ -126,7 +126,7 @@ int main(int argc_ansi, char** argv_ansi) {
     //   --size <width>x<height>  --skill <plugin file> (repeatable; only for this session)
     //   --bottom (scroll to the end of the page)  --community (load the community plugin list)
     //   --model <file.kor>  --generate (start the playground's picture or sound generation)
-    //   --chat <file.kor>  --say <message> (repeatable; chat page)
+    //   --chat <file.kor or .gguf>  --say <message> (repeatable; chat page)  --lora-card (opens its LoRA card)
     //   --project <folder or project.korproj>  --save-project <folder> (saves the loaded data and model there)
     //   --settings (opens the settings window)  --check-updates (asks GitHub for the latest release)
     //   --clean (opens the data cleaning window for the loaded text)
@@ -136,7 +136,7 @@ int main(int argc_ansi, char** argv_ansi) {
     std::vector<const char*> skills, says;
     int page = -1, lang = -1, tab = -1, width = 1320, height = 820, steps = 0, gpu = -1;
     bool train = false, use_skills = false, bottom = false, community = false, generate = false;
-    bool settings = false, check_updates = false, clean = false;
+    bool settings = false, check_updates = false, clean = false, lora_card = false;
     double delay = 1.0, every = 0.5;
     for (int i = 1; i < argc; ++i) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
@@ -156,6 +156,7 @@ int main(int argc_ansi, char** argv_ansi) {
         else if (!std::strcmp(argv[i], "--generate")) generate = true;
         else if (!std::strcmp(argv[i], "--chat")) chat = next();
         else if (!std::strcmp(argv[i], "--say")) says.push_back(next());
+        else if (!std::strcmp(argv[i], "--lora-card")) lora_card = true;
         else if (!std::strcmp(argv[i], "--project")) project = next();
         else if (!std::strcmp(argv[i], "--save-project")) save_project = next();
         else if (!std::strcmp(argv[i], "--settings")) settings = true;
@@ -224,6 +225,7 @@ int main(int argc_ansi, char** argv_ansi) {
     if (!chat.empty()) {
         app::chat_load(chat.c_str());
         for (const char* s : says) app::chat_say(s);
+        if (lora_card) app::chat_show_lora();
         app::set_page(app::PAGE_CHAT);
     }
     if (page >= 0) app::set_page(page);

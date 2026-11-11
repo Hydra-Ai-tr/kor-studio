@@ -147,10 +147,12 @@ static int pow2_at_least(int v) {
     return p;
 }
 
-double estimate_gpu_train_bytes(const ModelSpec& s) {
+double estimate_gpu_train_bytes(const ModelSpec& s, bool recompute) {
     // as gpt_act_floats in gpu.cpp for one sequence of s.ctx tokens, training
-    double T = s.ctx, C = s.dim, att = (double)s.heads * T * T;
-    double act = s.nlayer * T * (12 * C + 4) + 7 * T * C + T * s.vocab + 11 * T + 2 * att + 13 * T * C;
+    double T = s.ctx, C = s.dim, att = (double)s.heads * T * T, F1 = s.mlp_in_width(), F2 = s.mlp_hidden();
+    double block = T * (7 * C + F1 + 4);
+    double kept = recompute ? s.nlayer * T * C + block : s.nlayer * (T * C + block);
+    double act = kept + T * (3 * C + F2) + T * s.vocab + 11 * T + 2 * att + T * (9 * C + F1) + T * C;
     return ((double)estimate_params(s) * 4 + act) * 4;
 }
 
@@ -209,6 +211,8 @@ AutoPlan autotune(const SysInfo& s, const Dataset& d, double gpu_gb) {
             spec.vocab = (int)d.vocab.size();
             spec.dim = pr.dim; spec.heads = pr.heads; spec.nlayer = pr.layers;
             spec.media = d.media;
+            // Text: Llama style. Images keep learned positions (a pixel's place in the picture).
+            spec.arch = d.media == MEDIA_TEXT ? ARCH_MODERN : ARCH_CLASSIC;
             spec.img_size = d.img_size;
             spec.rate = d.rate;
             if (d.media == MEDIA_IMAGE) spec.ctx = want_ctx;
@@ -217,7 +221,10 @@ AutoPlan autotune(const SysInfo& s, const Dataset& d, double gpu_gb) {
                 // On the card: the model, its optimizer state and one sequence must
                 // fit (larger batches run in parts); the host keeps weights,
                 // gradients, moments and a best-weights copy.
-                double gpu_mb = estimate_gpu_train_bytes(spec) / (1024.0 * 1024.0);
+                // when the activations of every block do not fit, the card keeps only the
+                // block inputs and runs each block again in the backward pass
+                double gpu_mb = estimate_gpu_train_bytes(spec, false) / (1024.0 * 1024.0);
+                if (gpu_mb > gpu_gb * 1024.0 * 0.8) gpu_mb = estimate_gpu_train_bytes(spec, true) / (1024.0 * 1024.0);
                 double host_mb = (double)estimate_params(spec) * 4 * 5 / (1024.0 * 1024.0);
                 if (gpu_mb <= gpu_gb * 1024.0 * 0.8 && host_mb <= budget) {
                     batch = spec.ctx >= 1024 ? 8 : 16;

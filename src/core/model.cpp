@@ -24,7 +24,9 @@ std::string ModelSpec::to_text() const {
       << "\nregression=" << (regression ? 1 : 0) << "\nvocab=" << vocab << "\nctx=" << ctx
       << "\ndim=" << dim << "\nheads=" << heads << "\nnlayer=" << nlayer
       << "\nlora_rank=" << lora_rank << "\nmedia=" << media << "\nimg_size=" << img_size
-      << "\nrate=" << rate << "\nlayers=";
+      << "\nrate=" << rate;
+    if (arch != ARCH_CLASSIC) o << "\narch=" << arch << "\nffn=" << ffn << "\nrope_theta=" << rope_theta;
+    o << "\nlayers=";
     for (size_t i = 0; i < layers.size(); ++i)
         o << (i ? "," : "") << layers[i].type << ":" << layers[i].units << ":" << layers[i].p;
     o << "\n";
@@ -64,18 +66,34 @@ bool ModelSpec::from_text(const std::string& s) {
         else if (k == "media") media = iv;
         else if (k == "img_size") img_size = iv;
         else if (k == "rate") rate = iv;
+        else if (k == "arch") arch = iv;
+        else if (k == "ffn") ffn = iv;
+        else if (k == "rope_theta") rope_theta = (float)std::atof(v.c_str());
     }
-    if (kind == MODEL_GPT) return vocab > 0 && ctx > 0 && dim > 0 && heads > 0 && dim % heads == 0 && nlayer > 0;
+    if (kind == MODEL_GPT) {
+        if (arch != ARCH_CLASSIC && arch != ARCH_MODERN) return false;
+        if (arch == ARCH_MODERN && ((dim / std::max(1, heads)) % 2 != 0 || ffn < 0 || !(rope_theta > 1.f))) return false;
+        return vocab > 0 && ctx > 0 && dim > 0 && heads > 0 && dim % heads == 0 && nlayer > 0;
+    }
     return in_dim > 0 && out_dim > 0;
+}
+
+int default_ffn(int dim) { return std::max(32, (8 * dim / 3 + 31) / 32 * 32); }
+
+int ModelSpec::mlp_hidden() const {
+    if (arch != ARCH_MODERN) return 4 * dim;
+    return ffn > 0 ? ffn : default_ffn(dim);
 }
 
 size_t estimate_params(const ModelSpec& s) {
     size_t n = 0;
     if (s.kind == MODEL_GPT) {
-        size_t C = s.dim, V = s.vocab;
-        n += V * C + (size_t)s.ctx * C;
-        size_t blk = 4 * C + (C * 3 * C + 3 * C) + (C * C + C) + (C * 4 * C + 4 * C) + (4 * C * C + C);
-        n += blk * s.nlayer + 2 * C + C * V + V;
+        size_t C = s.dim, V = s.vocab, F = s.mlp_hidden(), F1 = s.mlp_in_width();
+        bool modern = s.arch == ARCH_MODERN;
+        n += V * C + (modern ? 0 : (size_t)s.ctx * C);
+        size_t norms = modern ? 2 * C : 4 * C;
+        size_t blk = norms + (C * 3 * C + 3 * C) + (C * C + C) + (C * F1 + F1) + (F * C + C);
+        n += blk * s.nlayer + (modern ? C : 2 * C) + C * V + V;
     } else {
         size_t cur = s.in_dim;
         for (auto& l : s.layers) {
@@ -90,8 +108,8 @@ size_t estimate_params(const ModelSpec& s) {
 size_t estimate_train_bytes(const ModelSpec& s, int batch) {
     size_t bytes = estimate_params(s) * 4 * 4;  // value + gradient + two Adam moments
     if (s.kind == MODEL_GPT) {
-        size_t N = (size_t)batch * s.ctx, C = s.dim;
-        size_t per_block = N * C * 17 * 2 + (size_t)batch * s.heads * s.ctx * s.ctx;
+        size_t N = (size_t)batch * s.ctx, C = s.dim, F = s.mlp_hidden(), F1 = s.mlp_in_width();
+        size_t per_block = N * (5 * C + 2 * F1 + F) * 2 + (size_t)batch * s.heads * s.ctx * s.ctx;
         bytes += (per_block * s.nlayer + N * C * 4 + N * (size_t)s.vocab * 2) * 4;
     } else {
         size_t width = s.in_dim + s.out_dim;
@@ -173,13 +191,15 @@ std::vector<std::string> utf8_chars(const std::string& s) {
 
 Model::Model(const ModelSpec& s, uint64_t seed) : spec(s), rng(seed) {
     if (spec.kind == MODEL_GPT) {
-        emb.reset(new Embedding(spec.vocab, spec.ctx, spec.dim, rng));
+        bool modern = spec.arch == ARCH_MODERN;
+        emb.reset(new Embedding(spec.vocab, spec.ctx, spec.dim, rng, !modern));
         float resid_std = 0.02f / std::sqrt(2.f * (float)spec.nlayer);
+        int ffn = modern ? spec.mlp_hidden() : 0;
         for (int i = 0; i < spec.nlayer; ++i) {
-            blocks.emplace_back(new Block(spec.dim, spec.heads, "h" + std::to_string(i), rng, resid_std));
+            blocks.emplace_back(new Block(spec.dim, spec.heads, "h" + std::to_string(i), rng, resid_std, ffn, spec.rope_theta));
             blocks.back()->linears(all_linears);
         }
-        lnf.reset(new LayerNorm(spec.dim, "lnf"));
+        lnf.reset(new LayerNorm(spec.dim, "lnf", modern));
         head.reset(new Linear(spec.dim, spec.vocab, "head", rng, 0.02f));
         all_linears.push_back(head.get());
         xs.resize(spec.nlayer + 1);
@@ -267,9 +287,9 @@ int Model::extend_vocab(const std::vector<std::string>& tokens) {
         for (int j = V0; j < V1; ++j) W.row(r)[j] = rng.normal() * 0.02f;
     }
     head->W.w = std::move(W);
-    // New tokens start a little less likely than the least likely known one.
+    // New tokens start less likely than the least likely known one.
     float low = *std::min_element(head->b.w.v.begin(), head->b.w.v.end());
-    head->b.w.v.resize(V1, low - 1.f);
+    head->b.w.v.resize(V1, low - 2.f);
     head->b.w.cols = V1;
     for (Param* p : {&tok, &head->W, &head->b}) {
         p->g.resize(p->w.rows, p->w.cols);
@@ -295,6 +315,10 @@ void Model::release_scratch() {
 bool Model::gpu_layout(GpuGpt& g) {
     if (spec.kind != MODEL_GPT || spec.lora_rank != 0) return false;
     g.vocab = head->out; g.ctx = spec.ctx; g.dim = spec.dim; g.heads = spec.heads; g.nlayer = spec.nlayer;
+    g.modern = spec.arch == ARCH_MODERN;
+    g.ffn = spec.mlp_hidden();
+    g.rope_theta = spec.rope_theta;
+    g.recompute = recompute ? 1 : -1;
     g.params = params();
     return true;
 }
@@ -317,7 +341,13 @@ void Model::merge_lora() {
 void Model::forward(const Batch& b, bool train) {
     if (spec.kind == MODEL_GPT) {
         emb->forward(b.ids, b.B, b.T, xs[0]);
-        for (int l = 0; l < spec.nlayer; ++l) blocks[l]->forward(xs[l], xs[l + 1], b.B, b.T, train);
+        recomputing_ = train && recompute;
+        if (recomputing_) drop_rng_.resize(spec.nlayer);
+        for (int l = 0; l < spec.nlayer; ++l) {
+            if (recomputing_) drop_rng_[l] = {blocks[l]->drop1.rng, blocks[l]->drop2.rng};
+            blocks[l]->forward(xs[l], xs[l + 1], b.B, b.T, train);
+            if (recomputing_) blocks[l]->release_scratch();
+        }
         lnf->forward(xs[spec.nlayer], xf, train);
         head->forward(xf, logits, train);
     } else {
@@ -357,7 +387,14 @@ float Model::step(const Batch& b, bool train, float scale, int* correct) {
         head->backward(dout, d1);
         lnf->backward(d1, d2);
         for (int l = spec.nlayer - 1; l >= 0; --l) {
+            if (recomputing_) {
+                // the same masks as the first time; xs[l + 1] gets the values it already holds
+                blocks[l]->drop1.rng = drop_rng_[l].first;
+                blocks[l]->drop2.rng = drop_rng_[l].second;
+                blocks[l]->forward(xs[l], xs[l + 1], b.B, b.T, true);
+            }
             blocks[l]->backward(d2, d1);
+            if (recomputing_) blocks[l]->release_scratch();
             std::swap(d1, d2);
         }
         emb->backward(d2);
@@ -409,8 +446,12 @@ int Model::next_token(const std::vector<int>& ids, float temperature, Rng& r) {
     return sample(logits.row(n - 1), temperature, r);
 }
 
-int Model::sample(const float* z, float temperature, Rng& r) const {
-    int V = spec.vocab, arg = 0;
+int Model::sample(const float* z0, const Sampling& s, const int* recent, size_t n_recent, Rng& r, int spare) const {
+    return sample_logits(z0, spec.vocab, s, recent, n_recent, r, spare);
+}
+
+static int sample_plain(const float* z, int V, float temperature, Rng& r) {
+    int arg = 0;
     for (int j = 1; j < V; ++j)
         if (z[j] > z[arg]) arg = j;
     if (temperature <= 0.01f) return arg;
@@ -422,15 +463,65 @@ int Model::sample(const float* z, float temperature, Rng& r) const {
     return arg;
 }
 
+int sample_logits(const float* z0, int V, const Sampling& s, const int* recent, size_t n_recent, Rng& r, int spare) {
+    bool plain = s.top_k <= 0 && s.top_p >= 1.f && (s.repeat_penalty == 1.f || n_recent == 0);
+    if (plain) return sample_plain(z0, V, s.temperature, r);
+    std::vector<float> z(z0, z0 + V);
+    if (s.repeat_penalty != 1.f && s.repeat_penalty > 0.f) {
+        std::vector<char> seen(V, 0);
+        size_t from = n_recent > (size_t)std::max(0, s.repeat_window) ? n_recent - (size_t)std::max(0, s.repeat_window) : 0;
+        for (size_t i = from; i < n_recent; ++i)
+            if (recent[i] >= 0 && recent[i] < V && recent[i] != spare && !seen[recent[i]]) {
+                seen[recent[i]] = 1;
+                float& v = z[recent[i]];
+                v = v > 0 ? v / s.repeat_penalty : v * s.repeat_penalty;
+            }
+    }
+    int arg = 0;
+    for (int j = 1; j < V; ++j)
+        if (z[j] > z[arg]) arg = j;
+    if (s.temperature <= 0.01f) return arg;
+    std::vector<int> order(V);
+    for (int j = 0; j < V; ++j) order[j] = j;
+    int keep = s.top_k > 0 ? std::min(V, s.top_k) : V;
+    auto by_logit = [&](int a, int b) { return z[a] > z[b] || (z[a] == z[b] && a < b); };
+    if (keep < V) std::partial_sort(order.begin(), order.begin() + keep, order.end(), by_logit);
+    else if (s.top_p < 1.f) std::sort(order.begin(), order.end(), by_logit);
+    std::vector<double> p(keep);
+    double sum = 0;
+    for (int i = 0; i < keep; ++i) { p[i] = std::exp((double)(z[order[i]] - z[arg]) / s.temperature); sum += p[i]; }
+    if (s.top_p < 1.f) {
+        double need = std::max(0.f, s.top_p) * sum, acc = 0;
+        int n = 0;
+        while (n < keep && (n == 0 || acc < need)) acc += p[n++];
+        keep = n;
+        sum = acc;
+    }
+    double u = r.uniform() * sum;
+    for (int i = 0; i < keep; ++i) { u -= p[i]; if (u <= 0) return order[i]; }
+    return order[keep - 1];
+}
+
+int Model::sample(const float* z, float temperature, Rng& r) const { return sample_plain(z, spec.vocab, temperature, r); }
+
 const float* Model::gen_feed(int token) {
+    if (gen_gpu_) {
+        const float* z = gpu_gen_feed(token, gen_pos_);
+        if (z) ++gen_pos_;
+        return z;  // nullptr: the caller goes on on the CPU
+    }
     int C = spec.dim;
     if ((int)kv_.size() != spec.nlayer) kv_.resize(spec.nlayer);
     for (auto& t : kv_)
         if (t.rows != spec.ctx || t.cols != 2 * C) t.resize(spec.ctx, 2 * C);
     gx_.resize_noinit(1, C);
     const float* a = emb->tok.w.row(token);
-    const float* p = emb->pos.w.row(gen_pos_);
-    for (int j = 0; j < C; ++j) gx_.v[j] = a[j] + p[j];
+    if (emb->learned_pos) {
+        const float* p = emb->pos.w.row(gen_pos_);
+        for (int j = 0; j < C; ++j) gx_.v[j] = a[j] + p[j];
+    } else {
+        std::memcpy(gx_.v.data(), a, sizeof(float) * C);
+    }
     for (int l = 0; l < spec.nlayer; ++l) {
         blocks[l]->step(gx_, gy_, kv_[l], gen_pos_);
         std::swap(gx_, gy_);
@@ -443,22 +534,46 @@ const float* Model::gen_feed(int token) {
 
 std::vector<int> Model::generate(const std::vector<int>& prompt, int n, float temperature, Rng& rng, int stop,
                                  const std::function<bool(int)>& on_token) {
+    Sampling s;
+    s.temperature = temperature;
+    return generate(prompt, n, s, rng, stop, on_token);
+}
+
+std::vector<int> Model::generate(const std::vector<int>& prompt, int n, const Sampling& s, Rng& rng, int stop,
+                                 const std::function<bool(int)>& on_token) {
     std::vector<int> out;
     if (spec.kind != MODEL_GPT || n <= 0) return out;
     std::vector<int> hist = prompt;
     if (hist.empty()) hist.push_back(0);
     int ctx = spec.ctx;
-    // Starts a fresh window holding the last `keep` tokens of the history.
-    auto prime = [&](size_t keep) {
+    GpuGpt gl;
+    gen_gpu_ = gen_on_gpu && gpu_layout(gl) && gpu_gen_begin(gl);
+    // Starts a fresh window holding the last `keep` tokens of the history; a
+    // GPU error starts it again on the CPU.
+    std::function<const float*(size_t)> prime = [&](size_t keep) -> const float* {
         gen_pos_ = 0;
         keep = std::min(keep, hist.size());
         const float* z = nullptr;
-        for (size_t i = hist.size() - keep; i < hist.size(); ++i) z = gen_feed(hist[i]);
+        for (size_t i = hist.size() - keep; i < hist.size(); ++i) {
+            z = gen_feed(hist[i]);
+            if (!z) {
+                gen_gpu_ = false;
+                return prime(keep);
+            }
+        }
         return z;
+    };
+    auto feed = [&](int t) {
+        size_t window = (size_t)gen_pos_ + 1;
+        const float* z = gen_feed(t);
+        if (z) return z;
+        gen_gpu_ = false;
+        return prime(window);
     };
     const float* z = prime((size_t)ctx);
     for (int i = 0; i < n; ++i) {
-        int t = sample(z, temperature, rng);
+        size_t look = std::min(hist.size(), (size_t)std::max(0, s.repeat_window));
+        int t = sample(z, s, hist.data() + hist.size() - look, look, rng, stop);
         out.push_back(t);
         hist.push_back(t);
         if (t == stop || (on_token && !on_token(t))) break;
@@ -466,9 +581,11 @@ std::vector<int> Model::generate(const std::vector<int>& prompt, int n, float te
             z = prime((size_t)std::max(1, ctx / 2));
             if (hist.size() > (size_t)ctx * 4) hist.erase(hist.begin(), hist.end() - ctx);
         } else {
-            z = gen_feed(t);
+            z = feed(t);
         }
     }
+    last_gen_on_gpu = gen_gpu_;
+    gen_gpu_ = false;
     return out;
 }
 

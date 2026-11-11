@@ -71,10 +71,12 @@ private:
     bool active = false;
 };
 
+// With `rms` it is an RMSNorm: y = g * x / rms(x), no mean and no bias b.
 struct LayerNorm : Layer {
     int dim;
+    bool rms = false;
     Param g, b;
-    LayerNorm(int dim, const std::string& name);
+    LayerNorm(int dim, const std::string& name, bool rms = false);
     void forward(const Tensor& x, Tensor& y, bool train) override;
     void backward(const Tensor& dy, Tensor& dx) override;
     void collect(std::vector<Param*>& ps) override;
@@ -85,11 +87,13 @@ private:
     std::vector<float> inv;
 };
 
-// Token + learned position embedding.
+// Token + learned position embedding (without `learned_pos` only the token;
+// the positions then come from the rotary attention).
 struct Embedding {
     int vocab, ctx, dim;
+    bool learned_pos = true;
     Param tok, pos;
-    Embedding(int vocab, int ctx, int dim, Rng& rng);
+    Embedding(int vocab, int ctx, int dim, Rng& rng, bool learned_pos = true);
     void forward(const std::vector<int>& ids, int B, int T, Tensor& y);
     void backward(const Tensor& dy);
     void collect(std::vector<Param*>& ps);
@@ -99,11 +103,14 @@ private:
     int B = 0, T = 0;
 };
 
-// Causal multi-head self-attention over rows laid out as [B*T x C].
+// Causal multi-head self-attention over rows laid out as [B*T x C]. With
+// rope_theta > 0 the queries and keys are rotated by their position (rotary
+// embedding, the two halves of every head form the pairs).
 struct Attention {
     int C, H, hd;
+    float rope_theta = 0.f;
     Linear qkv, proj;
-    Attention(int dim, int heads, const std::string& name, Rng& rng, float proj_std);
+    Attention(int dim, int heads, const std::string& name, Rng& rng, float proj_std, float rope_theta = 0.f);
     void forward(const Tensor& x, Tensor& y, int B, int T);
     void backward(const Tensor& dy, Tensor& dx);
     // Inference for one new position: x and y are [1 x C]. The keys and values
@@ -119,6 +126,10 @@ struct Attention {
 
 private:
     void cpu_forward();  // ho and att from q3
+    // Rotates the query and key of every head in rows [r0, r0 + n) of m (row r
+    // is position r % T, or `pos` for a single row); `back` rotates the other way.
+    void rope(Tensor& m, int n, int T, int pos, bool back);
+    std::vector<float> rcos, rsin;  // [position x hd/2]
     int B = 0, T = 0;
     bool on_gpu = false;  // the last forward ran on the GPU (att was not filled)
     Tensor q3, ho, dho, dq3;
@@ -127,13 +138,17 @@ private:
 
 // Pre-norm transformer block: x + attn(ln(x)), then h + mlp(ln(h)).
 // While training, both residual branches can use dropout.
+// Classic: LayerNorm, GELU MLP of 4 * dim. Modern (ffn > 0): RMSNorm, rotary
+// attention and a SwiGLU MLP, where fc1 gives [gate | up] (2 * ffn) and fc2
+// reads silu(gate) * up.
 struct Block {
+    bool modern = false;
     LayerNorm ln1, ln2;
     Attention attn;
     Linear fc1, fc2;
     Activation act;
     Dropout drop1, drop2;
-    Block(int dim, int heads, const std::string& name, Rng& rng, float resid_std);
+    Block(int dim, int heads, const std::string& name, Rng& rng, float resid_std, int ffn = 0, float rope_theta = 10000.f);
     void set_dropout(float p);
     void forward(const Tensor& x, Tensor& y, int B, int T, bool train);
     void backward(const Tensor& dy, Tensor& dx);

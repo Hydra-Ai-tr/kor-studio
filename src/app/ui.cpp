@@ -5,9 +5,11 @@
 #include "platform.h"
 #include "plugins.h"
 
+#include "../core/gguf.h"
 #include "../core/gpu.h"
 #include "../core/kernels.h"
 #include "../core/media.h"
+#include "../core/parallel.h"
 #include "../core/sysinfo.h"
 #include "../skills/datatools.h"
 #include "../skills/json.h"
@@ -135,6 +137,11 @@ struct State {
     int results_step = 0;          // 0 = manual run
     bool stop_on_pass = false;
 
+    // the model's name and maker, kept in its file (meta "name", "maker")
+    char model_name[64] = "";
+    char model_maker[64] = "";
+    bool teach_name = true;
+
     // plugins
     std::vector<Plugin> plugins;
     std::vector<std::array<char, 512>> plugin_args;
@@ -195,6 +202,7 @@ struct State {
     std::shared_ptr<UpdateInfo> update = std::make_shared<UpdateInfo>();
     bool update_check = true, update_started = false, update_seen = false;
     bool use_gpu = false;  // experimental OpenCL matrix products during training
+    bool recompute = false;  // text models: run blocks again in the backward pass (Model::recompute)
 
     // finished and stopped trainings (<config>/runs/*.json) for the comparison tab
     struct RunRecord {
@@ -244,6 +252,22 @@ struct State {
     // chat page: its own model, independent of training
     struct Chat {
         std::shared_ptr<Model> model;
+        std::shared_ptr<GgufModel> llm;  // a ready-made GGUF model instead
+        char system[2048] = "";
+        std::string lora;                // the adapter in use on llm
+        struct Tune {                    // LoRA fine-tuning of llm
+            char data[1024] = "";
+            int steps = 200, rank = 8, batch = 4, seq = 256;
+            float lr = 2e-4f;
+            bool mlp = false, open = false;
+            std::thread th;
+            std::atomic<bool> running{false}, cancel{false};
+            std::mutex mu;  // guards the fields below
+            LoraProgress pr;
+            std::vector<float> loss;
+            std::string msg, info;
+            bool ok = true, done = false;
+        } tune;
         std::string path, name, msg;
         bool ok = true;
         char q_tag[128] = "Kullanıcı: ", a_tag[128] = "Asistan: ";
@@ -251,9 +275,9 @@ struct State {
         std::vector<Msg> msgs;
         std::vector<std::string> queue;  // messages waiting for the model
         char input[4096] = "";
-        float temperature = 0.3f;
+        Sampling sampling = [] { Sampling s; s.temperature = 0.3f; s.top_p = 0.9f; return s; }();
         int max_len = 200;
-        bool memory = true, settings_open = false;
+        bool memory = true, settings_open = false, gpu = true;
         std::thread th;
         std::atomic<bool> running{false}, cancel{false};
         std::mutex mu;      // guards reply
@@ -555,15 +579,38 @@ void refresh_resume() {
 
 void save_open_project();
 
+// The name fields show the name stored in the model.
+void name_from_model() {
+    if (!A.model) return;
+    auto get = [](const char* key) {
+        auto it = A.model->meta.find(key);
+        return it == A.model->meta.end() ? std::string() : it->second;
+    };
+    std::snprintf(A.model_name, sizeof A.model_name, "%s", get("name").c_str());
+    std::snprintf(A.model_maker, sizeof A.model_maker, "%s", get("maker").c_str());
+}
+
+// Stores the name fields in the model (the caller holds model_mu or no run is going).
+void name_to_model() {
+    if (!A.model) return;
+    for (auto [key, value] : {std::pair<const char*, const char*>{"name", A.model_name}, {"maker", A.model_maker}}) {
+        std::string v = value;
+        while (!v.empty() && v.back() == ' ') v.pop_back();
+        if (v.empty()) A.model->meta.erase(key);
+        else A.model->meta[key] = v;
+    }
+}
+
 // A finished model goes to <config>/models, where the chat page finds it.
 void save_finished_model() {
     if (!A.model) return;
     std::error_code ec;
     std::filesystem::create_directories(upath(models_dir()), ec);
-    std::string stem = A.data.path.empty() ? "model" : upath(A.data.path).stem().u8string();
+    std::string stem = A.model_name[0] ? std::string(A.model_name)
+                     : A.data.path.empty() ? "model" : upath(A.data.path).stem().u8string();
     if (stem.empty()) stem = "model";
     for (char& c : stem)
-        if (c == ' ' || c == ':' || c == '/' || c == '\\') c = '_';
+        if (std::strchr(" :/\\*?\"<>|\t", c)) c = '_';
     std::string path = (upath(models_dir()) / (stem + "-" + timestamp(true) + ".kor")).u8string(), err;
     bool ok;
     {
@@ -949,6 +996,7 @@ void build_model() {
         for (int c = 0; c < A.data.n_cols; ++c)
             if (c != A.data.target_col) A.model->feat_names.push_back(A.data.header[c]);
     }
+    name_to_model();
     reset_generation();
 }
 
@@ -1167,6 +1215,12 @@ void add_skill_hooks() {
     }
 }
 
+// Question-answer text data: the model can be taught its name.
+bool can_teach_name() {
+    return A.data.kind == DATA_TEXT && A.data.media == MEDIA_TEXT && !A.q_tag.empty() && !A.a_tag.empty() &&
+           (!A.model || A.model->spec.lora_rank == 0);
+}
+
 // Starts a run, or continues the saved one (`resume`; the model, data and
 // settings must already be restored, see resume_training()).
 void begin_training(bool resume = false) {
@@ -1186,6 +1240,7 @@ void begin_training(bool resume = false) {
     if (!resume) A.cfg.seed = (uint64_t)std::chrono::steady_clock::now().time_since_epoch().count();
     A.cfg.resume = resume && autosave;
     A.cfg.gpu = A.use_gpu;
+    A.model->recompute = A.recompute;
     A.cfg.checkpoint.clear();
     if (autosave) {
         std::error_code ec;
@@ -1207,10 +1262,20 @@ void begin_training(bool resume = false) {
     A.cfg.probe_target = A.stop_on_pass ? 1.f : 0.f;
     A.run_tests = A.cfg.probes;
     A.results.clear();
+    name_to_model();
     A.train_data = A.data;
     int held = A.train_data.hold_out(A.cfg.probes);
     start_log();
     if (held) log_fmt(State::T_MUTED, S::LogHeldOut, held);
+    auto ni = A.model->meta.find("name"), mi = A.model->meta.find("maker");
+    if (can_teach_name() && A.teach_name && ni != A.model->meta.end()) {
+        std::string name = ni->second, maker = mi == A.model->meta.end() ? "" : mi->second;
+        std::string block = identity_dialogue(name, maker, A.q_tag, A.a_tag, text_language(A.train_data.raw));
+        A.ft_added += A.model->extend_vocab(text_chars(block));
+        A.train_data.vocab = A.model->vocab;
+        int reps = A.train_data.add_training_text(block, 0.01);
+        if (reps) log_fmt(State::T_MUTED, S::LogIdentity, name.c_str(), reps);
+    }
     add_skill_hooks();
     if (!A.active_skills.empty()) {
         std::string names;
@@ -1265,6 +1330,7 @@ void resume_training() {
     A.model = m;
     A.spec = m->spec;
     A.from_file = true;
+    name_from_model();
     reset_generation();
     A.data_kind = kind;
     std::snprintf(A.data_path, sizeof A.data_path, "%s", data.c_str());
@@ -1372,6 +1438,7 @@ bool save_project(const std::string& dir, const std::string& name, const std::st
       << "updated=" << (long long)std::time(nullptr) << "\n"
       << "version=" << KOR_VERSION << "\n"
       << "model=" << model_file << "\n"
+      << "model_name=" << A.model_name << "\nmodel_maker=" << A.model_maker << "\nteach_name=" << (A.teach_name ? 1 : 0) << "\n"
       << "params=" << params << "\n"
       << "cfg.steps=" << c.steps << "\ncfg.batch=" << c.batch << "\ncfg.accum=" << c.accum << "\ncfg.lr=" << c.lr
       << "\ncfg.wd=" << c.weight_decay << "\ncfg.eval_every=" << c.eval_every << "\ncfg.patience=" << c.patience
@@ -1451,6 +1518,12 @@ bool open_project_dir(std::string dir, std::string& err) {
     A.model = m;
     if (m) A.spec = m->spec;
     A.from_file = (bool)m;
+    if (m) name_from_model();
+    else {
+        std::snprintf(A.model_name, sizeof A.model_name, "%s", kv["model_name"].c_str());
+        std::snprintf(A.model_maker, sizeof A.model_maker, "%s", kv["model_maker"].c_str());
+    }
+    A.teach_name = num("teach_name", 1) != 0;
     A.ft_added = A.ft_dropped = 0;
     reset_generation();
     if (!data.empty() && fs::exists(upath(data), ec)) {
@@ -2891,11 +2964,12 @@ void draw_diagram(const ModelSpec& s) {
     if (s.kind == MODEL_GPT) {
         boxes.push_back({tr(S::Input), std::to_string(s.ctx), C::muted});
         boxes.push_back({"Embedding", strf("%d x %d", s.vocab, s.dim), C::teal});
+        const bool modern = s.arch == ARCH_MODERN;
         for (int i = 0; i < s.nlayer && i < 12; ++i) {
-            boxes.push_back({"Attention", strf("%d heads", s.heads), C::accent});
-            boxes.push_back({"MLP", std::to_string(s.dim * 4), C::blue});
+            boxes.push_back({"Attention", strf(modern ? "%d heads, RoPE" : "%d heads", s.heads), C::accent});
+            boxes.push_back({modern ? "SwiGLU" : "MLP", std::to_string(s.mlp_hidden()), C::blue});
         }
-        boxes.push_back({"LayerNorm", "", C::violet});
+        boxes.push_back({modern ? "RMSNorm" : "LayerNorm", "", C::violet});
         boxes.push_back({tr(S::Output), std::to_string(s.vocab), C::muted});
     } else {
         boxes.push_back({tr(S::Input), std::to_string(s.in_dim), C::muted});
@@ -2947,6 +3021,13 @@ void arch_controls(ModelSpec& s) {
         const bool big = A.use_gpu && A.data.media == MEDIA_TEXT;
         const int max_heads = big ? 32 : 12, max_layers = big ? 48 : 12;
         int max_ctx = std::max(8, std::min(big ? 2048 : 512, (int)A.data.n_train - 2));
+        field_label(tr(S::BlockKind), lw, tr(S::BlockKindHelp));
+        ImGui::SetNextItemWidth(-1);
+        if (begin_combo("##blockkind", tr(s.arch == ARCH_MODERN ? S::ArchModern : S::ArchClassic))) {
+            if (ImGui::Selectable(tr(S::ArchModern), s.arch == ARCH_MODERN)) s.arch = ARCH_MODERN;
+            if (ImGui::Selectable(tr(S::ArchClassic), s.arch == ARCH_CLASSIC)) s.arch = ARCH_CLASSIC;
+            ImGui::EndCombo();
+        }
         field_label(tr(S::Heads), lw);
         slider_int("##heads", &s.heads, 1, max_heads);
         field_label(tr(S::HeadDim), lw);
@@ -2960,7 +3041,9 @@ void arch_controls(ModelSpec& s) {
         ImGui::EndDisabled();
         s.heads = std::max(1, std::min(max_heads, s.heads));
         s.nlayer = std::max(1, std::min(max_layers, s.nlayer));
-        s.dim = s.heads * std::max(4, std::min(64, per));
+        per = std::max(4, std::min(64, per));
+        if (s.arch == ARCH_MODERN) per += per % 2;  // rotary positions pair the halves of a head
+        s.dim = s.heads * per;
         if (image) s.ctx = A.data.img_size * A.data.img_size + 1;
         else s.ctx = std::max(8, std::min(max_ctx, s.ctx));
         text_wrapped(strf(tr(S::Width), s.dim).c_str(), C::muted, F.small);
@@ -3054,6 +3137,29 @@ void fit_card(float min_h, float width, float* natural) {
     end_card(natural);
 }
 
+// The model's name and maker, and whether training teaches it its name.
+void identity_card() {
+    begin_card("identity", tr(S::IdentityTitle), 0, 0, tr(S::IdentityHelp));
+    ImGui::BeginDisabled(busy());
+    float lw = std::min(px(160), ImGui::GetContentRegionAvail().x * 0.3f);
+    bool changed = false;
+    field_label(tr(S::ModelNameLbl), lw);
+    ImGui::SetNextItemWidth(std::min(px(420), ImGui::GetContentRegionAvail().x));
+    changed |= ImGui::InputTextWithHint("##mname", tr(S::ModelNameHint), A.model_name, sizeof A.model_name);
+    field_label(tr(S::ModelMakerLbl), lw);
+    ImGui::SetNextItemWidth(std::min(px(420), ImGui::GetContentRegionAvail().x));
+    changed |= ImGui::InputTextWithHint("##mmaker", tr(S::ModelMakerHint), A.model_maker, sizeof A.model_maker);
+    if (changed) name_to_model();
+    gap(4);
+    bool can = can_teach_name();
+    ImGui::BeginDisabled(!can);
+    checkbox(tr(S::TeachName), &A.teach_name);
+    ImGui::EndDisabled();
+    text_wrapped(tr(can ? S::TeachNameHelp : S::TeachNameNeedsDialogue), C::muted, F.small);
+    ImGui::EndDisabled();
+    end_card();
+}
+
 void page_model() {
     char b[256];
     if (A.model) {
@@ -3087,6 +3193,8 @@ void page_model() {
             banner(ft.c_str(), C::blue, IC_SPARK);
             gap();
         }
+        identity_card();
+        gap();
         begin_card("built", tr(S::Network), 0, 0, tr(S::ResetHint));
         draw_diagram(A.model->spec);
         end_card();
@@ -3140,6 +3248,8 @@ void page_model() {
     else gap();
     fit_card(two ? row.prev : 0, two ? total - lw - g : 0, row.track());
     row.next();
+    gap();
+    identity_card();
     gap();
     begin_card("diagram", tr(S::Network));
     draw_diagram(A.spec);
@@ -3631,6 +3741,9 @@ void train_settings(bool run) {
         // the automatic plan follows the switch (a GPU trains larger models); own settings stay
         if (checkbox(tr(S::UseGpu), &A.use_gpu) && planned) auto_configure();
         tooltip(tr(S::UseGpuHelp));
+        ImGui::SameLine(0, px(28));
+        checkbox(tr(S::Recompute), &A.recompute);
+        tooltip(tr(S::RecomputeHelp));
     }
     A.cfg.patience = std::max(0, std::min(1000, A.cfg.patience));
     A.cfg.probe_every = std::max(0, A.cfg.probe_every);
@@ -3972,6 +4085,7 @@ bool load_model_file(const std::string& path) {
     if (!m) return false;
     A.model = m;
     A.spec = m->spec;
+    name_from_model();
     reset_generation();
     A.feat_in.clear();
     A.from_file = true;
@@ -4351,13 +4465,23 @@ void page_files() {
 
 // ------------------------------------------------------------------- chat
 
-bool chat_ready() { return A.chat.model && A.chat.model->spec.kind == MODEL_GPT && A.chat.model->spec.media == MEDIA_TEXT; }
+bool chat_ready() {
+    return A.chat.llm || (A.chat.model && A.chat.model->spec.kind == MODEL_GPT && A.chat.model->spec.media == MEDIA_TEXT);
+}
 
 void chat_stop() {
     A.chat.cancel = true;
     if (A.chat.th.joinable()) A.chat.th.join();
     A.chat.cancel = false;
     A.chat.running = false;
+}
+
+void tune_stop() {
+    State::Chat::Tune& t = A.chat.tune;
+    t.cancel = true;
+    if (t.th.joinable()) t.th.join();
+    t.cancel = false;
+    t.running = false;
 }
 
 // Moves a finished answer into the conversation; called every frame.
@@ -4414,7 +4538,7 @@ void scan_chat_models() {
     for (fs::directory_iterator it(upath(models_dir()), ec), end; !ec && it != end; it.increment(ec)) {
         std::string ext = it->path().extension().u8string();
         std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char ch) { return (char)std::tolower(ch); });
-        if (ext == ".kor") add(it->path());
+        if (ext == ".kor" || ext == ".gguf") add(it->path());
     }
     std::sort(c.files.begin(), c.files.end(), [](const State::Chat::File& x, const State::Chat::File& y) { return x.when > y.when; });
     for (const std::string& r : c.recent) add(upath(r));
@@ -4422,14 +4546,21 @@ void scan_chat_models() {
 
 void chat_set_model(std::shared_ptr<Model> m, const std::string& path, const std::string& name) {
     chat_stop();
+    tune_stop();
     State::Chat& c = A.chat;
     c.model = m;
+    c.llm = nullptr;
+    c.lora.clear();
+    c.tune.loss.clear();
+    c.tune.msg.clear();
+    c.tune.done = false;
     c.path = path;
     c.name = name;
     c.msgs.clear();
     c.queue.clear();
     c.reply.clear();
     c.focus = true;
+    if (!m) return;
     // Dialogue tags: stored in the model by this version, else those of the loaded data, else the usual ones.
     std::string q = "Kullanıcı: ", a = "Asistan: ";
     auto qi = m->meta.find("q_tag"), ai = m->meta.find("a_tag");
@@ -4441,11 +4572,31 @@ void chat_set_model(std::shared_ptr<Model> m, const std::string& path, const std
 
 bool chat_open(const std::string& path) {
     std::string err;
+    std::string ext = upath(path).extension().u8string();
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char ch) { return (char)std::tolower(ch); });
+    if (ext == ".gguf") {
+        auto g = GgufModel::load(path, &err);
+        A.chat.ok = (bool)g;
+        A.chat.msg = g ? "" : err;
+        if (!g) return false;
+        chat_set_model(nullptr, path, g->name);
+        A.chat.llm = g;
+        // Ready-made models loop on long answers without a repeat penalty; same defaults as `kor-cli gguf chat`.
+        Sampling& s = A.chat.sampling;
+        s.temperature = 0.7f;
+        s.top_p = 0.9f;
+        s.top_k = 40;
+        s.repeat_penalty = 1.1f;
+        if (path.find(models_dir()) != 0) remember_chat_model(path);
+        A.chat.scanned = false;
+        return true;
+    }
     auto m = Model::load(path, &err);
     A.chat.ok = (bool)m;
     A.chat.msg = m ? "" : err;
     if (!m) return false;
-    chat_set_model(m, path, upath(path).filename().u8string());
+    auto ni = m->meta.find("name");
+    chat_set_model(m, path, ni != m->meta.end() ? ni->second : upath(path).filename().u8string());
     if (path.find(models_dir()) != 0) remember_chat_model(path);
     A.chat.scanned = false;
     return true;
@@ -4470,7 +4621,8 @@ void chat_use_current() {
         m->meta["q_tag"] = A.q_tag;
         m->meta["a_tag"] = A.a_tag;
     }
-    chat_set_model(m, "", tr(S::ChatUseCurrent));
+    auto ni = m->meta.find("name");
+    chat_set_model(m, "", ni != m->meta.end() ? ni->second : tr(S::ChatUseCurrent));
 }
 
 // The prompt for the newest message: as much of the conversation as fits in
@@ -4499,9 +4651,37 @@ void chat_send(const std::string& text) {
     std::string t = text;
     while (!t.empty() && (t.back() == ' ' || t.back() == '\n')) t.pop_back();
     if (t.empty() || !chat_ready()) return;
-    if (c.running || c.th.joinable()) { c.queue.push_back(t); return; }
+    if (c.running || c.th.joinable() || c.tune.running) { c.queue.push_back(t); return; }
     c.msgs.push_back({true, t});
     c.scroll = true;
+    if (c.llm) {
+        std::vector<LlmMsg> msgs;
+        if (c.system[0]) msgs.push_back({"system", c.system});
+        for (size_t i = c.memory ? 0 : c.msgs.size() - 1; i < c.msgs.size(); ++i)
+            msgs.push_back({c.msgs[i].user ? "user" : "assistant", c.msgs[i].text});
+        {
+            std::lock_guard<std::mutex> lk(c.mu);
+            c.reply.clear();
+        }
+        c.running = true;
+        c.cancel = false;
+        std::shared_ptr<GgufModel> g = c.llm;
+        if (!busy()) set_threads(A.cfg.threads > 0 ? A.cfg.threads : recommended_threads(A.sys));
+        int n = std::max(1, c.max_len);
+        Sampling smp = c.sampling;
+        uint64_t seed = c.rng.next();
+        c.th = std::thread([g, msgs, n, smp, seed] {
+            State::Chat& ch = A.chat;
+            Rng rng(seed);
+            g->reply(g->chat_prompt(msgs, n), n, smp, rng, [&](const std::string& part) {
+                std::lock_guard<std::mutex> lk(ch.mu);
+                ch.reply += part;
+                return !ch.cancel.load();
+            });
+            ch.running = false;
+        });
+        return;
+    }
     std::vector<int> ids = chat_prompt();
     if (ids.empty()) {
         c.msgs.push_back({false, tr(S::ChatUnknown)});
@@ -4519,13 +4699,15 @@ void chat_send(const std::string& text) {
     c.cancel = false;
     std::shared_ptr<Model> m = c.model;
     int n = std::max(1, c.max_len);
-    float temp = c.temperature;
+    Sampling smp = c.sampling;
     uint64_t seed = c.rng.next();
-    c.th = std::thread([m, ids, n, temp, seed, newline, tagged] {
+    bool gpu = c.gpu && !busy();
+    c.th = std::thread([m, ids, n, smp, seed, newline, tagged, gpu] {
         State::Chat& ch = A.chat;
         Rng rng(seed);
+        m->gen_on_gpu = gpu;
         // Dialogue models answer in one line; plain text just continues.
-        m->generate(ids, n, temp, rng, tagged ? newline : -1, [&](int t) {
+        m->generate(ids, n, smp, rng, tagged ? newline : -1, [&](int t) {
             if (t == newline && tagged) return false;
             if (t >= 0 && t < (int)m->vocab.size()) {
                 std::lock_guard<std::mutex> lk(ch.mu);
@@ -4606,7 +4788,7 @@ void chat_model_list() {
     gap(4);
     if (has_native_dialogs()) {
         if (button(tr(S::Browse), BTN_PRIMARY, IC_FOLDER)) {
-            std::string p = open_file_dialog(DLG_MODEL);
+            std::string p = open_file_dialog(DLG_CHAT_MODEL);
             if (!p.empty()) chat_open(p);
         }
         ImGui::SameLine();
@@ -4634,11 +4816,186 @@ void chat_model_list() {
 void chat_pump() {
     State::Chat& c = A.chat;
     chat_collect();
-    if (!c.running && !c.th.joinable() && !c.queue.empty()) {
+    if (!c.tune.running && c.tune.th.joinable()) c.tune.th.join();
+    if (!c.running && !c.th.joinable() && !c.tune.running && !c.queue.empty()) {
         std::string next = c.queue.front();
         c.queue.erase(c.queue.begin());
         chat_send(next);
     }
+}
+
+void tune_start() {
+    State::Chat& c = A.chat;
+    State::Chat::Tune& t = c.tune;
+    if (!c.llm || t.running || t.th.joinable() || busy()) return;
+    std::string text;
+    if (!read_whole(t.data, text) || text.empty()) {
+        t.ok = false;
+        t.msg = strf(tr(S::Failed), t.data);
+        return;
+    }
+    chat_stop();
+    set_threads(A.cfg.threads > 0 ? A.cfg.threads : recommended_threads(A.sys));
+    std::shared_ptr<GgufModel> g = c.llm;
+    LoraConfig lc;
+    lc.rank = t.rank;
+    lc.alpha = 2.f * t.rank;
+    lc.mlp = t.mlp;
+    lc.steps = t.steps;
+    lc.batch = t.batch;
+    lc.seq = t.seq;
+    lc.lr = t.lr;
+    lc.eval_every = std::max(5, t.steps / 20);
+    std::string q = c.q_tag, a = c.a_tag, sys = c.system;
+    std::error_code ec;
+    std::filesystem::create_directories(upath(models_dir()), ec);
+    std::string out = (upath(models_dir()) / (upath(c.path).stem().u8string() + "-lora-" + timestamp(true) + ".gguf")).u8string();
+    {
+        std::lock_guard<std::mutex> lk(t.mu);
+        t.loss.clear();
+        t.msg.clear();
+        t.info.clear();
+        t.pr = LoraProgress();
+        t.pr.steps = lc.steps;
+        t.done = false;
+        t.ok = true;
+    }
+    t.cancel = false;
+    t.running = true;
+    t.th = std::thread([g, text, q, a, sys, lc, out] {
+        State::Chat::Tune& tt = A.chat.tune;
+        LoraData d = lora_data(*g, text, q, a, sys);
+        {
+            std::lock_guard<std::mutex> lk(tt.mu);
+            tt.info = d.chat ? strf(tr(S::LoraPairsFmt), (int)d.ex.size(), (int)d.tokens()) : strf(tr(S::LoraTextFmt), (int)d.tokens());
+        }
+        std::string err;
+        bool ok = lora_train(*g, d, lc, [&](const LoraProgress& p) {
+            std::lock_guard<std::mutex> lk(tt.mu);
+            tt.pr = p;
+            tt.loss.push_back(p.loss);
+            return !tt.cancel.load();
+        }, &err);
+        if (ok) ok = g->lora_save(out, &err);
+        {
+            std::lock_guard<std::mutex> lk(tt.mu);
+            tt.ok = ok;
+            tt.msg = ok ? out : err;
+            tt.done = true;
+        }
+        tt.running = false;
+    });
+}
+
+void chat_lora_card() {
+    State::Chat& c = A.chat;
+    State::Chat::Tune& t = c.tune;
+    if (!t.data[0] && A.data_path[0]) std::snprintf(t.data, sizeof t.data, "%s", A.data_path);
+    {
+        std::lock_guard<std::mutex> lk(t.mu);
+        if (t.done && !t.running) {
+            if (t.ok) c.lora = t.msg;
+            t.done = false;
+        }
+    }
+    std::string summary = c.lora.empty() ? tr(S::LoraNone) : upath(c.lora).filename().u8string();
+    if (begin_collapsible_card("chatlora", tr(S::GgufLoraTitle), &t.open, summary.c_str())) {
+        text_wrapped(tr(S::GgufLoraHelp), C::muted, F.small);
+        gap(4);
+        bool tuning = t.running || t.th.joinable();
+        ImGui::BeginDisabled(tuning || c.running);
+        if (has_native_dialogs()) {
+            if (button(tr(S::LoraOpen), BTN_SECONDARY, IC_FOLDER)) {
+                std::string p = open_file_dialog(DLG_GGUF);
+                std::string err;
+                if (!p.empty()) {
+                    chat_stop();
+                    if (c.llm->lora_load(p, &err)) {
+                        c.lora = p;
+                        c.ok = true;
+                        c.msg.clear();
+                    } else {
+                        c.lora.clear();
+                        c.ok = false;
+                        c.msg = err;
+                    }
+                }
+            }
+            ImGui::SameLine();
+        }
+        ImGui::BeginDisabled(c.lora.empty());
+        if (button(tr(S::LoraRemove), BTN_GHOST, IC_X)) {
+            chat_stop();
+            c.llm->lora_clear();
+            c.lora.clear();
+        }
+        ImGui::EndDisabled();
+        ImGui::EndDisabled();
+        gap(4);
+        float lw = std::min(px(220), ImGui::GetContentRegionAvail().x * 0.4f);
+        ImGui::BeginDisabled(tuning);
+        field_label(tr(S::LoraData), lw);
+        float bw = has_native_dialogs() ? button_width(tr(S::Browse)) + ImGui::GetStyle().ItemSpacing.x : 0;
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - bw);
+        ImGui::InputText("##tdata", t.data, sizeof t.data);
+        if (has_native_dialogs()) {
+            ImGui::SameLine();
+            if (button(tr(S::Browse), BTN_SECONDARY)) {
+                std::string p = open_file_dialog(DLG_DATA);
+                if (!p.empty()) std::snprintf(t.data, sizeof t.data, "%s", p.c_str());
+            }
+        }
+        field_label(tr(S::ChatTags), lw, tr(S::ChatTagsHelp));
+        float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+        ImGui::SetNextItemWidth(half);
+        ImGui::InputText("##tq", c.q_tag, sizeof c.q_tag);
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        ImGui::InputText("##ta", c.a_tag, sizeof c.a_tag);
+        field_label(tr(S::LoraSteps), lw);
+        slider_int("##tsteps", &t.steps, 10, 3000);
+        field_label(tr(S::LoraRank), lw, tr(S::LoraRankHelp));
+        slider_int("##trank", &t.rank, 1, 64);
+        field_label(tr(S::LR), lw);
+        slider_float("##tlr", &t.lr, 1e-5f, 1e-3f, "%.5f");
+        field_label(tr(S::LoraSeq), lw);
+        slider_int("##tseq", &t.seq, 32, 2048);
+        field_label(tr(S::LoraBatch), lw);
+        slider_int("##tbatch", &t.batch, 1, 16);
+        gap(2);
+        checkbox(tr(S::LoraMlp), &t.mlp);
+        ImGui::EndDisabled();
+        gap(4);
+        if (tuning) {
+            if (button(tr(S::Stop), BTN_DANGER, IC_STOP)) t.cancel = true;
+        } else {
+            ImGui::BeginDisabled(!t.data[0] || busy());
+            if (button(tr(S::LoraStart), BTN_PRIMARY, IC_TRAIN)) tune_start();
+            ImGui::EndDisabled();
+        }
+        std::lock_guard<std::mutex> lk(t.mu);
+        if (!t.info.empty()) {
+            gap(2);
+            text_wrapped(t.info.c_str(), C::muted, F.small);
+        }
+        if (tuning && t.pr.steps > 0) {
+            gap(2);
+            progress_bar((float)t.pr.step / t.pr.steps, px(6), C::accent);
+            std::string val = t.pr.val >= 0 ? strf(tr(S::LoraValFmt), t.pr.val) : "";
+            text_wrapped(strf(tr(S::LoraProgressFmt), t.pr.step, t.pr.steps, t.pr.loss, val.c_str(), t.pr.tok_s).c_str(), C::text, F.small);
+        }
+        if (t.loss.size() > 1) {
+            gap(2);
+            ImGui::PlotLines("##tloss", t.loss.data(), (int)t.loss.size(), 0, nullptr, FLT_MAX, FLT_MAX,
+                             ImVec2(ImGui::GetContentRegionAvail().x, px(60)));
+        }
+        if (!t.msg.empty()) {
+            gap(2);
+            if (t.ok) text_wrapped(strf(tr(S::LoraSaved), t.msg.c_str()).c_str(), C::good, F.small);
+            else text_wrapped(strf(tr(S::Failed), t.msg.c_str()).c_str(), C::bad, F.small);
+        }
+    }
+    end_card();
 }
 
 void page_chat() {
@@ -4646,14 +5003,16 @@ void page_chat() {
     const char* clear_label = tr(S::ChatClear);
     const char* serve_label = tr(S::ServeApi);
     header(tr(S::NavChat), tr(S::ChatHelp), button_width(clear_label, IC_PLUS) + button_width(serve_label, IC_GLOBE) + px(8));
-    ImGui::BeginDisabled(!c.model || !chat_ready() || c.path.empty());
+    ImGui::BeginDisabled(!chat_ready() || c.path.empty());
     if (button(serve_label, BTN_SECONDARY, IC_GLOBE)) {
         std::string cli = (upath(exe_dir()) / "kor-cli").u8string();
 #if defined(_WIN32)
         cli += ".exe";
 #endif
-        run_in_terminal(upath(c.path).parent_path().u8string(),
-                        {cli, "serve", c.path, "--port", "8080", "--q-tag", c.q_tag, "--a-tag", c.a_tag});
+        std::vector<std::string> args = {cli, "serve", c.path, "--port", "8080"};
+        if (c.llm && !c.lora.empty()) args.insert(args.end(), {"--lora", c.lora});
+        if (!c.llm) args.insert(args.end(), {"--q-tag", c.q_tag, "--a-tag", c.a_tag});
+        run_in_terminal(upath(c.path).parent_path().u8string(), args);
     }
     ImGui::EndDisabled();
     tooltip(tr(S::ServeApiHelp));
@@ -4672,7 +5031,7 @@ void page_chat() {
     chat_model_list();
     gap();
 
-    if (!c.model) {
+    if (!c.model && !c.llm) {
         empty_state(IC_CHATS, nullptr, tr(S::ChatNoModel));
         return;
     }
@@ -4682,27 +5041,54 @@ void page_chat() {
     }
 
     // ---- model line and settings
-    std::string sub = strf(tr(S::ChatModelFmt), fmt_count((double)c.model->param_count(false)).c_str(), c.model->spec.ctx);
+    std::string sub = c.llm ? strf(tr(S::ChatGgufFmt), fmt_count((double)c.llm->n_params).c_str(), c.llm->quant.c_str(),
+                                   c.llm->chat_format().c_str(), c.llm->ctx)
+                            : strf(tr(S::ChatModelFmt), fmt_count((double)c.model->param_count(false)).c_str(), c.model->spec.ctx);
+    if (c.llm && !c.lora.empty()) sub += "   \xC2\xB7   LoRA";
     std::string summary = c.name + "   \xC2\xB7   " + sub;
     if (begin_collapsible_card("chatcfg", tr(S::Settings), &c.settings_open, summary.c_str())) {
         float lw = std::min(px(220), ImGui::GetContentRegionAvail().x * 0.4f);
         field_label(tr(S::Temperature), lw);
-        slider_float("##ctemp", &c.temperature, 0.f, 1.5f);
+        slider_float("##ctemp", &c.sampling.temperature, 0.f, 1.5f);
+        field_label(tr(S::TopP), lw, tr(S::TopPHelp));
+        slider_float("##ctopp", &c.sampling.top_p, 0.1f, 1.f, "%.2f");
+        field_label(tr(S::TopK), lw, tr(S::TopKHelp));
+        slider_int("##ctopk", &c.sampling.top_k, 0, 200, c.sampling.top_k ? "%d" : tr(S::TopKAll));
+        field_label(tr(S::RepeatPenalty), lw, tr(S::RepeatPenaltyHelp));
+        slider_float("##crep", &c.sampling.repeat_penalty, 1.f, 2.f, "%.2f");
         field_label(tr(S::ChatMaxLen), lw);
-        slider_int("##clen", &c.max_len, 10, 1000);
-        field_label(tr(S::ChatTags), lw, tr(S::ChatTagsHelp));
-        float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
-        ImGui::SetNextItemWidth(half);
-        ImGui::InputText("##cq", c.q_tag, sizeof c.q_tag);
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(-FLT_MIN);
-        ImGui::InputText("##ca", c.a_tag, sizeof c.a_tag);
+        slider_int("##clen", &c.max_len, 10, c.llm ? 4000 : 1000);
+        if (c.llm) {
+            field_label(tr(S::ChatSystem), lw, tr(S::ChatSystemHelp));
+            ImGui::InputTextMultiline("##csys", c.system, sizeof c.system, ImVec2(-FLT_MIN, ImGui::GetFrameHeight() * 2.2f));
+        } else {
+            field_label(tr(S::ChatTags), lw, tr(S::ChatTagsHelp));
+            float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+            ImGui::SetNextItemWidth(half);
+            ImGui::InputText("##cq", c.q_tag, sizeof c.q_tag);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            ImGui::InputText("##ca", c.a_tag, sizeof c.a_tag);
+        }
         gap(2);
         checkbox(tr(S::ChatMemory), &c.memory);
         tooltip(tr(S::ChatMemoryHelp));
+        if (!c.llm && gpu_probe().found) {
+            ImGui::SameLine(0, px(28));
+            checkbox(tr(S::ChatGpu), &c.gpu);
+            tooltip(tr(S::ChatGpuHelp));
+        }
     }
     end_card();
     gap();
+    if (c.llm) {
+        chat_lora_card();
+        gap();
+        if (c.tune.running) {
+            banner(tr(S::LoraBusy), C::warn, IC_INFO);
+            gap();
+        }
+    }
 
     // ---- conversation
     float input_h = ImGui::GetFrameHeight() + px(8);
@@ -5685,6 +6071,7 @@ void init(float ui_scale) {
         else if (key == "fold") A.sidebar_folded = value == "1";
         else if (key == "update_check") A.update_check = value != "0";
         else if (key == "gpu") A.use_gpu = value == "1";
+        else if (key == "recompute") A.recompute = value == "1";
     }
     set_language(lang);
     const char* shown_user = std::getenv("KOR_USER");
@@ -5701,6 +6088,7 @@ void shutdown() {
     A.runner.cancel();
     A.trainer.stop();  // an unfinished run saves itself here
     chat_stop();
+    tune_stop();
     stop_media_gen();
     stop_sound();
     if (!A.save_settings) return;
@@ -5716,6 +6104,7 @@ void shutdown() {
     out << "fold " << (A.sidebar_folded ? 1 : 0) << "\n";
     out << "update_check " << (A.update_check ? 1 : 0) << "\n";
     out << "gpu " << (A.use_gpu ? 1 : 0) << "\n";
+    out << "recompute " << (A.recompute ? 1 : 0) << "\n";
     for (auto& kv : A.saved_args) {
         auto p = std::find_if(A.plugins.begin(), A.plugins.end(), [&](const Plugin& x) { return x.file == kv.first; });
         if (p != A.plugins.end() && p->args == kv.second) continue;  // still the default
@@ -5771,6 +6160,8 @@ bool save_project_to(const char* dir) {
 }
 
 void chat_say(const char* text) { chat_send(text); }
+
+void chat_show_lora() { A.chat.tune.open = true; }
 
 void generate_media() {
     if (A.model && A.model->spec.kind == MODEL_GPT && A.model->spec.media != MEDIA_TEXT) start_media_gen();

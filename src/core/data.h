@@ -107,6 +107,10 @@ struct Dataset {
     void sample(Batch& b, int B, int T, Rng& rng, bool val, const SampleOpts& opts = SampleOpts()) const;
     // Dialogue tags as token ids (empty when the data is not dialogue).
     bool tag_ids(std::vector<int>& q, std::vector<int>& a, int& newline) const;
+    // Puts `block` (encoded with the vocabulary; characters it lacks are
+    // dropped) in front of the training text, repeated so it makes up about
+    // `share` of it. Returns how many times it was added.
+    int add_training_text(const std::string& block, double share);
 
 private:
     void split_text();
@@ -120,6 +124,18 @@ Probe make_probe(const std::string& question, const std::string& expected, const
 std::vector<Probe> parse_tests(const std::string& text, const std::string& q_tag, const std::string& a_tag);
 // The inverse of parse_tests() for a list of question/answer pairs.
 std::string format_tests(const std::vector<std::pair<std::string, std::string>>& pairs);
+
+enum TextLang { LANG_TEXT_EN = 0, LANG_TEXT_TR = 1, LANG_TEXT_RU = 2 };
+// A guess at the language of a text from its letters (Turkish and Cyrillic
+// ones), read from its first megabyte.
+int text_language(const std::string& text);
+// The distinct characters of a text.
+std::vector<std::string> text_chars(const std::string& text);
+// Dialogue lines that teach a model its name, and who made it when `maker`
+// is not empty: "What is your name?" and the like with their answers, in
+// `lang` (TextLang), written with the dialogue tags.
+std::string identity_dialogue(const std::string& name, const std::string& maker, const std::string& q_tag,
+                              const std::string& a_tag, int lang);
 
 // Writes a small synthetic 3-class spiral dataset (CSV) for demos.
 bool write_spiral_csv(const std::string& path, int per_class = 300);

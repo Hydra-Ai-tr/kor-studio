@@ -76,8 +76,16 @@ code a readable reference for how training actually works.
   batches that don't fit run in parts. An 85-million-parameter model trains on a 4 GB laptop
   GPU. At the start one step of your data runs on both and the results are compared; when the
   card is missing or disagrees, training simply stays on the CPU.
-- **Chat page.** Finished models are saved automatically; pick any `.kor` model and talk to it,
-  with temperature, answer length and conversation memory settings.
+- **Ready-made GGUF models.** Open a Llama, Qwen2, SmolLM or Mistral `.gguf` file from
+  Hugging Face (2- to 16-bit weights), chat with it on the CPU, serve it as an API, and fine-tune
+  it with LoRA on its frozen 4-bit weights. Adapters are saved in the llama.cpp format.
+- **Modern transformer.** New text models use RMSNorm, rotary positions and SwiGLU, like Llama;
+  the GPT-2 layout is one switch away. Generation can run on the GPU, and `--recompute` trades
+  extra computation for less activation memory.
+- **Chat page.** Finished models are saved automatically; pick any `.kor` or `.gguf` model and
+  talk to it, with temperature, top-k, top-p, repeat penalty, answer length, system prompt and
+  conversation memory settings. Give your model a name, and with dialogue data it learns to
+  tell it.
 - **Local OpenAI-compatible API.** `kor-cli serve` (or *Serve as API* on the chat page) offers a
   model at `http://127.0.0.1:8080/v1`, so tools written for the OpenAI API can use it.
 - **Update notice.** The app tells you when a new release is out (can be turned off in the
@@ -253,13 +261,17 @@ kor-cli data clean chats.txt                               # tidied copy: chats-
 kor-cli serve chat.kor --port 8080                         # OpenAI-compatible API
 kor-cli gpu                                                # check and time the graphics card against the CPU
 kor-cli train big.txt --gpu --out llm.kor                  # train on the graphics card
+kor-cli gguf chat SmolLM2-135M-Instruct-Q4_K_M.gguf        # chat with a ready-made model
+kor-cli gguf lora model.gguf chats.txt --out my.gguf       # LoRA adapter on the frozen model
+kor-cli serve model.gguf --lora my.gguf                    # the model and its adapter as an API
 ```
 
 Training options: `--steps N`, `--patience N` (early stopping), `--tests file`,
 `--target 0..1` (stop at this pass rate), `--log file`, `--out file`,
 `--text` / `--table` / `--images` / `--audio`, `--subword N`, `--size N` / `--colors N` /
 `--no-mirror` (images), `--rate N` (sound), `--from model.kor [--lora R]` (fine-tuning),
-`--dim/--layers/--heads/--ctx` (model size), `--lr`, `--batch`, `--threads`, `--gpu`, `--seed`, `--wd`,
+`--dim/--layers/--heads/--ctx` (model size), `--arch modern|classic`, `--recompute`,
+`--name NAME` / `--maker WHO`, `--lr`, `--batch`, `--threads`, `--gpu`, `--seed`, `--wd`,
 `--align 0..1`, `--prompt-weight 0..1`, `--dropout X`, `--ema 0.999`,
 `--resume` / `--fresh` / `--checkpoint file` / `--checkpoint-every 60` / `--no-checkpoint`
 (autosave, by default to `<out>.autosave`),
@@ -277,6 +289,21 @@ to the network, where `--api-key KEY` should be used as well.
 curl http://127.0.0.1:8080/v1/chat/completions -H "Content-Type: application/json" \
   -d '{"messages":[{"role":"user","content":"Merhaba, nasılsın?"}],"max_tokens":80}'
 ```
+
+### Ready-made GGUF models
+
+`kor-cli gguf info|chat|generate model.gguf` and the chat page open
+[GGUF](https://github.com/ggml-org/ggml/blob/master/docs/gguf.md) files, the format of
+llama.cpp. Supported are the `llama` and `qwen2` architectures (Llama 2/3, Mistral, SmolLM,
+Qwen2/2.5) with F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0 and Q2_K–Q6_K weights. The weights
+stay quantized and the file is memory-mapped; the tokenizer (byte-level BPE or SentencePiece)
+and the chat format (ChatML, Llama 3, Mistral, Phi-3, Zephyr, Gemma) come from the file.
+SmolLM2-135M-Instruct (Q4_K_M) writes about 55–60 tokens per second on an i5-12500H.
+
+`kor-cli gguf lora model.gguf data.txt` trains a LoRA adapter (`--rank 8`, `--mlp` for the
+feed-forward layers too) while the base stays frozen; with dialogue data only the answers are
+trained. The *Fine-tuning (LoRA)* card on the chat page does the same. Adapters are saved as
+llama.cpp-compatible `.gguf` files and loaded with `--lora` by `gguf chat` and `serve`.
 
 ### Dataset tools
 
@@ -306,8 +333,9 @@ stays on the CPU. Any GPU error switches back to the CPU.
 
 With the GPU turned on, the automatic plan sizes text models to the GPU memory, the RAM and the
 amount of text: about 14M, 38M, 86M or 200M parameters. An 85,567,565-parameter model (768 wide,
-12 layers, context 512) trains on a 4 GB RTX 3050 Ti Laptop GPU. Generation and question tests
-still run on the CPU, which is slow for models of this size.
+12 layers, context 512) trains on a 4 GB RTX 3050 Ti Laptop GPU. `generate --gpu`, `serve --gpu`
+and the switch on the chat page keep the weights and the key/value cache on the card for text
+generation too; question tests still run on the CPU.
 
 `kor-cli gpu` checks every GPU kernel against the CPU (attention against a plain
 double-precision version, dropout and loss weights against finite differences) and times one
@@ -367,6 +395,9 @@ cmake --build build
 | AdamW with warm-up and cosine decay | Stable training without hand-tuning |
 | Runtime SIMD dispatch | AVX2/FMA kernels when available, portable code otherwise |
 | Optional OpenCL training | Whole text-model steps on the GPU, checked against the CPU |
+| Gradient checkpointing | Blocks run again in the backward pass instead of storing activations |
+| Quantized GGUF inference | 2- to 8-bit weights decoded block by block, never fully expanded |
+| LoRA on a frozen 4-bit base | Fine-tune ready-made models with a fraction of a percent of the weights |
 | Half-precision checkpoints | Saved models take half the disk space |
 | Zero-dependency engine | The trainer is one small static library |
 
@@ -400,8 +431,8 @@ scripts/     release packaging
 
 ## Roadmap
 
-- Generation on the GPU, and int8 quantized export
-- Load pretrained GGUF models (Qwen, Llama) and fine-tune them with LoRA on a 4-bit base
+- GGUF models on the GPU, and more architectures (Phi, Gemma)
+- Export your own models to GGUF, with int8 quantization
 - Larger image and sound models (patches instead of single pixels and samples)
 - Convolutional layers
 - More dataset tools: splitting and augmentation
