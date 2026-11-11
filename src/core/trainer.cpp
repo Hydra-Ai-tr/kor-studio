@@ -501,6 +501,46 @@ void Trainer::run() {
         e.text = K().name;
         emit(e);
         if (cfg.gpu) {
+            // Text models: one step of this data on both, before trusting the GPU.
+            if (gpu_on && text && model.spec.lora_rank == 0) {
+                Batch cb;
+                Rng crng(4242);
+                data.sample(cb, B, T, crng, false);
+                model.set_dropout(0.f);
+                model.use_gpu = false;
+                model.zero_grad();
+                float l_cpu = model.step(cb, true, 1.f);
+                std::vector<std::vector<float>> ref;
+                for (Param* p : ps) ref.push_back(p->g.v);
+                model.use_gpu = true;
+                model.zero_grad();
+                float l_gpu = model.step(cb, true, 1.f);
+                double worst = 0;
+                for (size_t i = 0; i < ps.size(); ++i) {
+                    double diff = 0, norm = 0;
+                    for (size_t k = 0; k < ref[i].size(); ++k) {
+                        double a = ref[i][k], b = ps[i]->g.v[k];
+                        diff += (a - b) * (a - b);
+                        norm += a * a;
+                    }
+                    worst = std::max(worst, std::sqrt(diff / std::max(norm, 1e-30)));
+                }
+                model.zero_grad();
+                model.set_dropout(cfg.dropout);
+                char b[160];
+                if (!model.last_step_on_gpu) {
+                    gpu_msg += "; this model does not fit in GPU memory, so only parts of it run there";
+                } else if (worst < 1e-3 && std::fabs(l_cpu - l_gpu) < 1e-3f * (1.f + std::fabs(l_cpu))) {
+                    std::snprintf(b, sizeof b, "; checked against the CPU on this data (difference %.0e)", worst);
+                    gpu_msg += b;
+                } else {
+                    model.use_gpu = false;
+                    std::snprintf(b, sizeof b, "; the GPU results differ from the CPU (%.0e), the model trains on the CPU", worst);
+                    gpu_msg += b;
+                    gpu_use(false);
+                    gpu_on = false;
+                }
+            }
             TrainEvent g;
             g.kind = EV_HOOK_LOG;
             g.source = "GPU";

@@ -74,6 +74,9 @@ public:
     // Forward pass, loss, and (if train) backward pass that ACCUMULATES
     // gradients scaled by `scale`. Returns the mean loss.
     float step(const Batch& b, bool train, float scale, int* correct = nullptr);
+    // Text models run step() entirely on the GPU while gpu_use() is on, unless this is false.
+    bool use_gpu = true;
+    bool last_step_on_gpu = false;
     void zero_grad();
     std::vector<Param*> params();
     size_t param_count(bool trainable_only = false);

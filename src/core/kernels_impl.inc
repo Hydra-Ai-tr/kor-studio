@@ -76,7 +76,7 @@ void mm_tb(const float* A, const float* B, float* C, int m, int n, int k) {
 }
 
 extern const Kernels table;
-const Kernels table = {KOR_KNAME, mm, mm_ta, mm_tb, dot, axpy};
+const Kernels table = {KOR_KNAME, mm, mm_ta, mm_tb, dot, axpy, nullptr, nullptr};
 
 }  // namespace KOR_KNS
 }  // namespace kor

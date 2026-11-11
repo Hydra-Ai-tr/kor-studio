@@ -13,6 +13,12 @@ struct Kernels {
     void (*mm_tb)(const float* A, const float* B, float* C, int m, int n, int k);
     float (*dot)(const float* a, const float* b, int n);
     void (*axpy)(float a, const float* x, float* y, int n);  // y += a * x
+    // Optional causal self-attention on an accelerator (null on the CPU). qkv holds
+    // [B*T x 3C] rows (queries, keys, values; C = H * hd). attn_fwd writes
+    // out [B*T x C]; attn_bwd turns dout [B*T x C] into dqkv [B*T x 3C].
+    // Both overwrite their result and return false when the caller must use the CPU.
+    bool (*attn_fwd)(const float* qkv, float* out, int B, int T, int H, int hd);
+    bool (*attn_bwd)(const float* qkv, const float* dout, float* dqkv, int B, int T, int H, int hd);
 };
 
 // The kernels in use: the fastest CPU set, or the GPU set while gpu_use() is on.

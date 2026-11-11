@@ -130,10 +130,11 @@ int main(int argc_ansi, char** argv_ansi) {
     //   --project <folder or project.korproj>  --save-project <folder> (saves the loaded data and model there)
     //   --settings (opens the settings window)  --check-updates (asks GitHub for the latest release)
     //   --clean (opens the data cleaning window for the loaded text)
+    //   --steps N  --gpu (training of this session: number of steps, train on the graphics card)
     // Screenshot runs leave the settings file unchanged.
     std::string shot, data, record, model, chat, project, save_project;
     std::vector<const char*> skills, says;
-    int page = -1, lang = -1, tab = -1, width = 1320, height = 820;
+    int page = -1, lang = -1, tab = -1, width = 1320, height = 820, steps = 0, gpu = -1;
     bool train = false, use_skills = false, bottom = false, community = false, generate = false;
     bool settings = false, check_updates = false, clean = false;
     double delay = 1.0, every = 0.5;
@@ -160,6 +161,8 @@ int main(int argc_ansi, char** argv_ansi) {
         else if (!std::strcmp(argv[i], "--settings")) settings = true;
         else if (!std::strcmp(argv[i], "--check-updates")) check_updates = true;
         else if (!std::strcmp(argv[i], "--clean")) clean = true;
+        else if (!std::strcmp(argv[i], "--steps")) steps = std::atoi(next());
+        else if (!std::strcmp(argv[i], "--gpu")) gpu = 1;
         else if (!std::strcmp(argv[i], "--lang")) {
             std::string l = next();
             lang = l == "tr" ? LANG_TR : l == "ru" ? LANG_RU : LANG_EN;
@@ -216,6 +219,7 @@ int main(int argc_ansi, char** argv_ansi) {
     if (generate) app::generate_media();
     if (!save_project.empty() && !app::save_project_to(save_project.c_str()))
         std::fprintf(stderr, "Kor Studio: cannot save the project to %s\n", save_project.c_str());
+    if (steps > 0 || gpu >= 0) app::set_train_options(steps, gpu);
     if (train) app::start_training();
     if (!chat.empty()) {
         app::chat_load(chat.c_str());

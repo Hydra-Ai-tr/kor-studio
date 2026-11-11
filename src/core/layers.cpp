@@ -291,6 +291,14 @@ Attention::Attention(int dim, int heads, const std::string& name, Rng& rng, floa
 void Attention::forward(const Tensor& x, Tensor& y, int B_, int T_) {
     B = B_; T = T_;
     qkv.forward(x, q3, true);
+    const Kernels& k = K();
+    ho.resize_noinit(B * T, C);
+    on_gpu = k.attn_fwd && k.attn_fwd(q3.data(), ho.data(), B, T, H, hd);
+    if (!on_gpu) cpu_forward();
+    proj.forward(ho, y, true);
+}
+
+void Attention::cpu_forward() {
     ho.resize(B * T, C);
     att.assign((size_t)B * H * T * T, 0.f);
     const Kernels& k = K();
@@ -321,7 +329,6 @@ void Attention::forward(const Tensor& x, Tensor& y, int B_, int T_) {
             }
         }
     });
-    proj.forward(ho, y, true);
 }
 
 void Attention::step(const Tensor& x, Tensor& y, Tensor& kv, int pos) {
@@ -352,8 +359,19 @@ void Attention::step(const Tensor& x, Tensor& y, Tensor& kv, int pos) {
 
 void Attention::backward(const Tensor& dy, Tensor& dx) {
     proj.backward(dy, dho);
-    dq3.resize(B * T, 3 * C);
     const Kernels& k = K();
+    if (on_gpu && k.attn_bwd) {
+        dq3.resize_noinit(B * T, 3 * C);
+        if (k.attn_bwd(q3.data(), dho.data(), dq3.data(), B, T, H, hd)) {
+            qkv.backward(dq3, dx);
+            return;
+        }
+    }
+    if (on_gpu) {  // the GPU kept no attention weights: recompute them
+        cpu_forward();
+        on_gpu = false;
+    }
+    dq3.resize(B * T, 3 * C);
     float scale = 1.f / std::sqrt((float)hd);
     parallel_for(B * H, [&](int s, int e) {
         std::vector<float> datt(T);

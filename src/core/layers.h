@@ -109,7 +109,9 @@ struct Attention {
     void step(const Tensor& x, Tensor& y, Tensor& kv, int pos);
 
 private:
+    void cpu_forward();  // ho and att from q3
     int B = 0, T = 0;
+    bool on_gpu = false;  // the last forward ran on the GPU (att was not filled)
     Tensor q3, ho, dho, dq3;
     std::vector<float> att;
 };

@@ -5749,6 +5749,15 @@ void generate_media() {
 
 void start_training() { begin_training(); }
 
+void set_train_options(int steps, int gpu) {
+    if (steps > 0) {
+        A.cfg.steps = steps;
+        A.cfg.probe_every = std::max(1, steps / 10);
+        if (A.cfg.eval_every > 0) A.cfg.eval_every = std::max(1, std::min(A.cfg.eval_every, steps / 10));
+    }
+    if (gpu >= 0) A.use_gpu = gpu != 0;
+}
+
 void set_train_tab(int tab) { A.train_tab = std::max(0, std::min(4, tab)); }
 
 void use_skills_for_session(const char* const* files, int n) {

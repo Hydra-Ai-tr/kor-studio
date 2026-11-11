@@ -1,11 +1,11 @@
 ; Kor Studio installer (Inno Setup 6). Built by scripts\package.ps1, which
 ; passes the version and the packed release folder:
-;   iscc /DAppVersion=0.7.0 /DSourceDir=..\build\release\kor-studio-0.7.0-windows-x64 installer\kor-studio.iss
+;   iscc /DAppVersion=0.7.1 /DSourceDir=..\build\release\kor-studio-0.7.1-windows-x64 installer\kor-studio.iss
 ; Installs for the current user without administrator rights; the setup
 ; offers an all-users install too.
 
 #ifndef AppVersion
-  #define AppVersion "0.7.0"
+  #define AppVersion "0.7.1"
 #endif
 #ifndef SourceDir
   #define SourceDir "..\build\release\kor-studio-" + AppVersion + "-windows-x64"

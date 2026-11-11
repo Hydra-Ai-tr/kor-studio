@@ -71,9 +71,10 @@ code a readable reference for how training actually works.
   `prompt`/`completion`) as question-answer text, and clean a text before training: tidy spaces,
   drop empty lines, repeated question-answer pairs and questions without an answer. The tool
   shows what will change before it writes a cleaned copy; your file stays as it is.
-- **Graphics card (experimental).** Text models can run their large matrix products on an
-  OpenCL GPU. The results are checked against the CPU and both are timed at the start; when the
-  card is missing, wrong or slower, training simply stays on the CPU.
+- **Graphics card training.** Text models can run their whole forward and backward pass on an
+  OpenCL GPU, several times faster than on the CPU. At the start one step of your data runs on
+  both and the results are compared; when the card is missing, disagrees or is too small,
+  training simply stays on the CPU.
 - **Chat page.** Finished models are saved automatically; pick any `.kor` model and talk to it,
   with temperature, answer length and conversation memory settings.
 - **Local OpenAI-compatible API.** `kor-cli serve` (or *Serve as API* on the chat page) offers a
@@ -249,8 +250,8 @@ kor-cli generate snd.kor --seconds 3 --out new.wav
 kor-cli data import chats.jsonl --out chats.txt            # JSON Lines chat data to dialogue text
 kor-cli data clean chats.txt                               # tidied copy: chats-clean.txt
 kor-cli serve chat.kor --port 8080                         # OpenAI-compatible API
-kor-cli gpu                                                # check the graphics card against the CPU
-kor-cli train big.txt --gpu --out llm.kor                  # large products on the GPU (experimental)
+kor-cli gpu                                                # check and time the graphics card against the CPU
+kor-cli train big.txt --gpu --out llm.kor                  # train on the graphics card
 ```
 
 Training options: `--steps N`, `--patience N` (early stopping), `--tests file`,
@@ -289,16 +290,29 @@ app, loading a `.jsonl` file imports it the same way.
 off). In dialogue data it removes repeated question-answer pairs and lines that lost their
 partner; in plain text it removes repeated lines of 24 characters or more.
 
-### Graphics card (experimental)
+### Graphics card
 
-With `--gpu` (or *Graphics card* in the training settings) the large matrix products of the
-transformer run through OpenCL, which comes with the drivers of most graphics cards; nothing
-extra is installed. At the start the GPU results are compared with the CPU and both are timed;
-only products large enough to gain go to the GPU, and any GPU error switches back to the CPU.
-Attention, the optimizer and everything else stay on the CPU, so the gain depends on the model:
-large models gain the most, tiny ones none. `kor-cli gpu` prints the comparison. On an RTX 3050
-Ti Laptop GPU, training-sized products (2048 x 256 x 768) ran 5 to 9 times faster than on the
-CPU, copies included.
+With `--gpu` (or *Train on the graphics card* in the training settings) a text model runs its
+whole training step on the GPU through OpenCL, which comes with the drivers of most graphics
+cards; nothing extra is installed. Embeddings, layer norms, attention, the MLP, dropout and the
+loss all run on the card and the activations never leave it; only the weights go in and the
+gradients come back each step, and the optimizer stays on the CPU. At the start one step of
+your data runs on both and the results are compared. A model that does not fit in GPU memory
+sends only its attention and large products to the card; LoRA fine-tuning and table models do
+the same. Any GPU error switches back to the CPU.
+
+`kor-cli gpu` checks every GPU kernel against the CPU (attention against a plain
+double-precision version, dropout and loss weights against finite differences) and times one
+training step on both. On an RTX 3050 Ti Laptop GPU against all 8 threads of an i5-12500H
+(AVX2), with the same loss and gradients within 2e-6:
+
+| Text model | CPU step | GPU step | Speed-up |
+|---|---|---|---|
+| 0.17M parameters (dim 64, 3 layers, context 112, batch 32) | 95 ms | 27 ms | 3.5x |
+| 0.83M parameters (dim 128, 4 layers, context 128, batch 32) | 350–580 ms | 46 ms | 7–12x |
+| 4.85M parameters (dim 256, 6 layers, context 256, batch 16) | 2.1–2.7 s | 0.13 s | 17–20x |
+
+Larger models gain more. The CPU times vary with the laptop's load.
 
 ### How images and sound are learned
 
@@ -344,7 +358,7 @@ cmake --build build
 | LoRA fine-tuning | Adapt a trained model by training a small fraction of its weights |
 | AdamW with warm-up and cosine decay | Stable training without hand-tuning |
 | Runtime SIMD dispatch | AVX2/FMA kernels when available, portable code otherwise |
-| Optional OpenCL offload | Large matrix products on the GPU, checked and timed against the CPU |
+| Optional OpenCL training | Whole text-model steps on the GPU, checked against the CPU |
 | Half-precision checkpoints | Saved models take half the disk space |
 | Zero-dependency engine | The trainer is one small static library |
 
@@ -354,8 +368,8 @@ Kor Studio trains mainly on the **CPU** and is designed for small models: tabula
 transformers up to a few million parameters, which train in seconds to minutes on a laptop.
 Image and sound models are slower: every pixel or sample is a token, so expect tens of minutes
 to hours for good results. It is a tool for learning, experimentation and small, focused models. It will not
-train a large language model. The GPU support is experimental and covers only the large matrix
-products.
+train a large language model. GPU training covers text (and image and sound) models; it needs
+an OpenCL driver and enough GPU memory for the activations of one batch.
 
 ## Project layout
 
@@ -376,7 +390,7 @@ scripts/     release packaging
 
 ## Roadmap
 
-- Full GPU training (attention and optimizer on the GPU) and int8 quantized export
+- Optimizer and generation on the GPU, and int8 quantized export
 - Larger image and sound models (patches instead of single pixels and samples)
 - Convolutional layers
 - More dataset tools: splitting and augmentation

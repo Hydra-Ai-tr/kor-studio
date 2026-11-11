@@ -19,6 +19,8 @@ bool save_project_to(const char* utf8_dir);  // saves the current work there as 
 void chat_say(const char* utf8_text);    // sends a chat message
 void generate_media();                   // playground: new pictures or sound from the model
 void start_training();
+// Scripted runs: number of steps (> 0) and the graphics card (0 off, 1 on, -1 as set).
+void set_train_options(int steps, int gpu);
 void set_train_tab(int tab);  // 0 chart, 1 log, 2 question tests, 3 skills
 // Scripted runs: use exactly these skills (plugin file names) and leave the settings file alone.
 void use_skills_for_session(const char* const* files, int n);

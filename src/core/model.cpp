@@ -1,5 +1,6 @@
 #include "model.h"
 
+#include "gpu.h"
 #include "media.h"
 
 #include <algorithm>
@@ -311,6 +312,18 @@ void Model::forward(const Batch& b, bool train) {
 const Tensor& Model::output() const { return spec.kind == MODEL_GPT ? logits : acts.back(); }
 
 float Model::step(const Batch& b, bool train, float scale, int* correct) {
+    last_step_on_gpu = false;
+    if (spec.kind == MODEL_GPT && spec.lora_rank == 0 && use_gpu && gpu_active() && (int)b.ids.size() == b.B * b.T) {
+        GpuGpt g;
+        g.vocab = head->out; g.ctx = spec.ctx; g.dim = spec.dim; g.heads = spec.heads; g.nlayer = spec.nlayer;
+        g.params = params();
+        const float* w = b.w.size() == b.tgt.size() && !b.w.empty() ? b.w.data() : nullptr;
+        float p = blocks.empty() ? 0.f : blocks[0]->drop1.p, loss = 0;
+        if (gpu_gpt_step(g, b.ids.data(), b.tgt.data(), w, b.B, b.T, train, p, rng.next(), scale, &loss, correct)) {
+            last_step_on_gpu = true;
+            return loss;
+        }
+    }
     forward(b, train);
     const Tensor& out = output();
     float loss;

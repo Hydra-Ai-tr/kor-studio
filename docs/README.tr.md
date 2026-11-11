@@ -35,9 +35,10 @@ işlemcide eğitilir.
   `prompt`/`completion`) soru-cevap metni olarak içe aktar; eğitimden önce metni temizle:
   boşlukları düzelt, boş satırları, tekrarlanan soru-cevapları ve cevapsız soruları kaldır. Araç,
   temiz kopyayı yazmadan önce neyin değişeceğini gösterir; asıl dosyan değişmez.
-- **Ekran kartı (deneysel)** – metin modelleri büyük matris çarpımlarını OpenCL ile ekran kartında
-  yapabilir. Başta sonuçlar işlemciyle karşılaştırılır ve ikisinin hızı ölçülür; kart yoksa,
-  hatalıysa ya da daha yavaşsa eğitim işlemcide kalır.
+- **Ekran kartında eğitim** – metin modellerinin ileri ve geri geçişinin tamamı OpenCL ile ekran
+  kartında çalışabilir; işlemciden birkaç kat hızlıdır. Başta verinden bir adım ikisinde de
+  çalıştırılıp sonuçlar karşılaştırılır; kart yoksa, farklı sonuç verirse ya da belleği yetmezse
+  eğitim işlemcide kalır.
 - **Sohbet** – eğitimi biten modeller otomatik kaydedilir; Sohbet sayfasında bir `.kor` modeli seç
   ve onunla konuşarak dene (sıcaklık, cevap uzunluğu, konuşmayı hatırlama ayarlarıyla).
 - **Yerel, OpenAI uyumlu API** – `kor-cli serve` (ya da Sohbet sayfasındaki *API olarak sun*)
@@ -76,7 +77,7 @@ işlemcide eğitilir.
 | LoRA ince ayar | Ağırlıkların çok küçük bir kısmını eğiterek eğitilmiş modeli uyarlama |
 | Yarı hassasiyetli kayıt | Kayıtlı modeller diskte yarı yer kaplar |
 | Çalışma anında SIMD seçimi | İşlemci destekliyorsa AVX2/FMA, desteklemiyorsa taşınabilir çekirdekler |
-| İsteğe bağlı OpenCL | Büyük matris çarpımları ekran kartında; işlemciyle karşılaştırılıp hızı ölçülerek |
+| İsteğe bağlı OpenCL eğitimi | Metin modelinin tüm eğitim adımı ekran kartında; işlemciyle karşılaştırılarak |
 
 ## İndir
 
@@ -96,10 +97,15 @@ Kor Studio eğitimi esas olarak **işlemcide** yapar. Küçük modeller içindir
 parametreye kadar transformer'lar; bunlar bir dizüstünde saniyeler ya da dakikalar içinde eğitilir.
 Resim ve ses modelleri daha yavaştır (her piksel ya da örnek bir parçadır); iyi sonuç için onlarca
 dakika ile saatler gerekir. Basit şekiller ve kısa melodiler bekle, fotoğraf ya da konuşma değil. ChatGPT boyutunda bir modeli dizüstünde eğitmez; bunu hiçbir program
-yapamaz. Ekran kartı desteği deneyseldir ve yalnızca büyük matris çarpımlarını kapsar: dikkat
-katmanı ve optimizer işlemcide kalır, bu yüzden kazanç modele bağlıdır. Bir RTX 3050 Ti Laptop
-GPU'da eğitim boyutundaki çarpımlar (2048 x 256 x 768), kopyalama dahil işlemciden 5-9 kat
-hızlı çalıştı; `kor-cli gpu` kendi bilgisayarındaki karşılaştırmayı yazar.
+yapamaz. `--gpu` ile (ya da eğitim ayarlarında *Ekran kartında eğit*) metin modelinin gömme,
+LayerNorm, dikkat, MLP, dropout ve kayıp hesabı ekran kartında çalışır; ara sonuçlar kartta
+kalır, her adımda yalnızca ağırlıklar gider ve gradyanlar döner, optimizer işlemcide kalır.
+Belleğe sığmayan modeller, LoRA ince ayarı ve tablo modelleri yalnızca dikkat katmanını ve büyük
+çarpımları karta gönderir. `kor-cli gpu` her GPU çekirdeğini işlemciyle karşılaştırır ve bir
+eğitim adımını ikisinde de ölçer. Bir RTX 3050 Ti Laptop GPU'da, i5-12500H'nin 8 iş parçacığına
+(AVX2) karşı, kayıp ve gradyanlar 2e-6 içinde aynıyken: 0,17M parametreli model 3,5 kat,
+0,83M parametreli 7-12 kat, 4,85M parametreli 17-20 kat hızlı çalıştı (adım 2,1-2,7 sn yerine
+0,13 sn). Model büyüdükçe kazanç artar.
 
 ## Derleme
 
@@ -137,8 +143,8 @@ kor-cli generate ses.kor --seconds 3 --out yeni.wav
 kor-cli data import sohbetler.jsonl --out sohbetler.txt   # JSON Lines sohbet verisi -> diyalog metni
 kor-cli data clean sohbetler.txt                          # temiz kopya: sohbetler-clean.txt
 kor-cli serve sohbet.kor --port 8080                      # OpenAI uyumlu API
-kor-cli gpu                                               # ekran kartını işlemciyle karşılaştır
-kor-cli train buyuk.txt --gpu --out llm.kor               # büyük çarpımlar ekran kartında (deneysel)
+kor-cli gpu                                               # ekran kartını işlemciyle karşılaştır ve ölç
+kor-cli train buyuk.txt --gpu --out llm.kor               # ekran kartında eğit
 ```
 
 **Yerel API.** `kor-cli serve model.kor`, `http://127.0.0.1:8080/v1` adresinde OpenAI'nin

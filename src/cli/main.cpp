@@ -829,11 +829,107 @@ static int data_tool(const std::vector<std::string>& a) {
     return 1;
 }
 
+// Dropout and per-row loss weights cannot be compared with the CPU (other masks),
+// so the GPU gradient is checked against finite differences of the GPU loss.
+static double gpt_numeric_check() {
+    ModelSpec s;
+    s.kind = MODEL_GPT;
+    s.vocab = 20; s.ctx = 24; s.dim = 32; s.heads = 4; s.nlayer = 2;
+    Model m(s, 5);
+    const int B = 3, T = 24;
+    Rng rng(11);
+    std::vector<int> ids, tgt;
+    std::vector<float> w;
+    for (int i = 0; i < B * T; ++i) { ids.push_back(rng.below(s.vocab)); tgt.push_back(rng.below(s.vocab)); w.push_back(0.2f + rng.uniform()); }
+    GpuGpt g;
+    g.vocab = s.vocab; g.ctx = s.ctx; g.dim = s.dim; g.heads = s.heads; g.nlayer = s.nlayer;
+    g.params = m.params();
+    // bigger weights than at the start, so every part has a clear gradient
+    for (Param* p : g.params)
+        for (float& x : p->w.v) x += rng.normal() * 0.3f;
+    auto loss_at = [&]() {
+        float l = 0;
+        m.zero_grad();
+        if (!gpu_gpt_step(g, ids.data(), tgt.data(), w.data(), B, T, true, 0.25f, 99, 1.f, &l, nullptr)) return std::nanf("");
+        return l;
+    };
+    loss_at();
+    std::vector<std::vector<float>> grads;
+    for (Param* p : g.params) grads.push_back(p->g.v);
+    double worst = 0;
+    for (size_t i = 0; i < g.params.size(); ++i) {
+        Param* p = g.params[i];
+        // the entry with the largest gradient of each parameter
+        size_t k = 0;
+        for (size_t q = 1; q < grads[i].size(); ++q)
+            if (std::fabs(grads[i][q]) > std::fabs(grads[i][k])) k = q;
+        if (std::fabs(grads[i][k]) < 1e-4f) continue;
+        float keep = p->w.v[k], h = 1e-2f;
+        p->w.v[k] = keep + h;
+        double lp = loss_at();
+        p->w.v[k] = keep - h;
+        double lm = loss_at();
+        p->w.v[k] = keep;
+        double num = (lp - lm) / (2 * h);
+        worst = std::max(worst, std::fabs(num - grads[i][k]) / (std::fabs(grads[i][k]) + 1e-3));
+    }
+    return worst;
+}
+
+// Times forward + backward of a text model on random tokens (no data, nothing saved).
+static void step_bench(int dim, int heads, int layers, int ctx, int batch, bool gpu_ok) {
+    ModelSpec s;
+    s.kind = MODEL_GPT;
+    s.vocab = 96; s.ctx = ctx; s.dim = dim; s.heads = heads; s.nlayer = layers;
+    Model m(s);
+    Batch b;
+    b.B = batch; b.T = ctx;
+    Rng rng(3);
+    for (int i = 0; i < batch * ctx; ++i) { b.ids.push_back(rng.below(s.vocab)); b.tgt.push_back(rng.below(s.vocab)); }
+    std::printf("dim %3d, %d layers, ctx %3d, batch %2d (%5.2fM params):", dim, layers, ctx, batch, m.param_count() / 1e6);
+    std::fflush(stdout);
+    double ms[2] = {0, 0};
+    float loss[2] = {0, 0};
+    std::vector<std::vector<float>> grads;
+    double worst = 0;
+    for (int g = 0; g < (gpu_ok ? 2 : 1); ++g) {
+        if (g == 1) gpu_use(true);
+        m.zero_grad();
+        loss[g] = m.step(b, true, 1.f);
+        // the gradients of both must agree
+        std::vector<Param*> ps = m.params();
+        for (size_t i = 0; i < ps.size(); ++i) {
+            if (g == 0) { grads.push_back(ps[i]->g.v); continue; }
+            double diff = 0, ref = 0;
+            for (size_t k = 0; k < grads[i].size(); ++k) {
+                diff += std::pow((double)grads[i][k] - ps[i]->g.v[k], 2);
+                ref += std::pow((double)grads[i][k], 2);
+            }
+            worst = std::max(worst, std::sqrt(diff / std::max(ref, 1e-30)));
+        }
+        m.zero_grad();
+        auto t0 = std::chrono::steady_clock::now();
+        const int reps = 3;
+        for (int r = 0; r < reps; ++r) {
+            m.step(b, true, 1.f);
+            m.zero_grad();
+        }
+        ms[g] = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1000 / reps;
+        if (g == 1) gpu_use(false);
+        std::printf("  %s %7.1f ms", g ? "GPU" : "CPU", ms[g]);
+    }
+    if (gpu_ok)
+        std::printf("  %5.1fx faster  (loss %.5f / %.5f, gradients differ by %.1e)%s", ms[0] / ms[1], loss[0], loss[1], worst,
+                    worst < 1e-3 && std::fabs(loss[0] - loss[1]) < 1e-3f ? "" : "  WRONG");
+    std::printf("\n");
+}
+
 // kor-cli gpu: finds the OpenCL GPU, checks its products against the CPU and times both.
 static int gpu_check() {
     const GpuInfo& g = gpu_probe();
     if (!g.found) { std::printf("no usable GPU: %s\n", g.error.c_str()); return 1; }
     std::printf("GPU: %s (%s, %.1f GB, %s)\n", g.name.c_str(), g.vendor.c_str(), g.mem_gb, g.platform.c_str());
+    set_threads(recommended_threads(detect_system()));
     const Kernels& cpu = cpu_kernels();
     Rng rng(7);
     const char* names[] = {"mm   ", "mm_ta", "mm_tb"};
@@ -879,11 +975,31 @@ static int gpu_check() {
             std::snprintf(size, sizeof size, "%dx%dx%d", x, y, z);
             std::printf("%-6s %-16s %10.2f %10.2f %8.2fx %10.1e%s\n", names[v], size, tc, tg, tc / tg, err, ok ? "" : "  WRONG");
         }
+    // attention (forward + backward) against a plain double-precision version
+    const int ashapes[][4] = {{2, 77, 3, 8}, {3, 130, 4, 16}, {2, 64, 2, 32}};
+    for (const auto& s : ashapes) {
+        std::string err;
+        double e = gpu_attention_check(s[0], s[1], s[2], s[3], &err);
+        bool ok = e >= 0 && e < 1e-3;
+        all_ok = all_ok && ok;
+        if (e < 0) std::printf("attention B%d T%d H%d hd%d: GPU error: %s\n", s[0], s[1], s[2], s[3], err.c_str());
+        else std::printf("attention B%d T%d H%d hd%d: max error %.1e%s\n", s[0], s[1], s[2], s[3], e, ok ? "" : "  WRONG");
+    }
     std::string msg;
     bool on = gpu_use(true, &msg);
+    if (on) {
+        double e = gpt_numeric_check();
+        bool ok = e < 0.05;
+        all_ok = all_ok && ok;
+        std::printf("text model with dropout and loss weights: gradient vs finite differences %.1e%s\n", e, ok ? "" : "  WRONG");
+    }
     gpu_use(false);
     std::printf("\n%s: %s\n", all_ok ? "results match the CPU" : "RESULTS DIFFER FROM THE CPU", msg.c_str());
-    std::printf("training with --gpu %s\n", on ? "will use it for the large products" : "stays on the CPU");
+    std::printf("training with --gpu %s\n", on ? "will use the GPU" : "stays on the CPU");
+    std::printf("\none training step (forward + backward, random tokens):\n");
+    step_bench(64, 4, 3, 112, 32, on);
+    step_bench(128, 4, 4, 128, 32, on);
+    step_bench(256, 8, 6, 256, 16, on);
     return all_ok ? 0 : 1;
 }
 
