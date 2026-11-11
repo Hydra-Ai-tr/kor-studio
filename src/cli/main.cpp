@@ -6,8 +6,10 @@
 #include "../core/sysinfo.h"
 #include "../skills/skill.h"
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -31,6 +33,9 @@
 #endif
 
 using namespace kor;
+
+static std::atomic<bool> g_interrupt{false};
+static void on_interrupt(int) { g_interrupt = true; }
 
 // Command-line arguments as UTF-8 (on Windows argv uses the ANSI code page).
 static std::vector<std::string> utf8_args(int argc, char** argv) {
@@ -303,6 +308,68 @@ static int selftest() {
         std::printf("subword tokens: %zu pieces, %zu chars -> %zu tokens %s\n", v.size(), chars.size(), ids.size(), pass ? "OK" : "FAIL");
         if (!pass) ++fails;
     }
+    {   // crash-safe training: a run stopped halfway and resumed ends like an uninterrupted one
+        std::string text;
+        for (int i = 0; i < 120; ++i) text += "Kullanıcı: merhaba " + std::to_string(i % 7) + "\nAsistan: selam " + std::to_string(i % 5) + "\n";
+        std::string err, dpath = "kor_selftest_data.txt", ck = "kor_selftest_ckpt.kor";
+        { std::ofstream f(upath(dpath), std::ios::binary); f << text; }
+        Dataset data;
+        bool pass = data.load_text(dpath, &err);
+        std::remove(dpath.c_str());
+        struct StopAt : TrainHook {
+            Trainer* tr = nullptr;
+            int at = 0;
+            std::string name() const override { return "stop-at"; }
+            bool open(TrainControl&, std::string*) override { return true; }
+            bool wants(int k) const override { return k == HOOK_STEP; }
+            int step_every() const override { return at; }
+            void on_event(const HookInfo&, TrainControl&) override { tr->request_stop(); }
+        };
+        auto run = [&](bool interrupt, std::vector<float>& w_out) {
+            ModelSpec s;
+            s.kind = MODEL_GPT; s.vocab = (int)data.vocab.size(); s.ctx = 16; s.dim = 16; s.heads = 2; s.nlayer = 1;
+            auto m = std::make_shared<Model>(s);
+            m->vocab = data.vocab;
+            TrainConfig c;
+            c.steps = 40; c.batch = 4; c.eval_every = 10; c.ema = 0.9f; c.threads = 1;
+            Trainer tr;
+            auto finish = [&] {
+                while (tr.running()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                tr.stop();
+            };
+            if (interrupt) {
+                auto h = std::make_shared<StopAt>();
+                h->tr = &tr;
+                h->at = 20;
+                c.hooks.push_back(h);
+                c.checkpoint = ck;
+                if (!tr.start(m, &data, c)) return false;
+                finish();
+                if (!has_checkpoint(ck)) return false;
+                CheckpointInfo info;
+                if (!read_checkpoint(ck, info, &err) || info.step != 20) return false;
+                m = Model::load(ck, &err);
+                if (!m) return false;
+                c = info.cfg;
+                c.threads = 1;
+                c.checkpoint = ck;
+                c.resume = true;
+            }
+            if (!tr.start(m, &data, c)) return false;
+            finish();
+            if (tr.stats().state != TS_DONE || has_checkpoint(ck)) return false;
+            for (Param* p : m->params()) w_out.insert(w_out.end(), p->w.v.begin(), p->w.v.end());
+            return true;
+        };
+        std::vector<float> wa, wb;
+        pass = pass && run(false, wa) && run(true, wb) && wa.size() == wb.size();
+        float diff = 0;
+        for (size_t i = 0; pass && i < wa.size(); ++i) diff = std::max(diff, std::fabs(wa[i] - wb[i]));
+        pass = pass && diff < 1e-4f;
+        remove_checkpoint(ck);
+        std::printf("resume after stop: weight difference %.2g %s %s\n", diff, pass ? "OK" : "FAIL", err.c_str());
+        if (!pass) ++fails;
+    }
     {   // half-float conversion
         float vals[] = {0.f, 1.f, -2.5f, 0.1f, 65504.f, 1e-5f, 3.14159f};
         bool pass = true;
@@ -351,10 +418,32 @@ static int train(const std::vector<std::string>& a) {
         kind = (ext == ".csv" || ext == ".tsv") ? DATA_TABLE : DATA_TEXT;
     }
     std::string err;
+    // Crash safety: the run is saved every minute and continues with --resume.
+    bool use_ckpt = !has_flag(a, "--no-checkpoint");
+    std::string ckpt = flag(a, "--checkpoint");
+    if (ckpt.empty()) ckpt = (out.empty() ? std::string("kor-train") : out) + ".autosave";
+    CheckpointInfo info;
+    std::shared_ptr<Model> resumed;
+    if (use_ckpt && has_checkpoint(ckpt)) {
+        if (has_flag(a, "--resume")) {
+            if (!read_checkpoint(ckpt, info, &err)) { std::printf("error: %s: %s\n", ckpt.c_str(), err.c_str()); return 1; }
+            resumed = Model::load(ckpt, &err);
+            if (!resumed) { std::printf("error: %s: %s\n", ckpt.c_str(), err.c_str()); return 1; }
+            std::printf("resuming the saved training from step %d of %d (%s)\n", info.step, info.cfg.steps, ckpt.c_str());
+        } else if (!has_flag(a, "--fresh")) {
+            std::printf("error: an unfinished training is saved in %s\n"
+                        "       add --resume to continue it, or --fresh to start over (the saved one is replaced)\n", ckpt.c_str());
+            return 1;
+        }
+    } else if (has_flag(a, "--resume")) {
+        std::printf("error: no unfinished training in %s (use the same --out or --checkpoint as before)\n", ckpt.c_str());
+        return 1;
+    }
     // Fine-tuning: start from a saved model instead of a new one. Images and
     // sound are read in the format of that model.
     std::shared_ptr<Model> base;
-    std::string from = flag(a, "--from");
+    std::string from = resumed ? std::string() : flag(a, "--from");
+    if (resumed) base = resumed;
     if (!from.empty()) {
         base = Model::load(from, &err);
         if (!base) { std::printf("error: %s: %s\n", from.c_str(), err.c_str()); return 1; }
@@ -401,7 +490,14 @@ static int train(const std::vector<std::string>& a) {
         if (plan.spec.dim % plan.spec.heads != 0) { std::printf("error: --dim must be a multiple of --heads\n"); return 1; }
         plan.params = estimate_params(plan.spec);
     }
-    if (base) {
+    if (resumed) {
+        bool fits = resumed->spec.kind == MODEL_GPT ? kind == DATA_TEXT && resumed->spec.media == media
+                                                    : kind == DATA_TABLE && resumed->spec.in_dim == data.n_feat;
+        if (!fits) { std::printf("error: the saved training does not fit this dataset\n"); return 1; }
+        if (kind == DATA_TEXT && media == MEDIA_TEXT && data.vocab != resumed->vocab) data.encode_with(resumed->vocab);
+        plan.spec = resumed->spec;
+        plan.params = estimate_params(plan.spec);
+    } else if (base) {
         bool fits = base->spec.kind == MODEL_GPT ? kind == DATA_TEXT && base->spec.media == media
                   : kind == DATA_TABLE && base->spec.in_dim == data.n_feat && base->spec.regression == data.regression &&
                     (data.regression || base->vocab == data.labels);
@@ -459,6 +555,20 @@ static int train(const std::vector<std::string>& a) {
     }
     plan.cfg.patience = patience;
     if (!add_skills(a, path, data, plan.cfg)) return 1;
+    if (resumed) {
+        // The settings of the saved run; tests and skills come from this command.
+        TrainConfig c = info.cfg;
+        c.probes = plan.cfg.probes;
+        c.hooks = plan.cfg.hooks;
+        c.threads = plan.cfg.threads;
+        plan.cfg = c;
+    }
+    if (use_ckpt) {
+        plan.cfg.checkpoint = ckpt;
+        plan.cfg.resume = resumed != nullptr;
+        num("--checkpoint-every", plan.cfg.checkpoint_every);
+        std::printf("autosave: %s every %.0f s (continue later with --resume)\n", ckpt.c_str(), plan.cfg.checkpoint_every);
+    }
     std::ofstream log;
     if (!log_path.empty()) {
         log.open(upath(log_path), std::ios::binary);
@@ -494,6 +604,11 @@ static int train(const std::vector<std::string>& a) {
                 else say("restored best weights from step %d (val %.4f)\n", e.step, e.val_loss);
             } else if (e.kind == EV_DONE || e.kind == EV_STOPPED) {
                 say("%s at step %d after %.1fs\n", e.kind == EV_DONE ? "finished" : "stopped", e.step, e.time);
+                if (e.kind == EV_STOPPED && use_ckpt) say("saved: continue with the same command and --resume\n");
+            } else if (e.kind == EV_RESUMED) {
+                say("continuing at step %d (%.1fs trained before)\n", e.step, e.time);
+            } else if (e.kind == EV_CHECKPOINT) {
+                say("warning: autosave failed at step %d: %s\n", e.step, e.text.c_str());
             } else if (e.kind == EV_ERROR) {
                 say("error: %s\n", e.text.c_str());
             } else if (e.kind == EV_HOOK_LOG) {
@@ -521,10 +636,19 @@ static int train(const std::vector<std::string>& a) {
         std::fflush(stdout);
         if (log) log.flush();
     };
+    g_interrupt = false;
+    std::signal(SIGINT, on_interrupt);
+    bool stopping = false;
     while (tr.running()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
         print_events();
+        if (g_interrupt && !stopping) {
+            stopping = true;
+            std::printf("\nstopping and saving...\n");
+            tr.request_stop();
+        }
     }
+    std::signal(SIGINT, SIG_DFL);
     print_events();
     TrainStats st = tr.stats();
     if (st.state == TS_ERROR) { std::printf("error: %s\n", st.error.c_str()); return 1; }
@@ -674,6 +798,8 @@ int main(int argc, char** argv) {
                 "                [--dim N] [--layers N] [--heads N] [--ctx N]   text model size\n"
                 "                [--lr X] [--batch N] [--threads N] [--seed N] [--wd X]\n"
                 "                [--align 0..1] [--prompt-weight 0..1] [--dropout X] [--ema 0.999]\n"
+                "                [--resume|--fresh] [--checkpoint file] [--checkpoint-every 60] [--no-checkpoint]\n"
+                "                      autosave (default <out>.autosave); Ctrl+C stops and saves\n"
                 "  kor-cli generate <model.kor> [prompt] [--len N] [--temp T] [--line] [--seed N]\n"
                 "                image model: [--count 16] [--out generated.png]\n"
                 "                sound model: [--seconds 3] [--out generated.wav]\n"

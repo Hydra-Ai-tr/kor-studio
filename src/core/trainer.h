@@ -55,12 +55,37 @@ struct TrainConfig {
     float probe_target = 0;
     // Code that watches the run and steers it (Python skills, see TrainHook).
     std::vector<std::shared_ptr<TrainHook>> hooks;
+    // Crash safety. With a path, the run is saved there every
+    // `checkpoint_every` seconds and when it is stopped or fails: the model as
+    // a .kor file and the progress (step, optimizer moments, best and averaged
+    // weights, curves) next to it in `<path>.state`. Both files are written
+    // to a temporary name first, so a power cut never leaves a broken file. A
+    // run that finishes removes them. `resume` continues a saved run: the
+    // caller loads the model from `checkpoint` first and passes the settings
+    // from read_checkpoint(). `checkpoint_note` is stored as is (the caller's
+    // own details, e.g. where the data came from).
+    std::string checkpoint;
+    double checkpoint_every = 60;
+    bool resume = false;
+    std::string checkpoint_note;
 };
+
+// What a checkpoint holds besides the model (see TrainConfig::checkpoint).
+struct CheckpointInfo {
+    int step = 0;
+    double elapsed = 0;
+    float best_val = -1;
+    TrainConfig cfg;   // settings of the run (without probes and hooks)
+    std::string note;
+};
+bool read_checkpoint(const std::string& path, CheckpointInfo& info, std::string* err);
+bool has_checkpoint(const std::string& path);
+void remove_checkpoint(const std::string& path);
 
 enum TrainEventKind {
     EV_START = 0, EV_EVAL, EV_PROBES, EV_EARLY_STOP, EV_TARGET, EV_RESTORED, EV_DONE, EV_STOPPED, EV_ERROR,
     EV_HOOK_LOG, EV_HOOK_METRIC, EV_HOOK_STOP, EV_HOOK_LR, EV_HOOK_DATA, EV_HOOK_BEST,
-    EV_HOOK_SAMPLING, EV_HOOK_DROPOUT
+    EV_HOOK_SAMPLING, EV_HOOK_DROPOUT, EV_RESUMED, EV_CHECKPOINT
 };
 enum HookTone { TONE_INFO = 0, TONE_GOOD, TONE_WARN, TONE_BAD, TONE_MUTED };
 
@@ -73,6 +98,8 @@ enum HookTone { TONE_INFO = 0, TONE_GOOD, TONE_WARN, TONE_BAD, TONE_MUTED };
 //   EV_RESTORED   step = step of the restored weights; n2 > 0: n1/n2 question tests
 //                 passed with them, otherwise val_loss = their validation loss
 //   EV_ERROR      text = message
+//   EV_RESUMED    step = step the run continues from
+//   EV_CHECKPOINT step = saved step; text = error message if saving failed
 //   EV_HOOK_*     source = hook name
 //     LOG         text = message, n1 = HookTone
 //     METRIC      text = metric name, loss = value
@@ -166,6 +193,8 @@ class Optimizer {
 public:
     Optimizer(int kind, float weight_decay) : kind_(kind), wd_(weight_decay) {}
     void step(const std::vector<Param*>& ps, float lr);
+    long steps_taken() const { return t_; }
+    void set_steps_taken(long t) { t_ = t; }
 
 private:
     int kind_;
@@ -201,6 +230,9 @@ struct TrainStats {
     std::vector<Metric> metrics;
     float lr_factor = 1, lr_fixed = 0;
     size_t added_chars = 0;
+    int resumed_from = 0;    // step a resumed run continued from
+    int saved_step = 0;      // step of the latest checkpoint (0 = none yet)
+    std::string save_error;  // why the latest checkpoint failed
 };
 
 class Trainer {
@@ -210,6 +242,7 @@ public:
     bool start(std::shared_ptr<Model> model, const Dataset* data, const TrainConfig& cfg);
     void pause(bool p) { paused_ = p; }
     void stop();                 // requests stop and joins
+    void request_stop() { stop_ = true; }  // asks the run to stop (and save) without waiting
     bool running() const { return running_; }
     bool paused() const { return paused_; }
     TrainStats stats();

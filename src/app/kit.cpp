@@ -90,6 +90,7 @@ void load_fonts(float scale) {
     F.h2 = add_font(semibold, 18.f * scale);
     F.stat = add_font(semibold, 24.f * scale);
     F.mono = add_font(mono, 14.5f * scale);
+    F.hero = add_font(semibold, 40.f * scale);
 }
 
 void apply_style() {
@@ -239,6 +240,11 @@ void icon(ImDrawList* dl, Icon ic, ImVec2 c, float s, ImU32 color) {
         case IC_CHAT:
             rect(-0.42f, -0.34f, 0.42f, 0.2f, 0.12f);
             poly({{-0.18f, 0.2f}, {-0.26f, 0.4f}, {0.04f, 0.2f}}, false);
+            break;
+        case IC_CHATS:
+            rect(-0.46f, -0.4f, 0.16f, 0.04f, 0.1f);
+            poly({{-0.3f, 0.04f}, {-0.36f, 0.2f}, {-0.12f, 0.04f}}, false);
+            poly({{0.24f, -0.18f}, {0.46f, -0.18f}, {0.46f, 0.26f}, {0.36f, 0.26f}, {0.4f, 0.42f}, {0.18f, 0.26f}, {-0.2f, 0.26f}, {-0.2f, 0.14f}}, false);
             break;
         case IC_FILES:
         case IC_FOLDER:
@@ -397,13 +403,92 @@ void icon(ImDrawList* dl, Icon ic, ImVec2 c, float s, ImU32 color) {
             circle(-0.22f, -0.22f, 0.1f);
             circle(0.22f, 0.22f, 0.1f);
             break;
+        case IC_BELL:
+            dl->PathArcTo(P(0, -0.08f), 0.26f * s, kPi, 2 * kPi, 14);
+            dl->PathLineTo(P(0.26f, 0.18f));
+            dl->PathLineTo(P(0.38f, 0.28f));
+            dl->PathLineTo(P(-0.38f, 0.28f));
+            dl->PathLineTo(P(-0.26f, 0.18f));
+            dl->PathStroke(color, ImDrawFlags_Closed, t);
+            line(-0.1f, 0.4f, 0.1f, 0.4f);
+            line(0, -0.34f, 0, -0.42f);
+            break;
+        case IC_CLOUD:
+            dl->PathArcTo(P(-0.2f, 0.06f), 0.2f * s, kPi * 0.5f, kPi * 1.5f, 10);
+            dl->PathArcTo(P(0.02f, -0.1f), 0.24f * s, kPi * 1.1f, kPi * 1.9f, 10);
+            dl->PathArcTo(P(0.24f, 0.08f), 0.18f * s, kPi * 1.5f, kPi * 2.5f, 10);
+            dl->PathStroke(color, ImDrawFlags_Closed, t);
+            break;
+        case IC_GEAR:
+            for (int k = 0; k < 8; ++k) {
+                float a = k * kPi / 4;
+                line(std::cos(a) * 0.28f, std::sin(a) * 0.28f, std::cos(a) * 0.42f, std::sin(a) * 0.42f);
+            }
+            circle(0, 0, 0.29f);
+            circle(0, 0, 0.11f);
+            break;
+        case IC_KEYBOARD:
+            rect(-0.44f, -0.26f, 0.44f, 0.26f, 0.06f);
+            for (float x : {-0.26f, -0.09f, 0.09f, 0.26f}) dot(x, -0.09f, 0.04f);
+            for (float x : {-0.26f, 0.26f}) dot(x, 0.06f, 0.04f);
+            line(-0.14f, 0.12f, 0.14f, 0.12f);
+            break;
+        case IC_WAVE:
+            poly({{-0.44f, 0.f}, {-0.3f, 0.f}, {-0.2f, -0.18f}, {-0.1f, 0.3f}, {0.02f, -0.36f}, {0.14f, 0.18f}, {0.22f, 0.f}, {0.44f, 0.f}}, false);
+            break;
+        case IC_FLASK:
+            poly({{-0.12f, -0.42f}, {-0.12f, -0.1f}, {-0.36f, 0.34f}, {-0.3f, 0.42f}, {0.3f, 0.42f}, {0.36f, 0.34f}, {0.12f, -0.1f}, {0.12f, -0.42f}}, false);
+            line(-0.2f, -0.42f, 0.2f, -0.42f);
+            line(-0.22f, 0.14f, 0.22f, 0.14f);
+            break;
+        case IC_CUBE:
+            poly({{0.f, -0.42f}, {0.38f, -0.2f}, {0.38f, 0.22f}, {0.f, 0.44f}, {-0.38f, 0.22f}, {-0.38f, -0.2f}}, true);
+            poly({{-0.38f, -0.2f}, {0.f, 0.02f}, {0.38f, -0.2f}}, false);
+            line(0.f, 0.02f, 0.f, 0.44f);
+            break;
+        case IC_CODE:
+            poly({{-0.14f, -0.26f}, {-0.4f, 0.f}, {-0.14f, 0.26f}}, false);
+            poly({{0.14f, -0.26f}, {0.4f, 0.f}, {0.14f, 0.26f}}, false);
+            line(0.06f, -0.36f, -0.06f, 0.36f);
+            break;
+        case IC_PLAY_O:
+            poly({{-0.22f, -0.34f}, {0.34f, 0.f}, {-0.22f, 0.34f}}, true);
+            break;
+        case IC_ARROW_RIGHT:
+            line(-0.34f, 0.f, 0.32f, 0.f);
+            poly({{0.08f, -0.24f}, {0.32f, 0.f}, {0.08f, 0.24f}}, false);
+            break;
+        case IC_MINUS:
+            line(-0.32f, 0.f, 0.32f, 0.f);
+            break;
+        case IC_MAXIMIZE:
+            rect(-0.3f, -0.3f, 0.3f, 0.3f, 0.04f);
+            break;
+        case IC_RESTORE:
+            rect(-0.32f, -0.16f, 0.16f, 0.32f, 0.03f);
+            poly({{-0.16f, -0.16f}, {-0.16f, -0.32f}, {0.32f, -0.32f}, {0.32f, 0.16f}, {0.16f, 0.16f}}, false);
+            break;
+        case IC_SIDEBAR:
+            rect(-0.42f, -0.34f, 0.42f, 0.34f, 0.08f);
+            line(-0.14f, -0.34f, -0.14f, 0.34f);
+            break;
+        case IC_TERMINAL:
+            rect(-0.44f, -0.34f, 0.44f, 0.34f, 0.08f);
+            poly({{-0.26f, -0.12f}, {-0.1f, 0.02f}, {-0.26f, 0.16f}}, false);
+            line(0.02f, 0.16f, 0.24f, 0.16f);
+            break;
+        case IC_DISK:
+            rect(-0.42f, -0.3f, 0.42f, 0.3f, 0.1f);
+            line(-0.42f, 0.06f, 0.42f, 0.06f);
+            dot(0.26f, 0.18f, 0.05f);
+            break;
     }
 }
 
 // The Kor mark: an ember (flame drop) holding a three-node network.
 void draw_logo(ImDrawList* dl, ImVec2 p, float sz) {
     auto P = [&](float x, float y) { return ImVec2(p.x + x / 256.f * sz, p.y + y / 256.f * sz); };
-    const ImU32 dark = IM_COL32(23, 18, 15, 255);
+    const ImU32 dark = IM_COL32(17, 13, 28, 255);
     dl->AddRectFilled(p, ImVec2(p.x + sz, p.y + sz), dark, sz * 0.24f);
     dl->AddRect(p, ImVec2(p.x + sz, p.y + sz), col(C::accent, 0.25f), sz * 0.24f, 0, std::max(1.f, sz * 0.02f));
     dl->PathLineTo(P(128, 26));
@@ -418,7 +503,7 @@ void draw_logo(ImDrawList* dl, ImVec2 p, float sz) {
     dl->AddLine(n1, n2, dark, lw);
     for (ImVec2 n : {n0, n1, n2}) {
         dl->AddCircleFilled(n, sz * 0.062f, dark, 20);
-        dl->AddCircleFilled(n, sz * 0.026f, col(ImVec4(1.f, 0.76f, 0.29f, 1.f)), 12);
+        dl->AddCircleFilled(n, sz * 0.026f, col(ImVec4(0.86f, 0.80f, 1.f, 1.f)), 12);
     }
 }
 
@@ -505,7 +590,20 @@ float column_width(int cols, float g) {
     return std::floor((avail - g * (cols - 1)) / cols);
 }
 
-float card_padding_y() { return px(18); }
+static float g_card_pad[2] = {20.f, 18.f};
+
+float card_padding_x() { return px(g_card_pad[0]); }
+float card_padding_y() { return px(g_card_pad[1]); }
+
+CardPadding::CardPadding(float x, float y) : old_x(g_card_pad[0]), old_y(g_card_pad[1]) {
+    g_card_pad[0] = x;
+    g_card_pad[1] = y;
+}
+
+CardPadding::~CardPadding() {
+    g_card_pad[0] = old_x;
+    g_card_pad[1] = old_y;
+}
 
 static bool g_relayout = false;
 
@@ -525,7 +623,7 @@ void begin_card(const char* id, const char* title, float min_h, float width, con
     }
     ImGui::PushStyleColor(ImGuiCol_ChildBg, C::surface);
     ImGui::PushStyleColor(ImGuiCol_Border, C::border);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(px(20), card_padding_y()));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(card_padding_x(), card_padding_y()));
     if (min_h > 0) ImGui::SetNextWindowSizeConstraints(ImVec2(0, min_h), ImVec2(FLT_MAX, FLT_MAX));
     ImGui::BeginChild(id, ImVec2(width, 0),
                       ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding,
@@ -720,13 +818,18 @@ bool nav_item(const char* label, Icon ic, bool selected, int status) {
     if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
     float t = anim(ImGui::GetItemID(), hov && !selected, 16.f);
     if (selected) {
-        dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), col(C::accent, 0.12f), px(8));
-        dl->AddRectFilled(ImVec2(p.x, p.y + px(10)), ImVec2(p.x + px(3), p.y + h - px(10)), col(C::accent), px(2));
+        dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), col(mix(C::surface3, C::accent, 0.30f)), px(8));
     } else if (t > 0.01f) {
         dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), col(C::surface2, t), px(8));
     }
     float cy = p.y + h * 0.5f;
-    icon(dl, ic, ImVec2(p.x + px(22), cy), px(17), col(selected ? C::accent : mix(C::muted, C::text, t)));
+    bool compact = w < px(64);  // icons only (folded sidebar)
+    icon(dl, ic, ImVec2(compact ? p.x + w * 0.5f : p.x + px(22), cy), px(17), col(selected ? C::text : mix(C::muted, C::text, t)));
+    if (compact) {
+        if (hov) tooltip(label);
+        if (status == 2) dl->AddCircleFilled(ImVec2(p.x + w - px(10), p.y + px(10)), px(3.5f), col(C::accent));
+        return clicked;
+    }
     ImFont* f = selected && F.bold ? F.bold : ImGui::GetFont();
     float right = status ? px(26) : px(8);
     text_ellipsis(dl, f, ImVec2(p.x + px(44), cy - f->FontSize * 0.5f), w - px(44) - right, label,

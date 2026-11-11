@@ -545,6 +545,7 @@ Sound sample_sound(Model& m, float seconds, float temperature, Rng& rng, const s
 // File layout (little endian):
 //   "KOR1" | spec text | vocab[] | feat_names[] | norm_mean[] | norm_std[]
 //   | u32 n_tensors | { name, i32 rows, i32 cols, u8 dtype(0=f32,1=f16), data }
+//   [ "META" | u32 n | { key, value } ]   optional; older readers stop before it
 
 namespace {
 void wu32(std::ostream& o, uint32_t v) { o.write((const char*)&v, 4); }
@@ -600,6 +601,11 @@ bool Model::save(const std::string& path, bool half, std::string* err) {
             o.write((const char*)p->w.data(), (std::streamsize)(p->w.size() * 4));
         }
     }
+    if (!meta.empty()) {
+        o.write("META", 4);
+        wu32(o, (uint32_t)meta.size());
+        for (auto& kv : meta) { wstr(o, kv.first); wstr(o, kv.second); }
+    }
     if (!o) { if (err) *err = "write failed"; return false; }
     return true;
 }
@@ -636,6 +642,14 @@ std::shared_ptr<Model> Model::load(const std::string& path, std::string* err) {
             if (!in.read((char*)p->w.data(), (std::streamsize)(p->w.size() * 4))) return fail("truncated file");
         }
     }
+    char tail[4];
+    uint32_t nm = 0;
+    if (in.read(tail, 4) && std::memcmp(tail, "META", 4) == 0 && ru32(in, nm) && nm < 10000)
+        for (uint32_t k = 0; k < nm; ++k) {
+            std::string key, value;
+            if (!rstr(in, key) || !rstr(in, value)) break;
+            m->meta[key] = value;
+        }
     return m;
 }
 

@@ -8,7 +8,7 @@
 #define KOR_STRINGS(X) \
     X(Tagline, "Train your own AI model on the hardware you already have", "Kendi yapay zekâ modelini elindeki donanımla eğit", "Обучайте собственную ИИ-модель на том железе, что у вас есть") \
     X(NavHome, "Home", "Ana Sayfa", "Главная") \
-    X(NavData, "Data", "Veri", "Данные") \
+    X(NavData, "Dataset", "Veri Seti", "Данные") \
     X(NavModel, "Model", "Model", "Модель") \
     X(NavTrain, "Training", "Eğitim", "Обучение") \
     X(NavTest, "Playground", "Deneme", "Проверка") \
@@ -173,7 +173,7 @@
     X(TableModel, "Table model (MLP)", "Tablo modeli (MLP)", "Табличная модель (MLP)") \
     X(ImageModel, "Image model (transformer)", "Görüntü modeli (transformer)", "Модель изображений (трансформер)") \
     X(SoundModel, "Sound model (transformer)", "Ses modeli (transformer)", "Модель звука (трансформер)") \
-    X(NavPlugins, "Plugins", "Eklentiler", "Плагины") \
+    X(NavPlugins, "Tools", "Araçlar", "Инструменты") \
     X(KeepBest, "Keep the best weights", "En iyi ağırlıkları koru", "Сохранять лучшие веса") \
     X(KeepBestHelp, "When training ends, the model returns to the weights that had the lowest validation loss.", "Eğitim bitince model, doğrulama kaybının en düşük olduğu ağırlıklara geri döner.", "По окончании обучения модель возвращается к весам с наименьшей ошибкой проверки.") \
     X(Patience, "Early stop after (checks)", "Erken durdurma (kontrol)", "Ранняя остановка (проверок)") \
@@ -313,7 +313,130 @@
     X(LoadHelp, "Replaces the current model with the one in the file.", "Mevcut modelin yerine dosyadaki modeli koyar.", "Заменяет текущую модель моделью из файла.") \
     X(Network, "Network", "Ağ yapısı", "Структура сети") \
     X(MemoryFit, "Memory", "Bellek", "Память") \
-    X(Latest, "latest: %d / %d", "son: %d / %d", "последний: %d / %d")
+    X(Latest, "latest: %d / %d", "son: %d / %d", "последний: %d / %d") \
+    X(NavChat, "Chat", "Sohbet", "Чат") \
+    X(ChatHelp, "Load a trained text model (.kor) and talk to it to see how it answers.", "Eğitimi bitmiş bir metin modelini (.kor) yükle ve onunla sohbet ederek nasıl cevap verdiğini dene.", "Загрузите обученную текстовую модель (.kor) и поговорите с ней, чтобы увидеть, как она отвечает.") \
+    X(ChatModels, "Models", "Modeller", "Модели") \
+    X(ChatModelsHelp, "Finished trainings are saved here automatically. You can also open any .kor file.", "Biten eğitimler buraya otomatik kaydedilir. İstediğin başka bir .kor dosyasını da açabilirsin.", "Завершённые обучения сохраняются сюда автоматически. Можно открыть и любой другой файл .kor.") \
+    X(ChatNoModels, "No saved models yet. Finish a training or open a .kor file.", "Henüz kayıtlı model yok. Bir eğitimi bitir ya da bir .kor dosyası aç.", "Сохранённых моделей пока нет. Завершите обучение или откройте файл .kor.") \
+    X(ChatUseCurrent, "Use the model in training", "Eğitimdeki modeli kullan", "Взять модель из обучения") \
+    X(Refresh, "Refresh", "Yenile", "Обновить") \
+    X(ChatInputHint, "Write a message and press Enter...", "Bir mesaj yaz ve Enter'a bas...", "Напишите сообщение и нажмите Enter...") \
+    X(ChatSend, "Send", "Gönder", "Отправить") \
+    X(ChatClear, "New chat", "Yeni sohbet", "Новый чат") \
+    X(ChatEmpty, "Say hello to start the conversation.", "Sohbete başlamak için bir merhaba yaz.", "Поздоровайтесь, чтобы начать разговор.") \
+    X(ChatNoModel, "Choose a model above to start chatting.", "Sohbete başlamak için yukarıdan bir model seç.", "Выберите модель выше, чтобы начать разговор.") \
+    X(ChatNotText, "This is not a text model. Picture and sound models can be tried on the Test page.", "Bu bir metin modeli değil. Resim ve ses modellerini Dene sayfasında deneyebilirsin.", "Это не текстовая модель. Модели картинок и звука можно попробовать на странице проверки.") \
+    X(ChatMemory, "Remember the conversation", "Konuşmayı hatırla", "Помнить разговор") \
+    X(ChatMemoryHelp, "Earlier messages are given to the model too, as far as its context reaches. Turn it off to ask every question on its own, like the question tests do.", "Önceki mesajlar da modele verilir (bağlamının yettiği kadar). Kapatırsan her soru tek başına sorulur, soru testlerindeki gibi.", "Предыдущие сообщения тоже передаются модели (сколько вмещает контекст). Выключите, чтобы каждый вопрос задавался отдельно, как в проверке вопросами.") \
+    X(ChatTags, "Dialogue tags", "Diyalog etiketleri", "Метки диалога") \
+    X(ChatTagsHelp, "The line beginnings the model learned, e.g. 'Kullanıcı: ' and 'Asistan: '. Models trained with this version remember them by themselves.", "Modelin öğrendiği satır başları, örn. 'Kullanıcı: ' ve 'Asistan: '. Bu sürümle eğitilen modeller bunları kendileri hatırlar.", "Начала строк, которые выучила модель, например 'Kullanıcı: ' и 'Asistan: '. Модели, обученные этой версией, помнят их сами.") \
+    X(ChatUser, "You", "Sen", "Вы") \
+    X(ChatBot, "Model", "Model", "Модель") \
+    X(ChatMaxLen, "Longest answer (tokens)", "En uzun cevap (token)", "Самый длинный ответ (токены)") \
+    X(ChatModelFmt, "%s parameters, context %d tokens", "%s parametre, bağlam %d token", "%s параметров, контекст %d токенов") \
+    X(ChatUnknown, "(the model knows none of these characters)", "(model bu karakterlerin hiçbirini bilmiyor)", "(модель не знает ни одного из этих символов)") \
+    X(ResumeTitle, "Unfinished training found", "Yarım kalan eğitim bulundu", "Найдено незавершённое обучение") \
+    X(ResumeText, "The last training stopped at step %d of %d after %s. It was saved automatically and can continue from where it left off.", "Son eğitim %d / %d. adımda, %s sonra kaldı. Otomatik kaydedilmişti; kaldığı yerden devam edebilir.", "Последнее обучение остановилось на шаге %d из %d через %s. Оно было сохранено автоматически и может продолжиться с того же места.") \
+    X(ResumeData, "Data: %s", "Veri: %s", "Данные: %s") \
+    X(ResumeGo, "Continue training", "Eğitime devam et", "Продолжить обучение") \
+    X(ResumeDiscard, "Discard", "Sil", "Удалить") \
+    X(ResumeWarn, "Continue or discard the unfinished training first - a new training would replace it.", "Önce yarım kalan eğitime devam et ya da onu sil - yeni bir eğitim onun yerine geçer.", "Сначала продолжите или удалите незавершённое обучение — новое обучение заменит его.") \
+    X(ResumeFailed, "Could not continue: %s", "Devam edilemedi: %s", "Не удалось продолжить: %s") \
+    X(ResumeNoData, "the data was not found: %s", "veri bulunamadı: %s", "данные не найдены: %s") \
+    X(AutosaveLbl, "Autosaved at step %d", "Otomatik kaydedildi: adım %d", "Автосохранение: шаг %d") \
+    X(AutosaveWait, "Autosave every minute", "Dakikada bir otomatik kayıt", "Автосохранение раз в минуту") \
+    X(AutosaveHelp, "The training saves itself every minute, when it is paused and when it is stopped. If the computer turns off or the program closes, the next start offers to continue from the last save.", "Eğitim kendini dakikada bir, duraklatılınca ve durdurulunca kaydeder. Bilgisayar kapanır ya da program kapanırsa, bir sonraki açılışta son kayıttan devam etmeyi önerir.", "Обучение сохраняет себя каждую минуту, при паузе и при остановке. Если компьютер выключится или программа закроется, при следующем запуске можно будет продолжить с последнего сохранения.") \
+    X(AutosaveFailed, "Autosave failed: %s", "Otomatik kayıt başarısız: %s", "Автосохранение не удалось: %s") \
+    X(LogResumed, "Continuing the saved training from step %d", "Kayıtlı eğitime %d. adımdan devam ediliyor", "Продолжение сохранённого обучения с шага %d") \
+    X(LogSavedModel, "Finished model saved: %s", "Biten model kaydedildi: %s", "Готовая модель сохранена: %s") \
+    X(LogCheckpointFail, "Autosave failed at step %d: %s", "%d. adımda otomatik kayıt başarısız: %s", "Автосохранение на шаге %d не удалось: %s") \
+    X(HeroSub, "Build, train, test and ship your AI models.", "Yapay zekâ modellerini geliştir, eğit, test et ve dağıt.", "Создавайте, обучайте, проверяйте и распространяйте свои ИИ-модели.") \
+    X(NewModel, "New model", "Yeni Model Oluştur", "Новая модель") \
+    X(OpenProject, "Open project", "Proje Aç", "Открыть проект") \
+    X(ChatWithModel, "Chat with AI", "AI ile Sohbet", "Чат с ИИ") \
+    X(SysResources, "System resources", "Sistem Kaynakları", "Системные ресурсы") \
+    X(CpuLoad, "CPU", "CPU", "ЦП") \
+    X(RamLoad, "RAM", "RAM", "ОЗУ") \
+    X(Kernels, "Kernels", "Çekirdekler", "Ядра") \
+    X(QuickActions, "Quick actions", "Hızlı İşlemler", "Быстрые действия") \
+    X(QaTrain, "Start model training", "Model Eğitimi Başlat", "Начать обучение модели") \
+    X(QaWatch, "Watch the training", "Eğitimi izle", "Следить за обучением") \
+    X(QaImport, "Import a dataset", "Veri Seti İçe Aktar", "Импортировать данные") \
+    X(QaTest, "Test the model", "Modeli Test Et", "Проверить модель") \
+    X(QaNewProject, "Create a project", "Proje Oluştur", "Создать проект") \
+    X(Shortcuts, "Shortcuts", "Kısa Yollar", "Горячие клавиши") \
+    X(ScSearch, "Quick search", "Hızlı Arama", "Быстрый поиск") \
+    X(ScSave, "Save project", "Projeyi kaydet", "Сохранить проект") \
+    X(RecentProjects, "Recent projects", "Son Projeler", "Недавние проекты") \
+    X(SeeAll, "See all", "Tümünü Gör", "Все") \
+    X(NoProjects, "No projects yet. Create one to keep the data, model and settings together.", "Henüz proje yok. Veriyi, modeli ve ayarları bir arada tutmak için bir proje oluştur.", "Проектов пока нет. Создайте проект, чтобы хранить данные, модель и настройки вместе.") \
+    X(Activity, "Activity", "Aktivite", "Активность") \
+    X(NoActivity, "Nothing yet - load data or open a project.", "Henüz bir şey yok - veri yükle ya da bir proje aç.", "Пока ничего нет — загрузите данные или откройте проект.") \
+    X(AllLogs, "Open the training logs", "Tüm logları görüntüle", "Открыть журналы обучения") \
+    X(TileModels, "Models", "Modeller", "Модели") \
+    X(TileModelsSub, "saved", "kayıtlı", "сохранено") \
+    X(TileProjects, "Projects", "Projeler", "Проекты") \
+    X(TileTrainIdle, "ready", "hazır", "готово") \
+    X(TileCpuSub, "Training uses the CPU", "Eğitim işlemcide", "Обучение на ЦП") \
+    X(AgoNow, "just now", "az önce", "только что") \
+    X(AgoMin, "%d min ago", "%d dk önce", "%d мин назад") \
+    X(AgoHour, "%d h ago", "%d saat önce", "%d ч назад") \
+    X(AgoDay, "%d days ago", "%d gün önce", "%d дн назад") \
+    X(ActTrainStart, "Training started: %s", "Eğitim başladı: %s", "Обучение началось: %s") \
+    X(ActTrainDone, "Training finished: %s", "Eğitim bitti: %s", "Обучение завершено: %s") \
+    X(ActTrainStop, "Training stopped: %s", "Eğitim durduruldu: %s", "Обучение остановлено: %s") \
+    X(ActResumed, "Training continued: %s", "Eğitime devam edildi: %s", "Обучение продолжено: %s") \
+    X(ActModelSaved, "Model saved: %s", "Model kaydedildi: %s", "Модель сохранена: %s") \
+    X(ActDataLoaded, "Dataset processed: %s", "Veri seti işlendi: %s", "Набор данных обработан: %s") \
+    X(ActProjectSaved, "Project updated: %s", "Proje güncellendi: %s", "Проект обновлён: %s") \
+    X(ActProjectOpened, "Project opened: %s", "Proje açıldı: %s", "Проект открыт: %s") \
+    X(ActTrainRunning, "Training running: %s", "Eğitim sürüyor: %s", "Идёт обучение: %s") \
+    X(NavProjects, "Projects", "Projeler", "Проекты") \
+    X(ProjectsHelp, "A project keeps a dataset, its model, the training settings and the question tests together in one folder.", "Bir proje; veri setini, modelini, eğitim ayarlarını ve soru testlerini tek bir klasörde bir arada tutar.", "Проект хранит набор данных, его модель, настройки обучения и проверочные вопросы вместе в одной папке.") \
+    X(NewProject, "New project", "Yeni proje", "Новый проект") \
+    X(ProjectName, "Project name", "Proje adı", "Название проекта") \
+    X(CreateBtn, "Create", "Oluştur", "Создать") \
+    X(CancelBtn, "Cancel", "İptal", "Отмена") \
+    X(NewProjectHelp, "A folder is created in Documents/Kor Studio Projects. The loaded data (single files) and the model are saved into it.", "Belgeler/Kor Studio Projects içinde bir klasör oluşturulur. Yüklü veri (tek dosyaysa) ve model içine kaydedilir.", "В папке Документы/Kor Studio Projects создаётся папка. В неё сохраняются загруженные данные (если это один файл) и модель.") \
+    X(ProjectLbl, "PROJECT", "PROJE", "ПРОЕКТ") \
+    X(NoProjectOpen, "No project open", "Açık proje yok", "Проект не открыт") \
+    X(ProjectSaved, "Project saved.", "Proje kaydedildi.", "Проект сохранён.") \
+    X(ProjectFailed, "Project error: %s", "Proje hatası: %s", "Ошибка проекта: %s") \
+    X(ProjectModelFmt, "model: %s parameters", "model: %s parametre", "модель: %s параметров") \
+    X(ProjectNoModel, "no model yet", "henüz model yok", "модели пока нет") \
+    X(ProjectAuto, "The open project saves itself when a training finishes and when the app closes.", "Açık proje, bir eğitim bittiğinde ve program kapanırken kendini kaydeder.", "Открытый проект сохраняется сам, когда обучение завершается и когда программа закрывается.") \
+    X(ProjectsFolder, "Projects folder", "Proje klasörü", "Папка проектов") \
+    X(RemoveFromList, "Remove from the list", "Listeden kaldır", "Убрать из списка") \
+    X(ProjectCurrent, "open", "açık", "открыт") \
+    X(ProjectExists, "a project with this name already exists", "bu adla bir proje zaten var", "проект с таким названием уже существует") \
+    X(PaletteHint, "Search pages and actions...", "Sayfa ya da işlem ara...", "Поиск страниц и действий...") \
+    X(DiskLbl, "Disk", "Disk", "Диск") \
+    X(NoMatches, "Nothing matches.", "Eşleşen bir şey yok.", "Ничего не найдено.") \
+    X(WorkspaceTitle, "Workspace", "Çalışma Alanı", "Рабочая область") \
+    X(FoldSidebar, "Fold the sidebar", "Kenar çubuğunu daralt", "Свернуть боковую панель") \
+    X(UnfoldSidebar, "Unfold the sidebar", "Kenar çubuğunu aç", "Развернуть боковую панель") \
+    X(DiskUsage, "Disk usage", "Disk Kullanımı", "Использование диска") \
+    X(LocalAccount, "Local account", "Yerel hesap", "Локальная учётная запись") \
+    X(Notifications, "Notifications", "Bildirimler", "Уведомления") \
+    X(NoNotifications, "No notifications yet.", "Henüz bildirim yok.", "Уведомлений пока нет.") \
+    X(CloudOk, "Community plugins: ready (Python found). Click to browse.", "Topluluk eklentileri: hazır (Python bulundu). Göz atmak için tıkla.", "Плагины сообщества: готово (Python найден). Нажмите, чтобы открыть.") \
+    X(CloudOff, "Community plugins need Python 3. Click for details.", "Topluluk eklentileri için Python 3 gerekli. Ayrıntılar için tıkla.", "Для плагинов сообщества нужен Python 3. Нажмите, чтобы узнать больше.") \
+    X(Terminal, "Terminal", "Terminal", "Терминал") \
+    X(OpenConfigDir, "Open the settings folder", "Ayar klasörünü aç", "Открыть папку настроек") \
+    X(OpenModelsDir, "Open the models folder", "Model klasörünü aç", "Открыть папку моделей") \
+    X(AboutLine, "Kor Studio %s - free for non-commercial use (PolyForm Noncommercial 1.0.0).", "Kor Studio %s - ticari olmayan kullanım için ücretsiz (PolyForm Noncommercial 1.0.0).", "Kor Studio %s - бесплатно для некоммерческого использования (PolyForm Noncommercial 1.0.0).") \
+    X(ProjectDesc, "Description (optional)", "Açıklama (isteğe bağlı)", "Описание (необязательно)") \
+    X(ProjectParamsDesc, "%s-parameter model", "%s parametreli model", "модель на %s параметров") \
+    X(TileDatasets, "Datasets", "Veri Setleri", "Наборы данных") \
+    X(TileTotal, "Total: %s", "Toplam: %s", "Всего: %s") \
+    X(TileTrainings, "Trainings", "Eğitimler", "Обучения") \
+    X(TileRunning, "Running", "Devam Ediyor", "Идёт") \
+    X(TileActive, "Active", "Aktif", "Активна") \
+    X(TileReady, "Ready", "Hazır", "Готово") \
+    X(TileNoModel, "None loaded", "Yüklü değil", "Не загружена") \
+    X(TileDetected, "Detected", "Algılandı", "Обнаружен") \
+    X(TileNoGpu, "None", "Yok", "Нет")
 
 enum class S {
 #define X(id, en, tr, ru) id,

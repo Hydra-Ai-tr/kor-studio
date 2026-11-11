@@ -20,30 +20,31 @@ struct Fonts {
     ImFont* h2 = nullptr;          // section titles
     ImFont* stat = nullptr;        // big numbers
     ImFont* mono = nullptr;        // logs, previews, consoles
+    ImFont* hero = nullptr;        // the big title on the home page
 };
 extern Fonts F;
 
 namespace C {
-inline const ImVec4 bg(0.055f, 0.063f, 0.078f, 1);
-inline const ImVec4 sidebar(0.039f, 0.047f, 0.059f, 1);
-inline const ImVec4 inset(0.043f, 0.051f, 0.063f, 1);
-inline const ImVec4 surface(0.082f, 0.094f, 0.118f, 1);
-inline const ImVec4 surface2(0.106f, 0.122f, 0.153f, 1);
-inline const ImVec4 surface3(0.137f, 0.157f, 0.196f, 1);
-inline const ImVec4 border(0.145f, 0.165f, 0.204f, 1);
-inline const ImVec4 border_hi(0.200f, 0.227f, 0.278f, 1);
-inline const ImVec4 text(0.906f, 0.914f, 0.933f, 1);
-inline const ImVec4 muted(0.553f, 0.588f, 0.651f, 1);
-inline const ImVec4 subtle(0.369f, 0.400f, 0.459f, 1);
-inline const ImVec4 accent(1.000f, 0.478f, 0.102f, 1);
-inline const ImVec4 accent_hi(1.000f, 0.600f, 0.300f, 1);
-inline const ImVec4 accent_lo(0.878f, 0.384f, 0.039f, 1);
-inline const ImVec4 on_accent(0.102f, 0.055f, 0.020f, 1);
+inline const ImVec4 bg(0.051f, 0.043f, 0.078f, 1);
+inline const ImVec4 sidebar(0.039f, 0.031f, 0.063f, 1);
+inline const ImVec4 inset(0.043f, 0.035f, 0.067f, 1);
+inline const ImVec4 surface(0.078f, 0.067f, 0.118f, 1);
+inline const ImVec4 surface2(0.106f, 0.090f, 0.157f, 1);
+inline const ImVec4 surface3(0.141f, 0.122f, 0.208f, 1);
+inline const ImVec4 border(0.149f, 0.129f, 0.212f, 1);
+inline const ImVec4 border_hi(0.220f, 0.192f, 0.310f, 1);
+inline const ImVec4 text(0.925f, 0.918f, 0.957f, 1);
+inline const ImVec4 muted(0.580f, 0.557f, 0.678f, 1);
+inline const ImVec4 subtle(0.384f, 0.361f, 0.478f, 1);
+inline const ImVec4 accent(0.545f, 0.361f, 0.965f, 1);
+inline const ImVec4 accent_hi(0.690f, 0.561f, 1.000f, 1);
+inline const ImVec4 accent_lo(0.427f, 0.247f, 0.851f, 1);
+inline const ImVec4 on_accent(1.000f, 1.000f, 1.000f, 1);
 inline const ImVec4 good(0.204f, 0.780f, 0.482f, 1);
 inline const ImVec4 bad(0.949f, 0.333f, 0.353f, 1);
 inline const ImVec4 warn(0.961f, 0.710f, 0.267f, 1);
 inline const ImVec4 blue(0.302f, 0.639f, 1.000f, 1);
-inline const ImVec4 violet(0.608f, 0.482f, 1.000f, 1);
+inline const ImVec4 violet(0.910f, 0.475f, 0.976f, 1);
 inline const ImVec4 teal(0.180f, 0.769f, 0.714f, 1);
 }  // namespace C
 
@@ -75,6 +76,8 @@ enum Icon {
     IC_UPLOAD, IC_REFRESH, IC_COPY, IC_SPARK, IC_CLOCK, IC_GAUGE, IC_TARGET, IC_TREND,
     IC_PLAY, IC_PAUSE, IC_STOP, IC_INFO, IC_WARN, IC_DOC, IC_TABLE, IC_CHEVRON_DOWN,
     IC_CHEVRON_RIGHT, IC_GLOBE, IC_PLUS, IC_ARROW_UP, IC_TRASH, IC_LAYERS, IC_PERCENT,
+    IC_CHATS, IC_BELL, IC_CLOUD, IC_GEAR, IC_KEYBOARD, IC_WAVE, IC_FLASK, IC_CUBE, IC_CODE,
+    IC_PLAY_O, IC_ARROW_RIGHT, IC_MINUS, IC_MAXIMIZE, IC_RESTORE, IC_SIDEBAR, IC_TERMINAL, IC_DISK,
 };
 void icon(ImDrawList* dl, Icon ic, ImVec2 center, float size, ImU32 color);
 void draw_logo(ImDrawList* dl, ImVec2 p, float size);
@@ -107,7 +110,14 @@ struct EqualRow {
     float* track() { return &cur; }
     void next() { prev = cur; cur = 0; }
 };
+float card_padding_x();
 float card_padding_y();
+// Unscaled card padding for the cards begun while this is alive.
+struct CardPadding {
+    CardPadding(float x, float y);
+    ~CardPadding();
+    float old_x, old_y;
+};
 
 // ---- controls
 enum ButtonKind { BTN_PRIMARY, BTN_SECONDARY, BTN_GHOST, BTN_DANGER };

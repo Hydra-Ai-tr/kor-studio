@@ -23,6 +23,18 @@ işlemcide eğitilir.
   Kor belleğine, işlemcine ve verine uygun boyutu seçsin.
 - **Eğitim** – canlı kayıp eğrileri, doğrulama, doğruluk, hız, kalan süre, duraklat/sürdür/durdur,
   erken durdurma ve dosyaya da kaydedilen bir eğitim logu.
+- **Kaldığı yerden devam** – eğitim kendini dakikada bir, duraklatınca ve durdurunca kaydeder
+  (ağırlıklar, optimizer durumu, en iyi ağırlıklar, grafikler). Elektrik kesilir ya da program
+  kapanırsa bir sonraki açılışta *Eğitime devam et* ile tam kaldığı adımdan sürer. Kayıt önce
+  geçici dosyaya yazılır, bir önceki kayıt da yedek olarak tutulur; yarım yazılmış dosya eğitimi
+  bozmaz.
+- **Sohbet** – eğitimi biten modeller otomatik kaydedilir; Sohbet sayfasında bir `.kor` modeli seç
+  ve onunla konuşarak dene (sıcaklık, cevap uzunluğu, konuşmayı hatırlama ayarlarıyla).
+- **Projeler** – bir proje klasörü veri setini, modelini, eğitim ayarlarını ve soru testlerini bir
+  arada tutar; eğitim bitince ve program kapanırken kendini kaydeder. Ana sayfada son projeler,
+  son işlemler, model ve veri seti sayıları ile canlı CPU, RAM ve GPU belleği kullanımı görünür.
+  `Ctrl+K` sayfa ve işlem arar, `Ctrl+S` projeyi kaydeder, `Ctrl+O` proje açar, `Ctrl+,` ayarları
+  açar, ``Ctrl+` `` proje klasöründe `kor-cli` hazır bir terminal açar.
 - **Soru testleri** – önce eğit, sonra sor: `soru => beklenen cevap` satırları yaz (diyalog
   verisinde otomatik doldurulur). Test soruları eğitim verisinden çıkarılır, yani model hep
   hiç görmediği sorularla sınanır: ezberi değil gerçekten öğrenip öğrenmediğini ölçer. Model
@@ -79,6 +91,7 @@ kor-cli test sohbet.kor testler.txt --data examples/diyalog_tr.txt
 kor-cli generate sohbet.kor "Kullanıcı: Merhaba" --len 200
 kor-cli train buyuk.txt --subword 2000 --out llm.kor        # alt-kelime dil modeli
 kor-cli train yeni.txt --from llm.kor --lora 8 --out yeni.kor   # ince ayar
+kor-cli train buyuk.txt --out llm.kor --resume   # yarıda kalan eğitime devam (Ctrl+C kaydedip durdurur)
 kor-cli demo-images resimler && kor-cli train resimler --out resim.kor
 kor-cli generate resim.kor --count 16 --out yeni.png
 kor-cli demo-sounds melodiler && kor-cli train melodiler --out ses.kor

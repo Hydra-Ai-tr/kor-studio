@@ -23,6 +23,15 @@ Each tensor:
 | dtype | u8 | `0` = float32, `1` = float16 (IEEE 754 half) |
 | data | rows × cols values | in the given dtype |
 
+After the tensors an optional notes section may follow (since 0.6.0; older readers stop before
+it):
+
+| Field | Type | Meaning |
+|---|---|---|
+| magic | 4 bytes | `META` |
+| n | u32 | number of entries |
+| entries | n × (string key, string value) | e.g. `q_tag` = `Kullanıcı: `, `a_tag` = `Asistan: ` — the dialogue tags of the text the model learned (the chat page builds its prompts with them) |
+
 ## Spec keys
 
 ```

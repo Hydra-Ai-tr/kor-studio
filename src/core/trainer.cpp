@@ -6,9 +6,213 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <fstream>
 #include <thread>
 
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
+
 namespace kor {
+
+// --------------------------------------------------------------- checkpoints
+
+namespace {
+
+const char kStateMagic[4] = {'K', 'O', 'R', 'S'};
+const uint32_t kStateVersion = 1;
+
+struct Out {
+    std::ofstream o;
+    template <class T> void put(const T& v) { o.write((const char*)&v, sizeof(T)); }
+    void str(const std::string& s) { put((uint32_t)s.size()); o.write(s.data(), (std::streamsize)s.size()); }
+    template <class T> void vec(const std::vector<T>& v) {
+        put((uint64_t)v.size());
+        if (!v.empty()) o.write((const char*)v.data(), (std::streamsize)(v.size() * sizeof(T)));
+    }
+};
+
+struct In {
+    std::ifstream i;
+    bool ok = true;
+    template <class T> T get() {
+        T v{};
+        if (ok && !i.read((char*)&v, sizeof(T))) ok = false;
+        return v;
+    }
+    std::string str() {
+        uint32_t n = get<uint32_t>();
+        if (!ok || n > (1u << 26)) { ok = false; return {}; }
+        std::string s(n, '\0');
+        if (n && !i.read(&s[0], n)) ok = false;
+        return s;
+    }
+    template <class T> std::vector<T> vec() {
+        uint64_t n = get<uint64_t>();
+        if (!ok || n > (1ull << 31) / sizeof(T)) { ok = false; return {}; }
+        std::vector<T> v((size_t)n);
+        if (n && !i.read((char*)v.data(), (std::streamsize)(n * sizeof(T)))) ok = false;
+        return v;
+    }
+};
+
+void put_config(Out& w, const TrainConfig& c) {
+    w.put((int32_t)c.steps); w.put((int32_t)c.batch); w.put((int32_t)c.accum);
+    w.put(c.lr); w.put(c.weight_decay); w.put((int32_t)c.warmup); w.put(c.clip);
+    w.put((int32_t)c.eval_every); w.put((int32_t)c.eval_batches); w.put((int32_t)c.optimizer);
+    w.put((uint64_t)c.seed);
+    w.put(c.align); w.put(c.prompt_weight); w.put(c.dropout); w.put(c.ema);
+    w.put((uint8_t)(c.keep_best ? 1 : 0)); w.put((int32_t)c.patience);
+    w.put((int32_t)c.probe_every); w.put(c.probe_target);
+    w.put(c.checkpoint_every);
+}
+
+void get_config(In& r, TrainConfig& c) {
+    c.steps = r.get<int32_t>(); c.batch = r.get<int32_t>(); c.accum = r.get<int32_t>();
+    c.lr = r.get<float>(); c.weight_decay = r.get<float>(); c.warmup = r.get<int32_t>(); c.clip = r.get<float>();
+    c.eval_every = r.get<int32_t>(); c.eval_batches = r.get<int32_t>(); c.optimizer = r.get<int32_t>();
+    c.seed = r.get<uint64_t>();
+    c.align = r.get<float>(); c.prompt_weight = r.get<float>(); c.dropout = r.get<float>(); c.ema = r.get<float>();
+    c.keep_best = r.get<uint8_t>() != 0; c.patience = r.get<int32_t>();
+    c.probe_every = r.get<int32_t>(); c.probe_target = r.get<float>();
+    c.checkpoint_every = r.get<double>();
+}
+
+// Progress of a run besides the model weights.
+struct RunState {
+    int step = 0;
+    double active = 0;
+    float ema_loss = 0, best_val = -1, last_val = -1, last_acc = -1;
+    int best_step = 0, stale = 0, snap_step = 0, snap_pass = -1;
+    long long opt_t = 0;
+    float lr_factor = 1, lr_fixed = 0;
+    uint64_t rng = 1;
+    TrainConfig cfg;
+    std::string note;
+    std::vector<std::string> names;
+    std::vector<std::vector<float>> w, m, s, snap, ema;
+    std::vector<float> train_hist, val_hist;
+    std::vector<int> val_steps, probe_steps, probe_hist;
+};
+
+// Reads the header (everything before the weights) or the whole state from one file.
+bool read_state_file(const std::string& file, RunState& st, bool full, std::string* err) {
+    In r;
+    r.i.open(upath(file), std::ios::binary);
+    if (!r.i) { if (err) *err = "no saved training"; return false; }
+    char magic[4] = {};
+    r.i.read(magic, 4);
+    if (!r.i || std::memcmp(magic, kStateMagic, 4) != 0 || r.get<uint32_t>() != kStateVersion) {
+        if (err) *err = "the saved training file is not valid";
+        return false;
+    }
+    st.step = r.get<int32_t>();
+    st.active = r.get<double>();
+    st.ema_loss = r.get<float>(); st.best_val = r.get<float>(); st.last_val = r.get<float>(); st.last_acc = r.get<float>();
+    st.best_step = r.get<int32_t>(); st.stale = r.get<int32_t>(); st.snap_step = r.get<int32_t>(); st.snap_pass = r.get<int32_t>();
+    st.opt_t = r.get<int64_t>();
+    st.lr_factor = r.get<float>(); st.lr_fixed = r.get<float>();
+    st.rng = r.get<uint64_t>();
+    get_config(r, st.cfg);
+    st.note = r.str();
+    if (full && r.ok) {
+        uint32_t n = r.get<uint32_t>();
+        for (uint32_t k = 0; k < n && r.ok && k < 100000; ++k) {
+            st.names.push_back(r.str());
+            st.w.push_back(r.vec<float>());
+            st.m.push_back(r.vec<float>());
+            st.s.push_back(r.vec<float>());
+            st.snap.push_back(r.vec<float>());
+            st.ema.push_back(r.vec<float>());
+        }
+        st.train_hist = r.vec<float>();
+        st.val_hist = r.vec<float>();
+        st.val_steps = r.vec<int>();
+        st.probe_steps = r.vec<int>();
+        st.probe_hist = r.vec<int>();
+        char end[4] = {};
+        r.i.read(end, 4);
+        if (!r.i || std::memcmp(end, kStateMagic, 4) != 0) r.ok = false;  // cut short
+    }
+    if (!r.ok || st.step < 0) {
+        if (err) *err = "the saved training file is damaged";
+        return false;
+    }
+    return true;
+}
+
+// The latest state, or the previous one when the latest is damaged (e.g. the
+// power went off while it was written).
+bool read_state(const std::string& path, RunState& st, bool full, std::string* err) {
+    std::string e1;
+    if (read_state_file(path + ".state", st, full, &e1)) return true;
+    st = RunState();
+    if (read_state_file(path + ".state.bak", st, full, nullptr)) return true;
+    if (err) *err = e1;
+    return false;
+}
+
+// Makes sure the file's data is on the disk, not only in the system cache.
+void flush_to_disk(const std::string& file) {
+#ifdef _WIN32
+    FILE* f = _wfopen(upath(file).c_str(), L"r+b");
+    if (f) { std::fflush(f); _commit(_fileno(f)); std::fclose(f); }
+#else
+    FILE* f = std::fopen(file.c_str(), "r+b");
+    if (f) { fsync(fileno(f)); std::fclose(f); }
+#endif
+}
+
+// Moves `tmp` over `path`. With `backup`, the old file is kept as `<path>.bak`.
+bool replace_file(const std::string& tmp, const std::string& path, bool backup, std::string* err) {
+    std::error_code ec;
+    if (backup && std::filesystem::exists(upath(path), ec)) {
+        std::filesystem::remove(upath(path + ".bak"), ec);
+        std::filesystem::rename(upath(path), upath(path + ".bak"), ec);
+    }
+    ec.clear();
+    std::filesystem::rename(upath(tmp), upath(path), ec);
+    if (ec) {
+        std::filesystem::remove(upath(path), ec);
+        std::filesystem::rename(upath(tmp), upath(path), ec);
+    }
+    if (ec) { if (err) *err = ec.message(); return false; }
+    return true;
+}
+
+}  // namespace
+
+bool read_checkpoint(const std::string& path, CheckpointInfo& info, std::string* err) {
+    RunState st;
+    if (!read_state(path, st, false, err)) return false;
+    std::error_code ec;
+    if (!std::filesystem::exists(upath(path), ec)) {
+        if (err) *err = "the saved model file is missing";
+        return false;
+    }
+    info.step = st.step;
+    info.elapsed = st.active;
+    info.best_val = st.best_val;
+    info.cfg = st.cfg;
+    info.note = st.note;
+    return true;
+}
+
+bool has_checkpoint(const std::string& path) {
+    std::error_code ec;
+    return !path.empty() && std::filesystem::exists(upath(path), ec) &&
+           (std::filesystem::exists(upath(path + ".state"), ec) || std::filesystem::exists(upath(path + ".state.bak"), ec));
+}
+
+void remove_checkpoint(const std::string& path) {
+    std::error_code ec;
+    for (const char* ext : {".state", ".state.bak", ".state.tmp", ".tmp", ""})
+        std::filesystem::remove(upath(path + ext), ec);
+}
 
 void Optimizer::step(const std::vector<Param*>& ps, float lr) {
     ++t_;
@@ -392,6 +596,164 @@ void Trainer::run() {
     sopts.align = text ? std::max(0.f, std::min(1.f, cfg.align)) : 0.f;
     sopts.prompt_weight = text ? std::max(0.f, std::min(1.f, cfg.prompt_weight)) : 1.f;
     ctl.dropout = text ? cfg.dropout : 0.f;
+    // ---- checkpoints
+    int start_step = 0;
+    if (cfg.resume) {
+        RunState st;
+        std::string err;
+        bool ok = read_state(cfg.checkpoint, st, true, &err);
+        if (ok && st.names.size() != ps.size()) { ok = false; err = "the saved training belongs to a different model"; }
+        for (size_t i = 0; ok && i < ps.size(); ++i) {
+            const Param& p = *ps[i];
+            size_t n = p.w.v.size();
+            auto fits = [&](const std::vector<float>& v) { return v.empty() || v.size() == n; };
+            if (st.names[i] != p.name || st.w[i].size() != n || !fits(st.m[i]) || !fits(st.s[i]) || !fits(st.snap[i]) || !fits(st.ema[i])) {
+                ok = false;
+                err = "the saved training belongs to a different model";
+            }
+        }
+        if (ok && st.step >= cfg.steps) { ok = false; err = "the saved training is already finished"; }
+        if (!ok) {
+            std::lock_guard<std::mutex> lk(stats_mu_);
+            stats_.state = TS_ERROR;
+            stats_.error = err;
+            TrainEvent e;
+            e.kind = EV_ERROR;
+            e.text = err;
+            events_.push_back(e);
+            running_ = false;
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lk(model_mu);
+            for (size_t i = 0; i < ps.size(); ++i) {
+                Param& p = *ps[i];
+                p.w.v = st.w[i];
+                if (!p.trainable) continue;
+                if (!st.m[i].empty()) { p.m.resize(p.w.rows, p.w.cols); p.m.v = st.m[i]; }
+                if (!st.s[i].empty()) { p.s.resize(p.w.rows, p.w.cols); p.s.v = st.s[i]; }
+                if (use_ema) ema_w[i] = st.ema[i].empty() ? p.w.v : st.ema[i];
+            }
+            if (!st.snap.empty() && std::any_of(st.snap.begin(), st.snap.end(), [](const std::vector<float>& v) { return !v.empty(); })) {
+                snap_w = st.snap;
+                snap_step = st.snap_step;
+                snap_pass = st.snap_pass;
+            }
+        }
+        start_step = st.step;
+        active = st.active;
+        ema = st.ema_loss;
+        best_val = st.best_val; best_step = st.best_step; stale = st.stale;
+        last_val = st.last_val; last_acc = st.last_acc;
+        opt.set_steps_taken((long)st.opt_t);
+        rng.s = st.rng ? st.rng : 1;
+        ctl.lr_factor = st.lr_factor;
+        ctl.lr_fixed = st.lr_fixed;
+        last_step = start_step;
+        std::lock_guard<std::mutex> lk(stats_mu_);
+        stats_.step = start_step;
+        stats_.loss = ema;
+        stats_.elapsed = active;
+        stats_.train_hist = st.train_hist;
+        stats_.val_hist = st.val_hist;
+        stats_.val_steps = st.val_steps;
+        stats_.probe_steps = st.probe_steps;
+        stats_.probe_hist = st.probe_hist;
+        stats_.best_val = best_val;
+        stats_.best_step = best_step;
+        stats_.val_loss = last_val;
+        stats_.val_acc = last_acc;
+        stats_.lr_factor = ctl.lr_factor;
+        stats_.lr_fixed = ctl.lr_fixed;
+        stats_.resumed_from = start_step;
+        stats_.saved_step = start_step;
+        TrainEvent e;
+        e.kind = EV_RESUMED;
+        e.step = start_step;
+        e.time = active;
+        events_.push_back(e);
+    } else if (!cfg.checkpoint.empty()) {
+        remove_checkpoint(cfg.checkpoint);  // an older run there is replaced by this one
+    }
+    bool model_saved = cfg.resume;
+    auto last_save = clock::now();
+    // Writes the checkpoint; call between steps (the raw weights must be in the model).
+    auto save_checkpoint = [&](int step) {
+        if (cfg.checkpoint.empty() || step <= 0) return;
+        last_save = clock::now();
+        std::string err;
+        bool ok = true;
+        std::vector<float> th, vh;
+        std::vector<int> vs, pst, phi;
+        {
+            std::lock_guard<std::mutex> lk(stats_mu_);
+            th = stats_.train_hist; vh = stats_.val_hist; vs = stats_.val_steps;
+            pst = stats_.probe_steps; phi = stats_.probe_hist;
+        }
+        {
+            std::lock_guard<std::mutex> lk(model_mu);
+            if (!model_saved) {
+                ok = model.save(cfg.checkpoint + ".tmp", false, &err);
+                if (ok) flush_to_disk(cfg.checkpoint + ".tmp");
+                ok = ok && replace_file(cfg.checkpoint + ".tmp", cfg.checkpoint, false, &err);
+                model_saved = ok;
+            }
+            if (ok) {
+                std::string tmp = cfg.checkpoint + ".state.tmp";
+                Out w;
+                w.o.open(upath(tmp), std::ios::binary | std::ios::trunc);
+                if (!w.o) { ok = false; err = "cannot write the checkpoint file"; }
+                else {
+                    w.o.write(kStateMagic, 4);
+                    w.put(kStateVersion);
+                    w.put((int32_t)step);
+                    w.put(active);
+                    w.put(ema); w.put(best_val); w.put(last_val); w.put(last_acc);
+                    w.put((int32_t)best_step); w.put((int32_t)stale); w.put((int32_t)snap_step); w.put((int32_t)snap_pass);
+                    w.put((int64_t)opt.steps_taken());
+                    w.put(ctl.lr_factor); w.put(ctl.lr_fixed);
+                    w.put((uint64_t)rng.s);
+                    put_config(w, cfg);
+                    w.str(cfg.checkpoint_note);
+                    w.put((uint32_t)ps.size());
+                    static const std::vector<float> none;
+                    for (size_t i = 0; i < ps.size(); ++i) {
+                        const Param& p = *ps[i];
+                        w.str(p.name);
+                        w.vec(p.w.v);
+                        w.vec(p.trainable ? p.m.v : none);
+                        w.vec(p.trainable ? p.s.v : none);
+                        w.vec(i < snap_w.size() ? snap_w[i] : none);
+                        w.vec(use_ema && i < ema_w.size() ? ema_w[i] : none);
+                    }
+                    w.vec(th); w.vec(vh); w.vec(vs); w.vec(pst); w.vec(phi);
+                    w.o.write(kStateMagic, 4);
+                    w.o.close();
+                    if (!w.o) { ok = false; err = "writing the checkpoint failed (is the disk full?)"; }
+                }
+                if (ok) {
+                    flush_to_disk(tmp);
+                    ok = replace_file(tmp, cfg.checkpoint + ".state", true, &err);
+                }
+                if (!ok) {
+                    std::error_code ec;
+                    std::filesystem::remove(upath(tmp), ec);
+                }
+            }
+        }
+        std::lock_guard<std::mutex> lk(stats_mu_);
+        if (ok) { stats_.saved_step = step; stats_.save_error.clear(); }
+        else if (stats_.save_error.empty()) {
+            stats_.save_error = err;
+            TrainEvent e;
+            e.kind = EV_CHECKPOINT;
+            e.step = step;
+            e.time = active;
+            e.text = err;
+            events_.push_back(e);
+        } else stats_.save_error = err;
+    };
+
     std::vector<std::shared_ptr<TrainHook>> hooks;
     for (auto& h : cfg.hooks) {
         if (!h) continue;
@@ -453,9 +815,14 @@ void Trainer::run() {
     };
     dispatch(info_at(HOOK_START, 0));
 
-    for (int step = 1; step <= cfg.steps && !ctl.stop_requested; ++step) {
+    for (int step = start_step + 1; step <= cfg.steps && !ctl.stop_requested; ++step) {
+        bool saved_on_pause = false;
         while (paused_ && !stop_) {
             { std::lock_guard<std::mutex> lk(stats_mu_); stats_.state = TS_PAUSED; }
+            if (!saved_on_pause && !cfg.checkpoint.empty() && step - 1 > start_step) {
+                save_checkpoint(step - 1);
+                saved_on_pause = true;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(40));
         }
         if (stop_) { final_state = TS_STOPPED; end_state = "stopped"; break; }
@@ -581,8 +948,19 @@ void Trainer::run() {
             end_state = "early_stop";
             break;
         }
+        if (!cfg.checkpoint.empty() && step < cfg.steps &&
+            std::chrono::duration<double>(clock::now() - last_save).count() >= std::max(5.0, cfg.checkpoint_every))
+            save_checkpoint(step);
     }
     if (ctl.stop_requested && final_state == TS_DONE) end_state = "hook_stop";
+    // A stopped or failed run stays resumable; a finished one needs no checkpoint any more.
+    if (!cfg.checkpoint.empty()) {
+        if (final_state == TS_STOPPED) {
+            if (last_step > start_step) save_checkpoint(last_step);
+        } else if (final_state == TS_DONE) {
+            remove_checkpoint(cfg.checkpoint);
+        }
+    }
     if (use_ema && final_state != TS_ERROR) {
         std::lock_guard<std::mutex> lk(model_mu);
         ema_swap();  // the averaged weights become the model

@@ -13,9 +13,14 @@
 #include <commdlg.h>
 #include <mmsystem.h>
 #include <shellapi.h>
+#include <shlobj.h>
+#include <dxgi.h>
+#include <pdh.h>
+#include <pdhmsg.h>
 
 #include <algorithm>
 #include <cwchar>
+#include <cwctype>
 
 static std::string narrow(const wchar_t* w) {
     int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
@@ -33,9 +38,10 @@ static std::string file_dialog(int kind, bool save) {
     ofn.hwndOwner = GetActiveWindow();
     ofn.lpstrFile = buf;
     ofn.nMaxFile = 4096;
-    ofn.lpstrFilter = kind == DLG_MODEL ? L"Kor model (*.kor)\0*.kor\0All files\0*.*\0"
-                                        : L"Data (*.txt;*.csv;*.tsv;*.png;*.bmp;*.ppm;*.pgm;*.wav)\0*.txt;*.csv;*.tsv;*.png;*.bmp;*.ppm;*.pgm;*.wav\0"
-                                          L"All files\0*.*\0";
+    ofn.lpstrFilter = kind == DLG_MODEL     ? L"Kor model (*.kor)\0*.kor\0All files\0*.*\0"
+                      : kind == DLG_PROJECT ? L"Kor project (project.korproj)\0*.korproj\0All files\0*.*\0"
+                                            : L"Data (*.txt;*.csv;*.tsv;*.png;*.bmp;*.ppm;*.pgm;*.wav)\0*.txt;*.csv;*.tsv;*.png;*.bmp;*.ppm;*.pgm;*.wav\0"
+                                              L"All files\0*.*\0";
     ofn.Flags = OFN_NOCHANGEDIR | (save ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST);
     if (save) ofn.lpstrDefExt = L"kor";
     BOOL ok = save ? GetSaveFileNameW(&ofn) : GetOpenFileNameW(&ofn);
@@ -59,6 +65,115 @@ std::string config_dir() {
     std::error_code ec;
     std::filesystem::create_directories(p, ec);
     return p.u8string();
+}
+
+std::string documents_dir() {
+    wchar_t buf[MAX_PATH] = L"";
+    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_PERSONAL, nullptr, 0, buf))) return narrow(buf);
+    const wchar_t* home = _wgetenv(L"USERPROFILE");
+    return home ? narrow(home) : config_dir();
+}
+
+// GPU memory: the adapter comes from DXGI, its use from the "GPU Adapter
+// Memory" performance counters (Windows 10 1709+). Both DLLs are loaded at
+// run time so older systems simply show no value.
+namespace {
+typedef PDH_STATUS(WINAPI* PdhOpenFn)(LPCWSTR, DWORD_PTR, PDH_HQUERY*);
+typedef PDH_STATUS(WINAPI* PdhAddFn)(PDH_HQUERY, LPCWSTR, DWORD_PTR, PDH_HCOUNTER*);
+typedef PDH_STATUS(WINAPI* PdhCollectFn)(PDH_HQUERY);
+typedef PDH_STATUS(WINAPI* PdhArrayFn)(PDH_HCOUNTER, DWORD, LPDWORD, LPDWORD, PPDH_FMT_COUNTERVALUE_ITEM_W);
+
+struct GpuWatch {
+    bool tried = false, ok = false;
+    double total_gb = 0;
+    wchar_t luid[64] = L"";
+    PDH_HQUERY query = nullptr;
+    PDH_HCOUNTER counter = nullptr;
+    PdhCollectFn collect = nullptr;
+    PdhArrayFn array = nullptr;
+} g_gpu;
+
+void gpu_init() {
+    g_gpu.tried = true;
+    HMODULE dx = LoadLibraryW(L"dxgi.dll");
+    if (!dx) return;
+    typedef HRESULT(WINAPI* CreateFn)(REFIID, void**);
+    auto create = (CreateFn)(void*)GetProcAddress(dx, "CreateDXGIFactory1");
+    IDXGIFactory1* f = nullptr;
+    if (!create || FAILED(create(__uuidof(IDXGIFactory1), (void**)&f))) return;
+    bool found = false, shared = false;
+    SIZE_T best = 0;
+    IDXGIAdapter1* a = nullptr;
+    for (UINT i = 0; f->EnumAdapters1(i, &a) != DXGI_ERROR_NOT_FOUND; ++i) {
+        DXGI_ADAPTER_DESC1 d;
+        if (SUCCEEDED(a->GetDesc1(&d)) && !(d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) && (!found || d.DedicatedVideoMemory > best)) {
+            found = true;
+            best = d.DedicatedVideoMemory;
+            shared = best < (SIZE_T(512) << 20);
+            g_gpu.total_gb = (shared ? d.SharedSystemMemory : best) / 1073741824.0;
+            _snwprintf(g_gpu.luid, 63, L"luid_0x%08x_0x%08x", (unsigned)d.AdapterLuid.HighPart, (unsigned)d.AdapterLuid.LowPart);
+        }
+        a->Release();
+    }
+    f->Release();
+    if (!found) return;
+    HMODULE pdh = LoadLibraryW(L"pdh.dll");
+    if (!pdh) return;
+    auto open = (PdhOpenFn)(void*)GetProcAddress(pdh, "PdhOpenQueryW");
+    auto add = (PdhAddFn)(void*)GetProcAddress(pdh, "PdhAddEnglishCounterW");
+    g_gpu.collect = (PdhCollectFn)(void*)GetProcAddress(pdh, "PdhCollectQueryData");
+    g_gpu.array = (PdhArrayFn)(void*)GetProcAddress(pdh, "PdhGetFormattedCounterArrayW");
+    if (!open || !add || !g_gpu.collect || !g_gpu.array) return;
+    if (open(nullptr, 0, &g_gpu.query) != ERROR_SUCCESS) return;
+    const wchar_t* path = shared ? L"\\GPU Adapter Memory(*)\\Shared Usage" : L"\\GPU Adapter Memory(*)\\Dedicated Usage";
+    if (add(g_gpu.query, path, 0, &g_gpu.counter) != ERROR_SUCCESS) return;
+    g_gpu.collect(g_gpu.query);
+    g_gpu.ok = true;
+}
+
+double gpu_used_gb() {
+    if (!g_gpu.tried) gpu_init();
+    if (!g_gpu.ok || g_gpu.collect(g_gpu.query) != ERROR_SUCCESS) return -1;
+    DWORD size = 0, count = 0;
+    if (g_gpu.array(g_gpu.counter, PDH_FMT_LARGE, &size, &count, nullptr) != (PDH_STATUS)PDH_MORE_DATA || !size) return -1;
+    std::vector<unsigned char> buf(size);
+    auto* items = (PPDH_FMT_COUNTERVALUE_ITEM_W)buf.data();
+    if (g_gpu.array(g_gpu.counter, PDH_FMT_LARGE, &size, &count, items) != ERROR_SUCCESS) return -1;
+    double sum = 0;
+    bool any = false;
+    for (DWORD i = 0; i < count; ++i) {
+        std::wstring name = items[i].szName;
+        for (auto& ch : name) ch = (wchar_t)towlower(ch);
+        if (name.find(g_gpu.luid) == std::wstring::npos) continue;
+        sum += (double)items[i].FmtValue.largeValue;
+        any = true;
+    }
+    return any ? sum / 1073741824.0 : -1;
+}
+}  // namespace
+
+Usage sample_usage() {
+    static ULONGLONG last_idle = 0, last_total = 0;
+    Usage u;
+    u.gpu_used_gb = gpu_used_gb();
+    u.gpu_total_gb = g_gpu.total_gb;
+    FILETIME idle, kernel, user;
+    if (GetSystemTimes(&idle, &kernel, &user)) {
+        auto v = [](const FILETIME& f) { return ((ULONGLONG)f.dwHighDateTime << 32) | f.dwLowDateTime; };
+        ULONGLONG i = v(idle), total = v(kernel) + v(user);  // kernel time includes idle time
+        if (last_total && total > last_total)
+            u.cpu = 1.f - (float)(i - last_idle) / (float)(total - last_total);
+        last_idle = i;
+        last_total = total;
+    }
+    MEMORYSTATUSEX ms;
+    ms.dwLength = sizeof(ms);
+    if (GlobalMemoryStatusEx(&ms)) {
+        u.ram_total_gb = ms.ullTotalPhys / 1073741824.0;
+        u.ram_used_gb = (ms.ullTotalPhys - ms.ullAvailPhys) / 1073741824.0;
+    }
+    if (u.cpu > 1) u.cpu = 1;
+    return u;
 }
 
 int system_language() {
@@ -198,6 +313,19 @@ void open_folder(const std::string& path) {
     ShellExecuteW(nullptr, L"open", widen(path).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
 
+std::string user_name() {
+    wchar_t buf[256];
+    DWORD n = 256;
+    if (GetUserNameW(buf, &n)) return narrow(buf);
+    const wchar_t* u = _wgetenv(L"USERNAME");
+    return u ? narrow(u) : "";
+}
+
+void open_terminal(const std::string& dir) {
+    std::wstring args = L"/K set \"PATH=" + widen(exe_dir()) + L";%PATH%\"";
+    ShellExecuteW(nullptr, L"open", L"cmd.exe", args.c_str(), widen(dir).c_str(), SW_SHOWNORMAL);
+}
+
 bool play_wav(const std::string& path) {
     return PlaySoundW(widen(path).c_str(), nullptr, SND_FILENAME | SND_ASYNC | SND_NODEFAULT) != FALSE;
 }
@@ -209,6 +337,7 @@ void stop_sound() { PlaySoundW(nullptr, nullptr, 0); }
 #include <climits>
 #include <csignal>
 #include <cstdio>
+#include <cstring>
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/wait.h>
@@ -337,6 +466,65 @@ std::string config_dir() {
     std::error_code ec;
     std::filesystem::create_directories(p, ec);
     return p.string();
+}
+
+std::string documents_dir() {
+    const char* home = std::getenv("HOME");
+    if (!home) return config_dir();
+    std::error_code ec;
+    std::filesystem::path d = std::filesystem::path(home) / "Documents";
+    return std::filesystem::is_directory(d, ec) ? d.string() : std::string(home);
+}
+
+Usage sample_usage() {
+    static unsigned long long last_idle = 0, last_total = 0;
+    Usage u;
+    if (FILE* f = std::fopen("/proc/stat", "r")) {
+        unsigned long long v[8] = {};
+        if (std::fscanf(f, "cpu %llu %llu %llu %llu %llu %llu %llu %llu", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7]) >= 4) {
+            unsigned long long idle = v[3] + v[4], total = 0;
+            for (unsigned long long x : v) total += x;
+            if (last_total && total > last_total) u.cpu = 1.f - (float)(idle - last_idle) / (float)(total - last_total);
+            last_idle = idle;
+            last_total = total;
+        }
+        std::fclose(f);
+    }
+    if (FILE* f = std::fopen("/proc/meminfo", "r")) {
+        char key[64];
+        unsigned long long kb;
+        double total = 0, avail = -1;
+        while (std::fscanf(f, "%63s %llu kB\n", key, &kb) == 2) {
+            if (!std::strcmp(key, "MemTotal:")) total = kb / 1048576.0;
+            if (!std::strcmp(key, "MemAvailable:")) avail = kb / 1048576.0;
+        }
+        std::fclose(f);
+        u.ram_total_gb = total;
+        if (avail >= 0) u.ram_used_gb = total - avail;
+    }
+    return u;
+}
+
+std::string user_name() {
+    const char* u = std::getenv("USER");
+    return u ? u : "";
+}
+
+void open_terminal(const std::string& dir) {
+    pid_t pid = fork();
+    if (pid != 0) return;
+    if (chdir(dir.c_str()) != 0) _exit(1);
+    std::string path = exe_dir() + ":" + (std::getenv("PATH") ? std::getenv("PATH") : "");
+    setenv("PATH", path.c_str(), 1);
+    setsid();
+#if defined(__APPLE__)
+    execlp("open", "open", "-a", "Terminal", ".", (char*)nullptr);
+#else
+    execlp("x-terminal-emulator", "x-terminal-emulator", (char*)nullptr);
+    execlp("gnome-terminal", "gnome-terminal", (char*)nullptr);
+    execlp("xterm", "xterm", (char*)nullptr);
+#endif
+    _exit(127);
 }
 
 int system_language() {

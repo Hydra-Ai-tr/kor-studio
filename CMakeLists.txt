@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(KorStudio VERSION 0.5.0 LANGUAGES C CXX)
+project(KorStudio VERSION 0.6.0 LANGUAGES C CXX)
 
 option(KOR_BUILD_GUI "Build the Kor Studio desktop application" ON)
 
@@ -123,7 +123,7 @@ if(KOR_BUILD_GUI)
   add_executable(kor-studio WIN32 ${KOR_APP_SOURCES})
   target_link_libraries(kor-studio PRIVATE korskills imgui)
   if(WIN32)
-    target_link_libraries(kor-studio PRIVATE comdlg32 winmm)
+    target_link_libraries(kor-studio PRIVATE comdlg32 winmm shell32)
   endif()
   if(MSVC)
     target_link_options(kor-studio PRIVATE /ENTRY:mainCRTStartup)
@@ -140,5 +140,8 @@ if(KOR_BUILD_GUI)
     COMMAND ${CMAKE_COMMAND} -E copy_directory
             ${CMAKE_SOURCE_DIR}/plugins $<TARGET_FILE_DIR:kor-studio>/plugins
     COMMAND ${CMAKE_COMMAND} -E copy_directory
-            ${CMAKE_SOURCE_DIR}/community $<TARGET_FILE_DIR:kor-studio>/community)
+            ${CMAKE_SOURCE_DIR}/community $<TARGET_FILE_DIR:kor-studio>/community
+    COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:kor-studio>/assets
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_SOURCE_DIR}/assets/hero.png $<TARGET_FILE_DIR:kor-studio>/assets/hero.png)
 endif()

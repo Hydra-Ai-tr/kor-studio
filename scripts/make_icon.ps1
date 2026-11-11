@@ -12,7 +12,7 @@ function New-LogoBitmap([int]$size) {
     $g.Clear([System.Drawing.Color]::Transparent)
     $k = $size / 256.0
     $g.ScaleTransform($k, $k)
-    $dark = [System.Drawing.Color]::FromArgb(255, 23, 18, 15)
+    $dark = [System.Drawing.Color]::FromArgb(255, 17, 13, 28)
 
     # rounded background tile
     $r = 56; $d = 2 * $r
@@ -34,7 +34,7 @@ function New-LogoBitmap([int]$size) {
     $rect = New-Object System.Drawing.RectangleF 0, 24, 256, 208
     $grad = New-Object System.Drawing.Drawing2D.LinearGradientBrush $rect, ([System.Drawing.Color]::White), ([System.Drawing.Color]::Black), 90.0
     $blend = New-Object System.Drawing.Drawing2D.ColorBlend 3
-    $blend.Colors = @([System.Drawing.Color]::FromArgb(255, 255, 194, 74), [System.Drawing.Color]::FromArgb(255, 255, 122, 26), [System.Drawing.Color]::FromArgb(255, 229, 64, 27))
+    $blend.Colors = @([System.Drawing.Color]::FromArgb(255, 196, 168, 255), [System.Drawing.Color]::FromArgb(255, 139, 92, 246), [System.Drawing.Color]::FromArgb(255, 109, 63, 217))
     $blend.Positions = @(0.0, 0.55, 1.0)
     $grad.InterpolationColors = $blend
     $g.FillPath($grad, $ember)
@@ -46,7 +46,7 @@ function New-LogoBitmap([int]$size) {
     $g.DrawLine($pen, 128, 112, 94, 172)
     $g.DrawLine($pen, 128, 112, 162, 172)
     $g.DrawLine($pen, 94, 172, 162, 172)
-    $hi = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(255, 255, 217, 138))
+    $hi = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(255, 219, 204, 255))
     foreach ($n in $nodes) {
         $g.FillEllipse($bg, $n[0] - 16, $n[1] - 16, 32, 32)
         $g.FillEllipse($hi, $n[0] - 6.5, $n[1] - 6.5, 13, 13)

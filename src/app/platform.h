@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-enum DialogKind { DLG_DATA = 0, DLG_MODEL = 1 };
+enum DialogKind { DLG_DATA = 0, DLG_MODEL = 1, DLG_PROJECT = 2 };
 
 // Native "open file" / "save file" dialogs. Return "" if cancelled or if
 // the platform has no native dialog (the user can type a path instead).
@@ -15,6 +15,21 @@ bool has_native_dialogs();
 
 std::string exe_dir();
 std::string config_dir();   // per-user settings directory (created on demand)
+std::string documents_dir();  // the user's documents folder (home if there is none)
+
+// Whole-machine load: CPU busy share 0..1 since the previous call (-1 on the
+// first call or if unknown) and memory in use / installed, in GB.
+// GPU memory is that of the largest graphics adapter (its shared memory for
+// integrated graphics); gpu_used_gb is -1 where it cannot be read.
+struct Usage {
+    float cpu = -1;
+    double ram_used_gb = 0, ram_total_gb = 0;
+    double gpu_used_gb = -1, gpu_total_gb = 0;
+};
+Usage sample_usage();
+std::string user_name();  // the account the app runs under
+// Opens a terminal in `dir` where kor-cli (next to the app) can be run.
+void open_terminal(const std::string& dir);
 int system_language();      // Lang value guessed from the OS locale
 
 // Runs a program (args[0]) with arguments and waits for it. Standard output

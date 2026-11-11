@@ -1,27 +1,27 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Kor Studio">
   <defs>
     <linearGradient id="ember" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#FFC24A"/>
-      <stop offset="0.55" stop-color="#FF7A1A"/>
-      <stop offset="1" stop-color="#E5401B"/>
+      <stop offset="0" stop-color="#C4A8FF"/>
+      <stop offset="0.55" stop-color="#8B5CF6"/>
+      <stop offset="1" stop-color="#6D3FD9"/>
     </linearGradient>
   </defs>
   <!-- background tile -->
-  <rect width="256" height="256" rx="56" fill="#17120F"/>
+  <rect width="256" height="256" rx="56" fill="#110D1C"/>
   <!-- the ember -->
   <path d="M128 26 C150 70 202 100 202 154 A74 74 0 0 1 54 154 C54 100 106 70 128 26 Z" fill="url(#ember)"/>
   <!-- the network inside it -->
-  <g stroke="#17120F" stroke-width="9" stroke-linecap="round">
+  <g stroke="#110D1C" stroke-width="9" stroke-linecap="round">
     <line x1="128" y1="112" x2="94" y2="172"/>
     <line x1="128" y1="112" x2="162" y2="172"/>
     <line x1="94" y1="172" x2="162" y2="172"/>
   </g>
-  <g fill="#17120F">
+  <g fill="#110D1C">
     <circle cx="128" cy="112" r="16"/>
     <circle cx="94" cy="172" r="16"/>
     <circle cx="162" cy="172" r="16"/>
   </g>
-  <g fill="#FFD98A">
+  <g fill="#DBCCFF">
     <circle cx="128" cy="112" r="6.5"/>
     <circle cx="94" cy="172" r="6.5"/>
     <circle cx="162" cy="172" r="6.5"/>

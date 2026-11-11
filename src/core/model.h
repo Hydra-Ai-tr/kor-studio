@@ -4,6 +4,7 @@
 
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -64,6 +65,9 @@ public:
     // MLP: feature names and standardization (last entry = target for regression).
     std::vector<std::string> feat_names;
     std::vector<float> norm_mean, norm_std;
+    // Notes kept in the file, e.g. the dialogue tags "q_tag" and "a_tag" of
+    // the text the model learned (used by the chat page).
+    std::map<std::string, std::string> meta;
 
     explicit Model(const ModelSpec& s, uint64_t seed = 1234);
 

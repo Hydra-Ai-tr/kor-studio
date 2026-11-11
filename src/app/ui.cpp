@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <cfloat>
 #include <chrono>
 #include <cmath>
@@ -26,6 +27,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <memory>
 #include <set>
@@ -33,6 +35,9 @@
 #include <string>
 #include <vector>
 
+#ifndef GL_CLAMP_TO_EDGE
+#define GL_CLAMP_TO_EDGE 0x812F
+#endif
 #ifndef KOR_VERSION
 #define KOR_VERSION "dev"
 #endif
@@ -147,6 +152,89 @@ struct State {
     int community_state = 0;  // 0 not loaded, 1 loading, 2 loaded, 3 failed
     bool save_settings = true;
     bool scroll_end = false, want_community = false;
+
+    // projects: a folder with project.korproj, the model and (single-file) data
+    struct ProjectInfo {
+        std::string dir, name, desc, data, data_path, model;
+        std::time_t updated = 0;
+        double params = 0;
+        int kind = -1;  // data kind, -1 without data
+    };
+    std::string project_dir, project_name, project_desc;  // the open project ("" = none)
+    std::vector<std::string> recent_projects;
+    std::vector<ProjectInfo> projects;
+    bool projects_scanned = false;
+    std::string project_msg;
+    bool project_ok = true;
+    bool want_new_project = false;
+    char new_project_name[128] = "", new_project_desc[256] = "";
+    std::string new_project_err;
+
+    // window frame and shell around the pages
+    bool custom_frame = false, maximized = false, sidebar_folded = false, want_settings = false;
+    int window_cmd = 0;
+    float title_h = 0;
+    std::vector<ImVec4> title_hot;  // clickable parts of the title bar (x0, y0, x1, y1)
+    size_t seen_activity = 0;       // activity entries already shown under the bell
+    ImTextureID hero_tex = 0;
+    int hero_w = 0, hero_h = 0;
+    std::string user;
+
+    // numbers for the home page tiles
+    std::vector<std::string> recent_data;  // datasets loaded before, newest first
+    int dataset_count = 0, train_runs = 0;
+    double data_bytes = 0, disk_used_gb = 0, disk_total_gb = 0, disk_at = -100;
+
+    // activity feed (kept in <config>/activity.log)
+    enum ActKind { ACT_TRAIN_START = 0, ACT_TRAIN_DONE, ACT_TRAIN_STOP, ACT_RESUMED, ACT_MODEL_SAVED, ACT_DATA_LOADED,
+                   ACT_PROJECT_SAVED, ACT_PROJECT_OPENED, ACT_COUNT };
+    struct Act {
+        std::time_t t = 0;
+        int kind = 0;
+        std::string arg;
+    };
+    std::vector<Act> activity;
+
+    // live machine load for the home page
+    Usage usage;
+    double usage_at = -10;
+    int model_count = 0;
+    double models_counted_at = -100;
+
+    // quick search (Ctrl+K)
+    bool want_palette = false;
+    char palette_q[128] = "";
+    int palette_sel = 0;
+
+    // crash-safe training: the run saves itself to <config>/autosave
+    bool resume_avail = false, resume_warn = false;
+    CheckpointInfo resume_info;
+    std::string resume_data, resume_msg;
+
+    // chat page: its own model, independent of training
+    struct Chat {
+        std::shared_ptr<Model> model;
+        std::string path, name, msg;
+        bool ok = true;
+        char q_tag[128] = "Kullanıcı: ", a_tag[128] = "Asistan: ";
+        struct Msg { bool user; std::string text; };
+        std::vector<Msg> msgs;
+        std::vector<std::string> queue;  // messages waiting for the model
+        char input[4096] = "";
+        float temperature = 0.3f;
+        int max_len = 200;
+        bool memory = true, settings_open = false;
+        std::thread th;
+        std::atomic<bool> running{false}, cancel{false};
+        std::mutex mu;      // guards reply
+        std::string reply;  // the answer the worker is writing
+        Rng rng{77};
+        bool focus = true, scroll = false;
+        struct File { std::string path, name, when; double mb = 0; };
+        std::vector<File> files;
+        std::vector<std::string> recent;  // opened from elsewhere, newest first
+        bool scanned = false;
+    } chat;
 };
 State A;
 
@@ -252,6 +340,51 @@ void table_headers() {
     ImGui::PopStyleColor();
 }
 
+// --------------------------------------------------------------- activity
+
+std::string activity_file() { return (upath(config_dir()) / "activity.log").u8string(); }
+
+void add_activity(int kind, std::string arg) {
+    for (char& c : arg)
+        if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+    A.activity.push_back({std::time(nullptr), kind, arg});
+    if (A.activity.size() > 50) A.activity.erase(A.activity.begin(), A.activity.end() - 50);
+    if (!A.save_settings) return;  // screenshot runs leave no trace
+    std::ofstream o(upath(activity_file()), std::ios::binary | std::ios::trunc);
+    for (auto& a : A.activity) o << (long long)a.t << '\t' << a.kind << '\t' << a.arg << '\n';
+}
+
+void load_activity() {
+    std::ifstream in(upath(activity_file()), std::ios::binary);
+    std::string line;
+    while (std::getline(in, line)) {
+        size_t t1 = line.find('\t'), t2 = t1 == std::string::npos ? t1 : line.find('\t', t1 + 1);
+        if (t2 == std::string::npos) continue;
+        State::Act a;
+        a.t = (std::time_t)std::atoll(line.substr(0, t1).c_str());
+        a.kind = std::atoi(line.substr(t1 + 1, t2 - t1 - 1).c_str());
+        a.arg = line.substr(t2 + 1);
+        if (a.kind >= 0 && a.kind < State::ACT_COUNT && a.t > 0) A.activity.push_back(a);
+    }
+    if (A.activity.size() > 50) A.activity.erase(A.activity.begin(), A.activity.end() - 50);
+}
+
+std::string act_text(const State::Act& a) {
+    static const S fmt[State::ACT_COUNT] = {S::ActTrainStart, S::ActTrainDone, S::ActTrainStop, S::ActResumed,
+                                            S::ActModelSaved, S::ActDataLoaded, S::ActProjectSaved, S::ActProjectOpened};
+    return strf(tr(fmt[a.kind]), a.arg.c_str());
+}
+
+std::string ago(std::time_t t) {
+    double s = std::difftime(std::time(nullptr), t);
+    if (s < 60) return tr(S::AgoNow);
+    if (s < 3600) return strf(tr(S::AgoMin), (int)(s / 60));
+    if (s < 86400) return strf(tr(S::AgoHour), (int)(s / 3600));
+    return strf(tr(S::AgoDay), (int)(s / 86400));
+}
+
+std::string file_name(const std::string& path) { return path.empty() ? "" : upath(path).filename().u8string(); }
+
 // ------------------------------------------------------------ training log
 
 std::string logs_dir() { return (upath(config_dir()) / "logs").u8string(); }
@@ -288,6 +421,91 @@ void start_log() {
     log_fmt(State::T_MUTED, S::LogCfg, A.cfg.steps, A.cfg.batch, A.cfg.accum, (double)A.cfg.lr,
             A.cfg.optimizer == OPT_SGD ? "SGD" : "AdamW", A.cfg.threads);
     if (!A.cfg.probes.empty()) log_fmt(State::T_MUTED, S::LogTests, (int)A.cfg.probes.size());
+}
+
+// ----------------------------------------------------- autosave and models
+
+std::string autosave_path() { return (upath(config_dir()) / "autosave" / "training.kor").u8string(); }
+std::string models_dir() { return (upath(config_dir()) / "models").u8string(); }
+
+// What the app needs to continue a saved run besides the trainer's own
+// state: where the data is and how it was read, then the question tests.
+// Projects store the same, after their own keys.
+std::string checkpoint_note(const std::string& data_path) {
+    std::ostringstream o;
+    o << "data=" << data_path << "\n"
+      << "kind=" << A.data_kind << "\n"
+      << "target=" << A.data.target_col << "\n"
+      << "subword=" << (A.subword ? A.subword_size : 0) << "\n"
+      << "img_size=" << A.img_size << "\nimg_colors=" << A.img_colors << "\nimg_mirror=" << (A.img_mirror ? 1 : 0) << "\n"
+      << "snd_rate=" << A.snd_rate << "\n"
+      << "from_file=" << (A.from_file ? 1 : 0) << "\n"
+      << "stop_on_pass=" << (A.stop_on_pass ? 1 : 0) << "\n"
+      << "---\n" << A.tests;
+    return o.str();
+}
+
+std::map<std::string, std::string> parse_note(const std::string& note, std::string* tests) {
+    std::map<std::string, std::string> kv;
+    size_t pos = 0;
+    while (pos < note.size()) {
+        size_t nl = note.find('\n', pos);
+        std::string line = note.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
+        pos = nl == std::string::npos ? note.size() : nl + 1;
+        if (line == "---") {
+            if (tests) *tests = note.substr(pos);
+            break;
+        }
+        size_t eq = line.find('=');
+        if (eq != std::string::npos) kv[line.substr(0, eq)] = line.substr(eq + 1);
+    }
+    return kv;
+}
+
+// Looks for a saved unfinished run (at start and when a run stops).
+void refresh_resume() {
+    A.resume_avail = false;
+    A.resume_data.clear();
+    std::string ck = autosave_path();
+    if (!has_checkpoint(ck)) return;
+    std::string err;
+    if (!read_checkpoint(ck, A.resume_info, &err) || A.resume_info.step <= 0) return;
+    std::string data = parse_note(A.resume_info.note, nullptr)["data"];
+    A.resume_data = upath(data).filename().u8string();
+    A.resume_avail = true;
+}
+
+void save_open_project();
+
+// A finished model goes to <config>/models, where the chat page finds it.
+void save_finished_model() {
+    if (!A.model) return;
+    std::error_code ec;
+    std::filesystem::create_directories(upath(models_dir()), ec);
+    std::string stem = A.data.path.empty() ? "model" : upath(A.data.path).stem().u8string();
+    if (stem.empty()) stem = "model";
+    for (char& c : stem)
+        if (c == ' ' || c == ':' || c == '/' || c == '\\') c = '_';
+    std::string path = (upath(models_dir()) / (stem + "-" + timestamp(true) + ".kor")).u8string(), err;
+    bool ok;
+    {
+        std::lock_guard<std::mutex> lk(A.trainer.model_mu);
+        ok = A.model->save(path + ".tmp", false, &err);
+    }
+    if (ok) {
+        std::filesystem::rename(upath(path + ".tmp"), upath(path), ec);
+        ok = !ec;
+        if (ec) err = ec.message();
+    }
+    if (ok) {
+        log_fmt(State::T_GOOD, S::LogSavedModel, path.c_str());
+        add_activity(State::ACT_MODEL_SAVED, file_name(path));
+        A.chat.scanned = false;
+        A.models_counted_at = -100;
+    } else {
+        std::filesystem::remove(upath(path + ".tmp"), ec);
+        log_fmt(State::T_BAD, S::LogError, err.c_str());
+    }
 }
 
 // Moves new training events into the log; called every frame.
@@ -374,8 +592,25 @@ void pump_events() {
                 std::snprintf(b, sizeof b, tr(S::LogHookDropout), (double)e.loss);
                 log_line(t + "[" + e.source + "] " + b, State::T_ACCENT);
                 break;
+            case EV_RESUMED:
+                std::snprintf(b, sizeof b, tr(S::LogResumed), e.step);
+                log_line(t + b, State::T_ACCENT);
+                break;
+            case EV_CHECKPOINT:
+                std::snprintf(b, sizeof b, tr(S::LogCheckpointFail), e.step, e.text.c_str());
+                log_line(t + b, State::T_BAD);
+                break;
         }
-        if (e.kind == EV_DONE || e.kind == EV_STOPPED || e.kind == EV_ERROR) A.log_file.close();
+        if (e.kind == EV_DONE) add_activity(State::ACT_TRAIN_DONE, file_name(A.data.path));
+        if (e.kind == EV_STOPPED) add_activity(State::ACT_TRAIN_STOP, file_name(A.data.path));
+        if (e.kind == EV_DONE && A.save_settings) {
+            save_finished_model();
+            if (!A.project_dir.empty()) save_open_project();
+        }
+        if (e.kind == EV_DONE || e.kind == EV_STOPPED || e.kind == EV_ERROR) {
+            A.log_file.close();
+            if (A.save_settings) refresh_resume();
+        }
     }
 }
 
@@ -441,12 +676,14 @@ void auto_configure() {
     A.has_plan = true;
 }
 
-ImTextureID make_texture(const Image& img) {
+ImTextureID make_texture(const Image& img, bool smooth = false) {
     GLuint t = 0;
     glGenTextures(1, &t);
     glBindTexture(GL_TEXTURE_2D, t);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, smooth ? GL_LINEAR : GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, smooth ? GL_LINEAR : GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, img.w, img.h, 0, GL_RGB, GL_UNSIGNED_BYTE, img.rgb.data());
     return (ImTextureID)t;
@@ -600,6 +837,12 @@ bool load_data_impl(const std::string& path, int kind, int target_col) {
         reset_generation();
         auto_configure();
     }
+    add_activity(State::ACT_DATA_LOADED, file_name(path));
+    auto& rd = A.recent_data;
+    rd.erase(std::remove(rd.begin(), rd.end(), path), rd.end());
+    rd.insert(rd.begin(), path);
+    if (rd.size() > 30) rd.resize(30);
+    A.models_counted_at = -100;
     return true;
 }
 
@@ -682,11 +925,41 @@ void add_skill_hooks() {
     }
 }
 
-void begin_training() {
+// Starts a run, or continues the saved one (`resume`; the model, data and
+// settings must already be restored, see resume_training()).
+void begin_training(bool resume = false) {
     if (busy() || A.data.kind == DATA_NONE) return;
-    if (!A.model || !model_matches_data()) build_model();
+    // Screenshot runs (settings left alone) neither save nor replace the autosave.
+    bool autosave = A.save_settings;
+    if (!resume && autosave && A.resume_avail) {
+        A.resume_warn = true;
+        A.page = PAGE_TRAIN;
+        return;
+    }
+    if (!A.model || !model_matches_data()) {
+        if (resume) return;
+        build_model();
+    }
     A.gen_left = 0;
-    A.cfg.seed = (uint64_t)std::chrono::steady_clock::now().time_since_epoch().count();
+    if (!resume) A.cfg.seed = (uint64_t)std::chrono::steady_clock::now().time_since_epoch().count();
+    A.cfg.resume = resume && autosave;
+    A.cfg.checkpoint.clear();
+    if (autosave) {
+        std::error_code ec;
+        std::filesystem::create_directories(upath(autosave_path()).parent_path(), ec);
+        A.cfg.checkpoint = autosave_path();
+        A.cfg.checkpoint_every = 60;
+        A.cfg.checkpoint_note = checkpoint_note(A.data.path);
+    }
+    if (A.model->spec.kind == MODEL_GPT && A.model->spec.media == MEDIA_TEXT) {
+        // The chat page reads the dialogue tags from the saved model.
+        A.model->meta.erase("q_tag");
+        A.model->meta.erase("a_tag");
+        if (!A.q_tag.empty() && !A.a_tag.empty()) {
+            A.model->meta["q_tag"] = A.q_tag;
+            A.model->meta["a_tag"] = A.a_tag;
+        }
+    }
     A.cfg.probes = A.data.kind == DATA_TEXT && A.data.media == MEDIA_TEXT ? current_tests() : std::vector<Probe>();
     A.cfg.probe_target = A.stop_on_pass ? 1.f : 0.f;
     A.run_tests = A.cfg.probes;
@@ -711,7 +984,327 @@ void begin_training() {
         A.log_file.close();
     } else {
         A.settings_open = false;  // the chart, log and tests get the room
+        add_activity(resume ? State::ACT_RESUMED : State::ACT_TRAIN_START, file_name(A.data.path));
+        if (autosave) {
+            A.resume_avail = false;
+            A.resume_warn = false;
+            A.resume_msg.clear();
+        }
     }
+}
+
+// Restores the data, model and settings of the saved run and continues it.
+void resume_training() {
+    if (busy()) return;
+    A.resume_msg.clear();
+    std::string ck = autosave_path(), err, tests;
+    CheckpointInfo info;
+    if (!read_checkpoint(ck, info, &err)) { A.resume_msg = err; return; }
+    auto kv = parse_note(info.note, &tests);
+    auto num = [&](const char* k, int def) { auto it = kv.find(k); return it == kv.end() ? def : std::atoi(it->second.c_str()); };
+    std::string data = kv["data"];
+    std::error_code ec;
+    if (data.empty() || !std::filesystem::exists(upath(data), ec)) {
+        A.resume_msg = strf(tr(S::ResumeNoData), data.c_str());
+        return;
+    }
+    auto m = Model::load(ck, &err);
+    if (!m) { A.resume_msg = err; return; }
+    int kind = std::max(0, std::min(3, num("kind", 0)));
+    int sub = num("subword", 0);
+    A.subword = sub > 0;
+    if (sub > 0) A.subword_size = sub;
+    A.img_size = num("img_size", A.img_size);
+    A.img_colors = num("img_colors", A.img_colors);
+    A.img_mirror = num("img_mirror", 1) != 0;
+    A.snd_rate = num("snd_rate", A.snd_rate);
+    // With the saved model in place first, images and sound are read in its format.
+    A.model = m;
+    A.spec = m->spec;
+    A.from_file = true;
+    reset_generation();
+    A.data_kind = kind;
+    std::snprintf(A.data_path, sizeof A.data_path, "%s", data.c_str());
+    if (!load_data_impl(data, kind, num("target", -1))) { A.resume_msg = A.data_msg; return; }
+    if (A.model != m || !model_matches_data()) {
+        A.resume_msg = "the data does not fit the saved model any more";
+        return;
+    }
+    A.from_file = num("from_file", 0) != 0;
+    set_tests(tests);
+    A.stop_on_pass = num("stop_on_pass", 0) != 0;
+    TrainConfig c = info.cfg;
+    c.threads = A.cfg.threads;
+    A.cfg = c;
+    A.page = PAGE_TRAIN;
+    begin_training(true);
+}
+
+void discard_resume() {
+    remove_checkpoint(autosave_path());
+    A.resume_avail = false;
+    A.resume_warn = false;
+    A.resume_msg.clear();
+}
+
+// ---------------------------------------------------------------- projects
+
+const char* const kProjectFile = "project.korproj";
+
+std::string projects_root() { return (upath(documents_dir()) / "Kor Studio Projects").u8string(); }
+
+void remember_project(const std::string& dir) {
+    auto& r = A.recent_projects;
+    r.erase(std::remove(r.begin(), r.end(), dir), r.end());
+    r.insert(r.begin(), dir);
+    if (r.size() > 12) r.resize(12);
+}
+
+bool read_project(const std::string& dir, std::map<std::string, std::string>& kv, std::string& tests) {
+    std::ifstream in(upath(dir) / kProjectFile, std::ios::binary);
+    if (!in) return false;
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    kv = parse_note(ss.str(), &tests);
+    return true;
+}
+
+// Moves `tmp` over `dst` (also where rename cannot replace a file).
+bool move_over(const std::filesystem::path& tmp, const std::filesystem::path& dst, std::string& err) {
+    std::error_code ec;
+    std::filesystem::rename(tmp, dst, ec);
+    if (ec) {
+        std::filesystem::remove(dst, ec);
+        std::filesystem::rename(tmp, dst, ec);
+    }
+    if (ec) err = ec.message();
+    return !ec;
+}
+
+// Writes the data settings, question tests, training settings and the model
+// into `dir`. Data that is a single file is copied in, so the folder is
+// complete on its own; folders of pictures or sound are referenced.
+bool save_project(const std::string& dir, const std::string& name, const std::string& desc, std::string& err) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path root = upath(dir);
+    fs::create_directories(root, ec);
+    if (ec) { err = ec.message(); return false; }
+    std::map<std::string, std::string> old;
+    std::string old_tests;
+    read_project(dir, old, old_tests);
+    std::string data = A.data.kind != DATA_NONE ? A.data.path : "";
+    if (!data.empty()) {
+        fs::path src = upath(data);
+        if (fs::is_regular_file(src, ec) && fs::file_size(src, ec) < (200ull << 20)) {
+            fs::path dst = root / "data" / src.filename();
+            std::error_code eq;
+            if (!fs::equivalent(src, dst, eq)) {
+                fs::create_directories(dst.parent_path(), ec);
+                fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec);
+                if (ec) { err = ec.message(); return false; }
+            }
+            data = "data/" + src.filename().u8string();
+        }
+    }
+    std::string model_file;
+    long long params = 0;
+    if (A.model) {
+        fs::path mp = root / "model.kor";
+        bool ok;
+        {
+            std::lock_guard<std::mutex> lk(A.trainer.model_mu);
+            ok = A.model->save(mp.u8string() + ".tmp", false, &err);
+            params = (long long)A.model->param_count(false);
+        }
+        if (!ok || !move_over(upath(mp.u8string() + ".tmp"), mp, err)) return false;
+        model_file = "model.kor";
+    }
+    const TrainConfig& c = A.cfg;
+    std::ostringstream o;
+    o << "name=" << name << "\n"
+      << "desc=" << desc << "\n"
+      << "created=" << (old.count("created") ? old["created"] : std::to_string((long long)std::time(nullptr))) << "\n"
+      << "updated=" << (long long)std::time(nullptr) << "\n"
+      << "version=" << KOR_VERSION << "\n"
+      << "model=" << model_file << "\n"
+      << "params=" << params << "\n"
+      << "cfg.steps=" << c.steps << "\ncfg.batch=" << c.batch << "\ncfg.accum=" << c.accum << "\ncfg.lr=" << c.lr
+      << "\ncfg.wd=" << c.weight_decay << "\ncfg.eval_every=" << c.eval_every << "\ncfg.patience=" << c.patience
+      << "\ncfg.optimizer=" << c.optimizer << "\ncfg.dropout=" << c.dropout << "\ncfg.prompt_weight=" << c.prompt_weight
+      << "\ncfg.align=" << c.align << "\ncfg.ema=" << c.ema << "\ncfg.keep_best=" << (c.keep_best ? 1 : 0)
+      << "\ncfg.probe_every=" << c.probe_every << "\n"
+      << checkpoint_note(data);
+    fs::path pf = root / kProjectFile, tmp = root / (std::string(kProjectFile) + ".tmp");
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        out << o.str();
+        if (!out) { err = "cannot write the project file"; return false; }
+    }
+    return move_over(tmp, pf, err);
+}
+
+void save_open_project() {
+    if (A.project_dir.empty()) return;
+    std::string err;
+    A.project_ok = save_project(A.project_dir, A.project_name, A.project_desc, err);
+    A.project_msg = A.project_ok ? tr(S::ProjectSaved) : err;
+    A.projects_scanned = false;
+    if (A.project_ok) add_activity(State::ACT_PROJECT_SAVED, A.project_name);
+}
+
+bool create_project(std::string name, std::string desc, std::string& err) {
+    for (char& ch : desc)
+        if (ch == '\n' || ch == '\r' || ch == '\t') ch = ' ';
+    std::string clean;
+    for (char ch : name)
+        if (!std::strchr("/\\:*?\"<>|\t\r\n", ch)) clean += ch;
+    while (!clean.empty() && (clean.back() == ' ' || clean.back() == '.')) clean.pop_back();
+    while (!clean.empty() && clean.front() == ' ') clean.erase(clean.begin());
+    if (clean.empty()) { err = tr(S::ProjectName); return false; }
+    std::string dir = (upath(projects_root()) / upath(clean)).u8string();
+    std::error_code ec;
+    if (std::filesystem::exists(upath(dir) / kProjectFile, ec)) { err = tr(S::ProjectExists); return false; }
+    if (!save_project(dir, clean, desc, err)) return false;
+    A.project_dir = dir;
+    A.project_name = clean;
+    A.project_desc = desc;
+    A.project_ok = true;
+    A.project_msg = tr(S::ProjectSaved);
+    remember_project(dir);
+    A.projects_scanned = false;
+    add_activity(State::ACT_PROJECT_SAVED, clean);
+    return true;
+}
+
+// Opens a project folder (or its project.korproj). `err` may hold a warning
+// even when it succeeds (e.g. the data was not found).
+bool open_project_dir(std::string dir, std::string& err) {
+    namespace fs = std::filesystem;
+    if (busy()) { err = tr(S::Busy); return false; }
+    std::error_code ec;
+    fs::path p = upath(dir);
+    if (fs::is_regular_file(p, ec)) p = p.parent_path();
+    dir = p.u8string();
+    std::map<std::string, std::string> kv;
+    std::string tests;
+    if (!read_project(dir, kv, tests)) { err = std::string(kProjectFile) + " ?"; return false; }
+    auto num = [&](const char* k, double def) { auto it = kv.find(k); return it == kv.end() || it->second.empty() ? def : std::atof(it->second.c_str()); };
+    std::shared_ptr<Model> m;
+    if (!kv["model"].empty()) {
+        m = Model::load((p / upath(kv["model"])).u8string(), &err);
+        if (!m) return false;
+    }
+    std::string data = kv["data"];
+    if (!data.empty() && upath(data).is_relative()) data = (p / upath(data)).u8string();
+    int sub = (int)num("subword", 0);
+    A.subword = sub > 0;
+    if (sub > 0) A.subword_size = sub;
+    A.img_size = (int)num("img_size", A.img_size);
+    A.img_colors = (int)num("img_colors", A.img_colors);
+    A.img_mirror = num("img_mirror", 1) != 0;
+    A.snd_rate = (int)num("snd_rate", A.snd_rate);
+    A.model = m;
+    if (m) A.spec = m->spec;
+    A.from_file = (bool)m;
+    A.ft_added = A.ft_dropped = 0;
+    reset_generation();
+    if (!data.empty() && fs::exists(upath(data), ec)) {
+        int kind = std::max(0, std::min(3, (int)num("kind", 0)));
+        A.data_kind = kind;
+        std::snprintf(A.data_path, sizeof A.data_path, "%s", data.c_str());
+        if (!load_data_impl(data, kind, (int)num("target", -1))) err = A.data_msg;
+        set_tests(tests);
+    } else {
+        free_textures(A.data_tex);
+        A.data = Dataset();
+        A.data_path[0] = 0;
+        A.q_tag.clear();
+        A.a_tag.clear();
+        set_tests(tests);
+        if (!data.empty()) err = strf(tr(S::ResumeNoData), data.c_str());
+    }
+    A.stop_on_pass = num("stop_on_pass", 0) != 0;
+    if (kv.count("cfg.steps")) {
+        TrainConfig& c = A.cfg;
+        c.steps = std::max(1, (int)num("cfg.steps", c.steps));
+        c.batch = std::max(1, (int)num("cfg.batch", c.batch));
+        c.accum = std::max(1, (int)num("cfg.accum", c.accum));
+        c.lr = (float)num("cfg.lr", c.lr);
+        c.weight_decay = (float)num("cfg.wd", c.weight_decay);
+        c.eval_every = std::max(1, (int)num("cfg.eval_every", c.eval_every));
+        c.patience = (int)num("cfg.patience", c.patience);
+        c.optimizer = (int)num("cfg.optimizer", c.optimizer);
+        c.dropout = (float)num("cfg.dropout", c.dropout);
+        c.prompt_weight = (float)num("cfg.prompt_weight", c.prompt_weight);
+        c.align = (float)num("cfg.align", c.align);
+        c.ema = (float)num("cfg.ema", c.ema);
+        c.keep_best = num("cfg.keep_best", 1) != 0;
+        c.probe_every = (int)num("cfg.probe_every", c.probe_every);
+    }
+    A.project_dir = dir;
+    A.project_name = kv["name"].empty() ? p.filename().u8string() : kv["name"];
+    A.project_desc = kv["desc"];
+    remember_project(dir);
+    A.projects_scanned = false;
+    add_activity(State::ACT_PROJECT_OPENED, A.project_name);
+    return true;
+}
+
+void scan_projects() {
+    namespace fs = std::filesystem;
+    A.projects.clear();
+    A.projects_scanned = true;
+    std::set<std::string> seen;
+    auto add = [&](const fs::path& dir) {
+        std::error_code ec;
+        std::string key = fs::weakly_canonical(dir, ec).u8string();
+        if (!seen.insert(key).second) return;
+        std::map<std::string, std::string> kv;
+        std::string tests;
+        if (!read_project(dir.u8string(), kv, tests)) return;
+        State::ProjectInfo pi;
+        pi.dir = dir.u8string();
+        pi.name = kv["name"].empty() ? dir.filename().u8string() : kv["name"];
+        pi.updated = (std::time_t)std::atoll(kv["updated"].c_str());
+        pi.desc = kv["desc"];
+        pi.data = file_name(kv["data"]);
+        pi.data_path = kv["data"].empty() || !upath(kv["data"]).is_relative() ? kv["data"] : (dir / upath(kv["data"])).u8string();
+        pi.kind = kv["data"].empty() ? -1 : std::atoi(kv["kind"].c_str());
+        pi.model = kv["model"];
+        pi.params = std::atof(kv["params"].c_str());
+        A.projects.push_back(pi);
+    };
+    std::error_code ec;
+    for (fs::directory_iterator it(upath(projects_root()), ec), end; !ec && it != end; it.increment(ec))
+        if (it->is_directory(ec)) add(it->path());
+    for (const std::string& r : A.recent_projects) add(upath(r));
+    std::sort(A.projects.begin(), A.projects.end(),
+              [](const State::ProjectInfo& a, const State::ProjectInfo& b) { return a.updated > b.updated; });
+}
+
+void ask_open_project() {
+    std::string p = open_file_dialog(DLG_PROJECT);
+    if (p.empty()) return;
+    std::string err;
+    A.project_ok = open_project_dir(p, err) && err.empty();
+    A.project_msg = err;
+    if (A.project_ok || !A.project_dir.empty()) A.page = PAGE_PROJECTS;
+}
+
+void ask_new_project() {
+    std::string base = A.data.kind != DATA_NONE ? upath(A.data.path).stem().u8string() : std::string(tr(S::NewProject));
+    std::snprintf(A.new_project_name, sizeof A.new_project_name, "%s", base.c_str());
+    A.new_project_desc[0] = 0;
+    A.new_project_err.clear();
+    A.want_new_project = true;
+}
+
+void open_terminal_here() { open_terminal(A.project_dir.empty() ? exe_dir() : A.project_dir); }
+
+void save_or_create_project() {
+    if (A.project_dir.empty()) ask_new_project();
+    else save_open_project();
 }
 
 std::string settings_file() { return (upath(config_dir()) / "settings.cfg").u8string(); }
@@ -733,122 +1326,1022 @@ const char* state_name(int state) {
 
 // =================================================================== pages
 
+// Offers to continue a run that was cut off (power cut, crash, closed app).
+void resume_card() {
+    if (!A.resume_avail || busy()) return;
+    begin_card("resume", tr(S::ResumeTitle));
+    text_wrapped(strf(tr(S::ResumeText), A.resume_info.step, A.resume_info.cfg.steps, fmt_time(A.resume_info.elapsed).c_str()).c_str(), C::text);
+    if (!A.resume_data.empty()) text_wrapped(strf(tr(S::ResumeData), A.resume_data.c_str()).c_str(), C::muted, F.small);
+    if (A.resume_warn) text_wrapped(tr(S::ResumeWarn), C::warn, F.small);
+    if (!A.resume_msg.empty()) text_wrapped(strf(tr(S::ResumeFailed), A.resume_msg.c_str()).c_str(), C::bad, F.small);
+    gap(4);
+    if (button(tr(S::ResumeGo), BTN_PRIMARY, IC_PLAY)) resume_training();
+    ImGui::SameLine();
+    if (button(tr(S::ResumeDiscard), BTN_GHOST, IC_TRASH)) discard_resume();
+    end_card();
+    gap();
+}
+
 // ------------------------------------------------------------------- home
 
-void step_cards() {
-    static const S titles[] = {S::NavData, S::NavModel, S::NavTrain, S::NavTest};
-    static const S texts[] = {S::Step1, S::Step2, S::Step3, S::Step4};
-    static const int pages[] = {PAGE_DATA, PAGE_MODEL, PAGE_TRAIN, PAGE_TEST};
-    static const Icon icons[] = {IC_DATA, IC_MODEL, IC_TRAIN, IC_CHAT};
-    float g = px(12), pad = px(16);
-    int cols = fit_columns(px(200), 4, g);
-    float cw = column_width(cols, g), tw = cw - pad * 2;
-    ImFont* bf = F.bold ? F.bold : ImGui::GetFont();
+// Polled while the home page is shown: machine load every second, saved
+// models every few seconds.
+void refresh_home_numbers() {
+    double now = ImGui::GetTime();
+    if (now - A.usage_at >= 1.0) {
+        Usage u = sample_usage();
+        if (u.cpu < 0) u.cpu = A.usage.cpu;
+        A.usage = u;
+        A.usage_at = now;
+    }
+    if (!A.projects_scanned) {
+        scan_projects();
+        A.models_counted_at = -100;
+    }
+    if (now - A.models_counted_at >= 5.0) {
+        namespace fs = std::filesystem;
+        A.models_counted_at = now;
+        A.model_count = 0;
+        std::error_code ec;
+        for (fs::directory_iterator it(upath(models_dir()), ec), end; !ec && it != end; it.increment(ec))
+            if (it->path().extension() == ".kor") ++A.model_count;
+        for (auto& pi : A.projects)
+            if (!pi.model.empty()) ++A.model_count;
+        // every training run writes one log file
+        A.train_runs = 0;
+        for (fs::directory_iterator it(upath(logs_dir()), ec), end; !ec && it != end; it.increment(ec))
+            if (it->path().extension() == ".log") ++A.train_runs;
+        // datasets: loaded before or kept in a project
+        std::set<std::string> seen;
+        A.dataset_count = 0;
+        A.data_bytes = 0;
+        auto add = [&](const std::string& p) {
+            if (p.empty()) return;
+            std::error_code e;
+            std::string key = fs::weakly_canonical(upath(p), e).u8string();
+            if (!fs::exists(upath(p), e) || !seen.insert(key).second) return;
+            ++A.dataset_count;
+            if (fs::is_regular_file(upath(p), e)) {
+                A.data_bytes += (double)fs::file_size(upath(p), e);
+                return;
+            }
+            int n = 0;
+            for (fs::recursive_directory_iterator it(upath(p), e), end; !e && it != end && n < 20000; it.increment(e), ++n)
+                if (it->is_regular_file(e)) A.data_bytes += (double)it->file_size(e);
+        };
+        for (auto& p : A.recent_data) add(p);
+        for (auto& pi : A.projects) add(pi.data_path);
+    }
+}
+
+void refresh_disk() {
+    double now = ImGui::GetTime();
+    if (now - A.disk_at < 10.0) return;
+    A.disk_at = now;
+    std::error_code ec;
+    auto sp = std::filesystem::space(upath(documents_dir()), ec);
+    if (!ec) {
+        A.disk_total_gb = sp.capacity / 1e9;
+        A.disk_used_gb = (sp.capacity - sp.available) / 1e9;
+    }
+}
+
+// "72%", or "%72" in Turkish
+std::string pct(double frac) {
+    int v = (int)std::lround(std::max(0.0, std::min(1.0, frac)) * 100);
+    return get_language() == LANG_TR ? strf("%%%d", v) : strf("%d%%", v);
+}
+
+std::string fmt_bytes(double b) {
+    if (b >= 1e9) return strf("%.1f GB", b / 1e9);
+    if (b >= 1e6) return strf("%.1f MB", b / 1e6);
+    return strf("%.0f KB", b / 1e3);
+}
+
+// "NVIDIA GeForce RTX 3050 Ti Laptop GPU" -> "RTX 3050 Ti"
+std::string short_gpu(std::string s) {
+    for (const char* cut : {"(R)", "(TM)", "NVIDIA ", "GeForce ", "AMD ", "Intel ", " Laptop GPU", " GPU"}) {
+        size_t at;
+        while ((at = s.find(cut)) != std::string::npos) s.erase(at, std::strlen(cut));
+    }
+    while (!s.empty() && s.front() == ' ') s.erase(s.begin());
+    return s;
+}
+
+void load_hero() {
+    Image img;
+    std::string err;
+    for (const std::string& p : {(upath(exe_dir()) / "assets" / "hero.png").u8string(), std::string("assets/hero.png")})
+        if (load_image(p, img, &err)) {
+            A.hero_tex = make_texture(img, true);
+            A.hero_w = img.w;
+            A.hero_h = img.h;
+            return;
+        }
+}
+
+// Moon over mountains and a lake, drawn with shapes (no image files).
+void hero_scene(ImDrawList* dl, ImVec2 a, ImVec2 b, float r) {
+    const float pi = 3.14159265f;
+    float w = b.x - a.x, h = b.y - a.y, tm = (float)ImGui::GetTime();
+    float hz = a.y + h * 0.70f;  // horizon
+    // vertical gradient over the vertices added since v0
+    auto shade = [&](int v0, float y0, float y1, const ImVec4& c0, const ImVec4& c1) {
+        for (int i = v0; i < dl->VtxBuffer.Size; ++i) {
+            ImDrawVert& v = dl->VtxBuffer[i];
+            float t = std::max(0.f, std::min(1.f, (v.pos.y - y0) / std::max(1.f, y1 - y0)));
+            v.col = col(mix(c0, c1, t), ((v.col >> IM_COL32_A_SHIFT) & 0xFF) / 255.f);
+        }
+    };
+    int v0 = dl->VtxBuffer.Size;
+    dl->AddRectFilled(a, b, IM_COL32_WHITE, r);
+    shade(v0, a.y, hz, ImVec4(0.06f, 0.04f, 0.14f, 1), ImVec4(0.33f, 0.14f, 0.45f, 1));
+
+    unsigned seed = 2024;
+    auto rnd = [&]() { seed = seed * 1664525u + 1013904223u; return (seed >> 8) / 16777216.f; };
+    for (int i = 0; i < 80; ++i) {
+        float x = a.x + w * (0.30f + 0.70f * rnd()), y = a.y + (hz - a.y) * 0.8f * rnd();
+        float sz = px(0.5f + 1.1f * rnd()), ph = rnd() * 6.28f;
+        float al = (0.35f + 0.45f * (0.5f + 0.5f * std::sin(tm * 1.2f + ph))) * ((x - a.x) / w);
+        dl->AddCircleFilled(ImVec2(x, y), sz, col(ImVec4(1.f, 0.95f, 1.f, 1), al), 8);
+    }
+
+    ImVec2 mc(a.x + w * 0.72f, a.y + h * 0.30f);
+    float mr = h * 0.11f;
+    for (int i = 7; i >= 1; --i) dl->AddCircleFilled(mc, mr * (1.f + i * 0.5f), col(ImVec4(0.80f, 0.50f, 1.f, 1), 0.035f), 48);
+    dl->AddCircleFilled(mc, mr, col(ImVec4(1.f, 0.95f, 0.99f, 1)), 48);
+    dl->AddCircleFilled(ImVec2(mc.x + mr * 0.3f, mc.y - mr * 0.2f), mr * 0.16f, col(ImVec4(0.92f, 0.86f, 0.96f, 1)), 16);
+    dl->AddCircleFilled(ImVec2(mc.x - mr * 0.35f, mc.y + mr * 0.3f), mr * 0.1f, col(ImVec4(0.92f, 0.86f, 0.96f, 1)), 12);
+
+    // pts: x (0..1) and height (0..1) pairs; dir -1 draws the reflection in the lake
+    auto ridge = [&](const float* pts, int n, float amp, const ImVec4& c0, const ImVec4& c1, float dir, float alpha) {
+        dl->PathClear();
+        dl->PathLineTo(ImVec2(a.x, hz));
+        for (int i = 0; i < n; ++i) dl->PathLineTo(ImVec2(a.x + w * pts[2 * i], hz - dir * amp * pts[2 * i + 1]));
+        dl->PathLineTo(ImVec2(b.x, hz));
+        int v = dl->VtxBuffer.Size;
+        dl->PathFillConcave(col(c0, alpha));
+        if (dir > 0) shade(v, hz - amp, hz, c0, c1);
+    };
+    static const float far_[] = {0, .35f, .08f, .52f, .17f, .38f, .27f, .72f, .36f, .45f, .46f, .64f, .55f, .40f,
+                                 .63f, .80f, .72f, .52f, .80f, .68f, .88f, .42f, .95f, .58f, 1, .45f};
+    static const float near_[] = {0, .30f, .10f, .16f, .20f, .44f, .30f, .20f, .42f, .34f, .50f, .12f,
+                                  .60f, .38f, .70f, .18f, .80f, .42f, .90f, .22f, 1, .36f};
+    float far_amp = h * 0.32f, near_amp = h * 0.20f;
+    ridge(far_, 13, far_amp, ImVec4(0.36f, 0.20f, 0.56f, 1), ImVec4(0.22f, 0.12f, 0.38f, 1), 1, 1);
+    ridge(near_, 11, near_amp, ImVec4(0.19f, 0.10f, 0.33f, 1), ImVec4(0.12f, 0.07f, 0.22f, 1), 1, 1);
+
+    v0 = dl->VtxBuffer.Size;
+    dl->AddRectFilled(ImVec2(a.x, hz), b, IM_COL32_WHITE);
+    shade(v0, hz, b.y, ImVec4(0.22f, 0.11f, 0.36f, 1), ImVec4(0.05f, 0.03f, 0.10f, 1));
+    ridge(near_, 11, near_amp * 0.6f, ImVec4(0.30f, 0.16f, 0.48f, 1), ImVec4(), -1, 0.35f);
+    for (int i = 0; i < 9; ++i) {
+        float y = hz + px(5) + i * (b.y - hz) / 10.f;
+        float hw = mr * (0.9f - i * 0.07f) * (0.75f + 0.25f * std::sin(tm * 1.5f + i * 1.3f));
+        dl->AddLine(ImVec2(mc.x - hw, y), ImVec2(mc.x + hw, y), col(ImVec4(1.f, 0.88f, 1.f, 1), 0.38f - i * 0.035f), px(1.5f));
+    }
+
+    // dark on the left so the title reads well
+    ImU32 dark = col(ImVec4(0.04f, 0.03f, 0.09f, 1), 0.92f), clear = col(ImVec4(0.04f, 0.03f, 0.09f, 1), 0.f);
+    dl->AddRectFilledMultiColor(a, ImVec2(a.x + w * 0.62f, b.y), dark, clear, clear, dark);
+
+    // round the corners again by painting the page colour outside them
+    ImU32 page = col(C::bg);
+    auto corner = [&](ImVec2 c, ImVec2 center, float a0) {
+        dl->PathClear();
+        dl->PathLineTo(c);
+        dl->PathArcTo(center, r, a0, a0 + pi * 0.5f, 10);
+        dl->PathFillConcave(page);
+    };
+    corner(a, ImVec2(a.x + r, a.y + r), pi);
+    corner(ImVec2(b.x, a.y), ImVec2(b.x - r, a.y + r), pi * 1.5f);
+    corner(b, ImVec2(b.x - r, b.y - r), 0);
+    corner(ImVec2(a.x, b.y), ImVec2(a.x + r, b.y - r), pi * 0.5f);
+    dl->AddRect(a, b, col(C::border_hi, 0.7f), r);
+}
+
+void hero(float w) {
+    ImFont* hf = F.hero ? F.hero : ImGui::GetFont();
     ImFont* body = ImGui::GetFont();
-    float h = 0;
-    for (int i = 0; i < 4; ++i)
-        h = std::max(h, pad + px(30) + px(14) + bf->FontSize + px(6) + text_size(body, tr(texts[i]), nullptr, tw).y + pad);
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(g, g));
-    for (int i = 0; i < 4; ++i) {
-        if (i % cols) ImGui::SameLine(0, g);
+    float pad = px(28);
+    float tw = w < px(620) ? w - pad * 2 : std::min(w * 0.6f, px(480));
+    const char* sub = tr(S::HeroSub);
+    float sub_h = text_size(body, sub, nullptr, tw).y;
+    const char* labels[3] = {tr(S::NewModel), tr(S::OpenProject), tr(S::ChatWithModel)};
+    static const Icon ics[3] = {IC_PLAY, IC_FOLDER, IC_CHAT};
+    float bh = px(38), bg = px(10), bx[3], by[3], x = 0, y = 0;
+    for (int i = 0; i < 3; ++i) {
+        float bw = button_width(labels[i], ics[i]);
+        if (x > 0 && x + bw > w - pad * 2) {
+            x = 0;
+            y += bh + bg;
+        }
+        bx[i] = x;
+        by[i] = y;
+        x += bw + bg;
+    }
+    float content = hf->FontSize + px(8) + sub_h + px(22) + y + bh;
+    float h = std::max(px(216), content + pad * 2);
+    ImVec2 a = ImGui::GetCursorScreenPos(), b(a.x + w, a.y + h);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    float r = px(14);
+    if (A.hero_tex) {
+        // fill the box (crop the picture, keep the moon side)
+        ImVec2 uv0(0, 0), uv1(1, 1);
+        float box = w / h, pic = (float)A.hero_w / std::max(1, A.hero_h);
+        if (pic > box) {
+            float f = box / pic;
+            uv0.x = (1 - f) * 0.7f;
+            uv1.x = uv0.x + f;
+        } else {
+            float f = pic / box;
+            uv0.y = (1 - f) * 0.5f;
+            uv1.y = uv0.y + f;
+        }
+        dl->AddImageRounded(A.hero_tex, a, b, uv0, uv1, IM_COL32_WHITE, r);
+        // darker on the left so the text reads well
+        int v0 = dl->VtxBuffer.Size;
+        dl->AddRectFilled(a, b, IM_COL32_WHITE, r);
+        for (int i = v0; i < dl->VtxBuffer.Size; ++i) {
+            ImDrawVert& v = dl->VtxBuffer[i];
+            float t = std::max(0.f, 1.f - (v.pos.x - a.x) / (w * 0.7f));
+            float al = ((v.col >> IM_COL32_A_SHIFT) & 0xFF) / 255.f;
+            v.col = col(ImVec4(0.04f, 0.02f, 0.09f, 1), al * (0.15f + 0.6f * t));
+        }
+        dl->AddRect(a, b, col(C::border_hi, 0.6f), r);
+    } else {
+        hero_scene(dl, a, b, r);
+    }
+    float ty = a.y + (h - content) * 0.5f;
+    dl->AddText(hf, hf->FontSize, ImVec2(a.x + pad, ty), col(C::text), "KOR ");
+    dl->AddText(hf, hf->FontSize, ImVec2(a.x + pad + text_size(hf, "KOR ").x, ty), col(C::accent_hi), "Studio");
+    ty += hf->FontSize + px(8);
+    dl->AddText(body, body->FontSize, ImVec2(a.x + pad, ty), col(ImVec4(0.90f, 0.87f, 0.97f, 1)), sub, nullptr, tw);
+    ty += sub_h + px(22);
+    for (int i = 0; i < 3; ++i) {
+        ImGui::SetCursorScreenPos(ImVec2(a.x + pad + bx[i], ty + by[i]));
         ImGui::PushID(i);
+        if (button(labels[i], i == 0 ? BTN_PRIMARY : BTN_SECONDARY, ics[i], 0, bh)) {
+            if (i == 0) A.page = PAGE_DATA;
+            if (i == 1) ask_open_project();
+            if (i == 2) A.page = PAGE_CHAT;
+        }
+        ImGui::PopID();
+    }
+    ImGui::SetCursorScreenPos(a);
+    ImGui::Dummy(ImVec2(w, h));
+}
+
+// A clickable row: tinted icon, label (and a second line), then a text or a chevron on the right.
+bool list_row(const char* id, Icon ic, const ImVec4& tint, const char* label, const char* sub = nullptr,
+              const char* right = nullptr, const ImVec4& right_col = C::subtle) {
+    float w = ImGui::GetContentRegionAvail().x;
+    ImFont* bf = ImGui::GetFont();
+    ImFont* sf = F.small ? F.small : bf;
+    float h = sub && *sub ? px(50) : px(40);
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    bool clicked = ImGui::InvisibleButton(id, ImVec2(w, h));
+    bool hov = ImGui::IsItemHovered();
+    if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    float t = anim(ImGui::GetItemID(), hov);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    if (t > 0.01f) dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), col(C::surface2, t), px(8));
+    float s = px(30);
+    ImVec2 ib(p.x + px(6), p.y + (h - s) * 0.5f);
+    dl->AddRectFilled(ib, ImVec2(ib.x + s, ib.y + s), col(tint, 0.15f), px(8));
+    icon(dl, ic, ImVec2(ib.x + s * 0.5f, ib.y + s * 0.5f), px(16), col(tint));
+    float x = ib.x + s + px(12);
+    float rw = right ? text_size(sf, right).x + px(16) : px(26);
+    float maxw = p.x + w - x - rw;
+    if (sub && *sub) {
+        float y0 = p.y + (h - bf->FontSize - sf->FontSize - px(3)) * 0.5f;
+        text_ellipsis(dl, bf, ImVec2(x, y0), maxw, label, col(C::text));
+        text_ellipsis(dl, sf, ImVec2(x, y0 + bf->FontSize + px(3)), maxw, sub, col(C::muted));
+    } else {
+        text_ellipsis(dl, bf, ImVec2(x, p.y + (h - bf->FontSize) * 0.5f), maxw, label, col(C::text));
+    }
+    if (right)
+        dl->AddText(sf, sf->FontSize, ImVec2(p.x + w - px(10) - text_size(sf, right).x, p.y + (h - sf->FontSize) * 0.5f), col(right_col), right);
+    else
+        icon(dl, IC_CHEVRON_RIGHT, ImVec2(p.x + w - px(14), p.y + h * 0.5f), px(14), col(mix(C::subtle, C::text, t)));
+    return clicked;
+}
+
+// Title line of a card opened with begin_card(id): an icon and the title.
+void card_header(Icon ic, const char* title) {
+    ImFont* bf = F.bold ? F.bold : ImGui::GetFont();
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    icon(dl, ic, ImVec2(p.x + px(8), p.y + bf->FontSize * 0.5f), px(16), col(C::accent_hi));
+    dl->AddText(bf, bf->FontSize, ImVec2(p.x + px(26), p.y), col(C::text), title);
+    ImGui::Dummy(ImVec2(0, bf->FontSize));
+    gap(6);
+}
+
+// A small link with an arrow on the right of the current card's title line.
+bool card_link(const char* label) {
+    ImFont* f = F.small ? F.small : ImGui::GetFont();
+    ImFont* tf = F.bold ? F.bold : ImGui::GetFont();
+    ImVec2 ts = text_size(f, label), back = ImGui::GetCursorScreenPos(), wp = ImGui::GetWindowPos();
+    float w = ts.x + px(18);
+    ImVec2 p(wp.x + ImGui::GetWindowWidth() - card_padding_x() - w, wp.y + card_padding_y() + (tf->FontSize - ts.y) * 0.5f);
+    ImGui::SetCursorScreenPos(p);
+    bool clicked = ImGui::InvisibleButton("##link", ImVec2(w, ts.y));
+    bool hov = ImGui::IsItemHovered();
+    if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImU32 c = col(hov ? C::text : mix(C::muted, C::text, 0.4f));
+    dl->AddText(f, f->FontSize, p, c, label);
+    icon(dl, IC_ARROW_RIGHT, ImVec2(p.x + ts.x + px(11), p.y + ts.y * 0.5f), px(12), c);
+    ImGui::SetCursorScreenPos(back);
+    return clicked;
+}
+
+Icon project_icon(int kind) {
+    switch (kind) {
+        case 0: return IC_CHATS;
+        case 1: return IC_TABLE;
+        case 2: return IC_LAYERS;
+        case 3: return IC_WAVE;
+    }
+    return IC_CUBE;
+}
+
+std::string project_desc(const State::ProjectInfo& pi) {
+    if (!pi.desc.empty()) return pi.desc;
+    if (pi.params > 0) return strf(tr(S::ProjectParamsDesc), fmt_count(pi.params).c_str());
+    return pi.data.empty() ? tr(S::ProjectNoModel) : pi.data;
+}
+
+// Rounded square with an icon, as in the project lists.
+void icon_box(ImDrawList* dl, ImVec2 p, float s, Icon ic, bool hi) {
+    dl->AddRectFilled(p, ImVec2(p.x + s, p.y + s), col(hi ? mix(C::surface3, C::accent, 0.25f) : C::surface2), px(8));
+    dl->AddRect(p, ImVec2(p.x + s, p.y + s), col(C::border_hi), px(8));
+    icon(dl, ic, ImVec2(p.x + s * 0.5f, p.y + s * 0.5f), s * 0.5f, col(C::text));
+}
+
+void project_open_from_list(const std::string& dir) {
+    if (dir == A.project_dir) {
+        A.page = PAGE_PROJECTS;
+        return;
+    }
+    std::string err;
+    A.project_ok = open_project_dir(dir, err) && err.empty();
+    A.project_msg = err;
+    A.page = PAGE_PROJECTS;
+}
+
+const ImVec4& project_tint(size_t i) {
+    static const ImVec4* tints[] = {&C::accent, &C::blue, &C::teal, &C::violet, &C::warn};
+    return *tints[i % 5];
+}
+
+void recent_projects_card(float min_h, float width, float* natural) {
+    begin_card("recentp", nullptr, min_h, width);
+    card_header(IC_FOLDER, tr(S::RecentProjects));
+    if (card_link(tr(S::SeeAll))) A.page = PAGE_PROJECTS;
+    if (A.projects.empty()) {
+        text_wrapped(tr(S::NoProjects), C::muted, F.small);
+        gap(6);
+        if (button(tr(S::NewProject), BTN_SECONDARY, IC_PLUS)) ask_new_project();
+        end_card(natural);
+        return;
+    }
+    ImFont* bf = F.bold ? F.bold : ImGui::GetFont();
+    ImFont* sf = F.small ? F.small : ImGui::GetFont();
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(px(8), 0));
+    size_t n = std::min<size_t>(A.projects.size(), 4);
+    for (size_t i = 0; i < n; ++i) {
+        const State::ProjectInfo& pi = A.projects[i];
+        ImGui::PushID((int)i);
+        float w = ImGui::GetContentRegionAvail().x, h = px(52);
         ImVec2 p = ImGui::GetCursorScreenPos();
-        if (ImGui::InvisibleButton("##step", ImVec2(cw, h))) A.page = pages[i];
-        bool hov = ImGui::IsItemHovered();
+        bool click = ImGui::InvisibleButton("##p", ImVec2(w, h));
+        bool hov = ImGui::IsItemHovered(), cur = pi.dir == A.project_dir;
         if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
         float t = anim(ImGui::GetItemID(), hov);
         ImDrawList* dl = ImGui::GetWindowDrawList();
-        dl->AddRectFilled(p, ImVec2(p.x + cw, p.y + h), col(mix(C::surface, C::surface2, t)), px(12));
-        dl->AddRect(p, ImVec2(p.x + cw, p.y + h), col(mix(C::border, C::border_hi, t)), px(12));
-        ImVec2 nc(p.x + pad + px(15), p.y + pad + px(15));
-        dl->AddCircleFilled(nc, px(15), col(C::accent, 0.14f));
-        std::string num = std::to_string(i + 1);
-        ImFont* nf = F.small_bold ? F.small_bold : body;
-        ImVec2 ns = text_size(nf, num.c_str());
-        dl->AddText(nf, nf->FontSize, ImVec2(nc.x - ns.x * 0.5f, nc.y - ns.y * 0.5f), col(C::accent), num.c_str());
-        icon(dl, icons[i], ImVec2(p.x + cw - pad - px(9), nc.y), px(18), col(mix(C::subtle, C::accent, t)));
-        float y = p.y + pad + px(30) + px(14);
-        dl->AddText(bf, bf->FontSize, ImVec2(p.x + pad, y), col(C::text), tr(titles[i]));
-        dl->AddText(body, body->FontSize, ImVec2(p.x + pad, y + bf->FontSize + px(6)), col(C::muted), tr(texts[i]), nullptr, tw);
+        if (t > 0.01f) dl->AddRectFilled(ImVec2(p.x - px(8), p.y), ImVec2(p.x + w + px(8), p.y + h), col(C::surface2, t), px(8));
+        if (i + 1 < n) dl->AddLine(ImVec2(p.x, p.y + h - 0.5f), ImVec2(p.x + w, p.y + h - 0.5f), col(C::border));
+        float s = px(34);
+        icon_box(dl, ImVec2(p.x, p.y + (h - s) * 0.5f), s, project_icon(pi.kind), cur);
+        std::string when = ago(pi.updated);
+        float ww = text_size(sf, when.c_str()).x;
+        float x = p.x + s + px(14), tw = p.x + w - x - ww - px(12);
+        float y0 = p.y + (h - bf->FontSize - sf->FontSize - px(3)) * 0.5f;
+        text_ellipsis(dl, bf, ImVec2(x, y0), tw, pi.name.c_str(), col(C::text));
+        text_ellipsis(dl, sf, ImVec2(x, y0 + bf->FontSize + px(3)), tw, project_desc(pi).c_str(), col(C::muted));
+        dl->AddText(sf, sf->FontSize, ImVec2(p.x + w - ww, p.y + (h - sf->FontSize) * 0.5f), col(cur ? C::good : C::muted), when.c_str());
+        if (click) project_open_from_list(pi.dir);
+        ImGui::PopID();
+    }
+    ImGui::PopStyleVar();
+    end_card(natural);
+}
+
+// The full-width outlined button at the bottom of a card.
+bool outline_button(const char* label, Icon trailing) {
+    ImFont* f = ImGui::GetFont();
+    float w = ImGui::GetContentRegionAvail().x, h = px(34);
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    bool click = ImGui::InvisibleButton(label, ImVec2(w, h));
+    bool hov = ImGui::IsItemHovered();
+    if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    float t = anim(ImGui::GetItemID(), hov);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), col(mix(C::surface2, C::surface3, t)), px(8));
+    dl->AddRect(p, ImVec2(p.x + w, p.y + h), col(C::border_hi), px(8));
+    ImVec2 ts = text_size(f, label);
+    float iw = trailing != IC_NONE ? px(20) : 0, x = p.x + (w - ts.x - iw) * 0.5f;
+    dl->AddText(f, f->FontSize, ImVec2(x, p.y + (h - ts.y) * 0.5f), col(mix(C::muted, C::text, 0.5f + 0.5f * t)), label);
+    if (trailing != IC_NONE) icon(dl, trailing, ImVec2(x + ts.x + px(12), p.y + h * 0.5f), px(12), col(C::muted));
+    return click;
+}
+
+void activity_card(float min_h, float width, float* natural) {
+    begin_card("activity", nullptr, min_h, width);
+    card_header(IC_WAVE, tr(S::Activity));
+    ImFont* bf = ImGui::GetFont();
+    ImFont* sf = F.small ? F.small : bf;
+    float rh = px(34);
+    auto row = [&](const ImVec4& dot, const std::string& label, std::function<void(ImDrawList*, ImVec2, float)> right, float right_w, int page) {
+        float w = ImGui::GetContentRegionAvail().x;
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        bool click = ImGui::InvisibleButton(label.c_str(), ImVec2(w, rh));
+        if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        float cy = p.y + rh * 0.5f;
+        dl->AddCircleFilled(ImVec2(p.x + px(5), cy), px(4), col(dot));
+        text_ellipsis(dl, bf, ImVec2(p.x + px(20), cy - bf->FontSize * 0.5f), w - px(28) - right_w, label.c_str(), col(C::text));
+        right(dl, ImVec2(p.x + w, cy), right_w);
+        if (click) A.page = page;
+    };
+    auto check = [&](ImDrawList* dl, ImVec2 rc, float) {
+        ImVec2 c(rc.x - px(10), rc.y);
+        dl->AddCircle(c, px(9), col(C::border_hi), 0, 1.2f);
+        icon(dl, IC_CHECK, c, px(11), col(C::muted));
+    };
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(px(8), px(2)));
+    if (busy()) {
+        TrainStats st = A.trainer.stats();
+        float frac = (float)st.step / std::max(1, st.total);
+        std::string label = strf(tr(S::ActTrainRunning), file_name(A.data.path).c_str()), pc = pct(frac);
+        row(C::good, label, [&](ImDrawList* dl, ImVec2 rc, float rw) {
+            float x0 = rc.x - rw, bw = rw;
+            dl->AddText(sf, sf->FontSize, ImVec2(rc.x - text_size(sf, pc.c_str()).x, rc.y - sf->FontSize - px(1)), col(C::text), pc.c_str());
+            dl->AddRectFilled(ImVec2(x0, rc.y + px(3)), ImVec2(x0 + bw, rc.y + px(7)), col(C::surface3), px(2));
+            dl->AddRectFilled(ImVec2(x0, rc.y + px(3)), ImVec2(x0 + std::max(px(4), bw * frac), rc.y + px(7)), col(C::accent), px(2));
+        }, px(100), PAGE_TRAIN);
+    }
+    static const int pages[State::ACT_COUNT] = {PAGE_TRAIN, PAGE_TRAIN, PAGE_TRAIN, PAGE_TRAIN, PAGE_CHAT, PAGE_DATA, PAGE_PROJECTS, PAGE_PROJECTS};
+    int shown = 0, limit = busy() ? 3 : 4;
+    for (auto it = A.activity.rbegin(); it != A.activity.rend() && shown < limit; ++it, ++shown) {
+        int k = std::max(0, std::min((int)State::ACT_COUNT - 1, it->kind));
+        ImGui::PushID(shown);
+        const ImVec4& dot = k == State::ACT_TRAIN_STOP ? C::warn : k == State::ACT_TRAIN_DONE ? C::good : C::accent;
+        std::string label = act_text(*it);
+        if (k == State::ACT_TRAIN_STOP) {
+            row(dot, label, [&](ImDrawList* dl, ImVec2 rc, float) {
+                ImVec2 c(rc.x - px(10), rc.y);
+                dl->AddCircle(c, px(9), col(C::border_hi), 0, 1.2f);
+                icon(dl, IC_STOP, c, px(9), col(C::warn));
+            }, px(22), pages[k]);
+        } else {
+            row(dot, label, check, px(22), pages[k]);
+        }
+        if (ImGui::IsItemHovered()) tooltip(ago(it->t).c_str());
+        ImGui::PopID();
+    }
+    ImGui::PopStyleVar();
+    if (A.activity.empty() && !busy()) text_wrapped(tr(S::NoActivity), C::muted, F.small);
+    gap(8);
+    if (outline_button(tr(S::AllLogs), IC_ARROW_RIGHT)) {
+        std::error_code ec;
+        std::filesystem::create_directories(upath(logs_dir()), ec);
+        open_folder(logs_dir());
+    }
+    end_card(natural);
+}
+
+void usage_card() {
+    begin_card("sysres");
+    card_header(IC_WAVE, tr(S::SysResources));
+    float cpu = A.usage.cpu;
+    std::string center = cpu < 0 ? "-" : pct(cpu);
+    ring(std::max(0.f, cpu), px(44), px(8), C::accent, center.c_str());
+    ImGui::SameLine(0, px(16));
+    ImGui::BeginGroup();
+    ImFont* bf = ImGui::GetFont();
+    auto metric = [&](Icon ic, const char* label, const std::string& value) {
+        float w = ImGui::GetContentRegionAvail().x, h = px(29);
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        ImGui::Dummy(ImVec2(w, h));
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        float cy = p.y + h * 0.5f;
+        icon(dl, ic, ImVec2(p.x + px(8), cy), px(15), col(C::muted));
+        dl->AddText(bf, bf->FontSize, ImVec2(p.x + px(24), cy - bf->FontSize * 0.5f), col(C::text), label);
+        float vw = text_size(bf, value.c_str()).x;
+        dl->AddText(bf, bf->FontSize, ImVec2(p.x + w - vw, cy - bf->FontSize * 0.5f), col(C::text), value.c_str());
+    };
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(px(8), 0));
+    double ru = A.usage.ram_used_gb, rt = A.usage.ram_total_gb > 0 ? A.usage.ram_total_gb : A.sys.ram_total_gb;
+    metric(IC_CPU, tr(S::CpuLoad), center);
+    metric(IC_MEMORY, tr(S::RamLoad), strf("%.1f / %.1f GB", ru, rt));
+    std::string gpu = A.usage.gpu_used_gb >= 0 ? strf("%.1f / %.1f GB", A.usage.gpu_used_gb, A.usage.gpu_total_gb)
+                      : A.sys.gpus.empty() ? std::string("-") : short_gpu(A.sys.gpus[0]);
+    metric(IC_GPU, "GPU", gpu);
+    ImGui::PopStyleVar();
+    ImGui::EndGroup();
+    if (!A.sys.gpus.empty() && ImGui::IsItemHovered()) tooltip((A.sys.gpus[0] + "\n" + tr(S::TileCpuSub)).c_str());
+    end_card();
+}
+
+// Outlined row button with an icon, as in the quick actions.
+bool action_row(const char* label, Icon ic) {
+    ImFont* f = ImGui::GetFont();
+    float w = ImGui::GetContentRegionAvail().x, h = px(32);
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    bool click = ImGui::InvisibleButton(label, ImVec2(w, h));
+    bool hov = ImGui::IsItemHovered();
+    if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    float t = anim(ImGui::GetItemID(), hov);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), col(mix(C::surface2, C::surface3, t)), px(8));
+    dl->AddRect(p, ImVec2(p.x + w, p.y + h), col(mix(C::border, C::accent, t * 0.5f)), px(8));
+    icon(dl, ic, ImVec2(p.x + px(20), p.y + h * 0.5f), px(15), col(C::text));
+    text_ellipsis(dl, f, ImVec2(p.x + px(40), p.y + (h - f->FontSize) * 0.5f), w - px(48), label, col(C::text));
+    return click;
+}
+
+void quick_actions_card() {
+    begin_card("quick");
+    card_header(IC_BOLT, tr(S::QuickActions));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(px(8), px(6)));
+    if (action_row(tr(S::QaTrain), IC_PLAY_O)) {
+        if (A.data.kind == DATA_NONE) A.page = PAGE_DATA;
+        else {
+            A.page = PAGE_TRAIN;
+            if (!busy()) begin_training();
+        }
+    }
+    if (action_row(tr(S::QaImport), IC_UPLOAD)) A.page = PAGE_DATA;
+    if (action_row(tr(S::QaTest), IC_FLASK)) A.page = PAGE_TEST;
+    if (action_row(tr(S::ChatWithModel), IC_CHAT)) A.page = PAGE_CHAT;
+    if (action_row(tr(S::QaNewProject), IC_FOLDER)) ask_new_project();
+    ImGui::PopStyleVar();
+    end_card();
+}
+
+// A label and its key combination ("Ctrl K") in a key cap.
+void shortcut_row(const char* keys, const char* label) {
+    ImFont* kf = F.small_bold ? F.small_bold : ImGui::GetFont();
+    ImFont* bf = ImGui::GetFont();
+    float w = ImGui::GetContentRegionAvail().x, h = px(28);
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::Dummy(ImVec2(w, h));
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddText(bf, bf->FontSize, ImVec2(p.x, p.y + (h - bf->FontSize) * 0.5f), col(mix(C::muted, C::text, 0.5f)), label);
+    float ch = kf->FontSize + px(10), cw = text_size(kf, keys).x + px(18);
+    ImVec2 c0(p.x + w - cw, p.y + (h - ch) * 0.5f);
+    dl->AddRectFilled(c0, ImVec2(c0.x + cw, c0.y + ch), col(C::surface2), px(6));
+    dl->AddRect(c0, ImVec2(c0.x + cw, c0.y + ch), col(C::border_hi), px(6));
+    dl->AddText(kf, kf->FontSize, ImVec2(c0.x + px(9), c0.y + px(5)), col(C::text), keys);
+}
+
+void shortcuts_card() {
+    begin_card("keys");
+    card_header(IC_KEYBOARD, tr(S::Shortcuts));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(px(8), px(2)));
+    shortcut_row("Ctrl  K", tr(S::ScSearch));
+    shortcut_row("Ctrl  `", tr(S::Terminal));
+    shortcut_row("Ctrl  ,", tr(S::Settings));
+    ImGui::PopStyleVar();
+    end_card();
+}
+
+// One of the six tiles under the picture: icon, label, value, then a status
+// dot or a usage bar.
+struct Tile {
+    Icon ic;
+    std::string label, value, sub;
+    ImVec4 dot = C::good;
+    float bar = -1;  // 0..1 shows a bar with the percentage instead of the dot
+    bool show_dot = true;
+};
+
+void tile(const Tile& t, float w, float h) {
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::Dummy(ImVec2(w, h));
+    bool hov = ImGui::IsItemHovered();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), col(C::surface), px(12));
+    dl->AddRect(p, ImVec2(p.x + w, p.y + h), col(C::border), px(12));
+    ImFont* sf = F.small ? F.small : ImGui::GetFont();
+    ImFont* vf = F.h2 ? F.h2 : ImGui::GetFont();
+    float pad = px(12), x = p.x + pad, iw = w - pad * 2, y = p.y + pad;
+    icon(dl, t.ic, ImVec2(x + px(10), y + px(10)), px(20), col(C::accent_hi));
+    y += px(20) + px(8);
+    text_ellipsis(dl, ImGui::GetFont(), ImVec2(x, y), iw, t.label.c_str(), col(mix(C::muted, C::text, 0.6f)));
+    y += ImGui::GetFontSize() + px(4);
+    bool cut = text_ellipsis(dl, vf, ImVec2(x, y), iw, t.value.c_str(), col(C::text));
+    y += vf->FontSize + px(8);
+    if (t.bar >= 0) {
+        std::string pc = pct(t.bar);
+        float pw = text_size(sf, pc.c_str()).x, bw = iw - pw - px(8), by = y + sf->FontSize * 0.5f;
+        dl->AddRectFilled(ImVec2(x, by - px(2)), ImVec2(x + bw, by + px(2)), col(C::surface3), px(2));
+        dl->AddRectFilled(ImVec2(x, by - px(2)), ImVec2(x + std::max(px(4), bw * t.bar), by + px(2)), col(C::accent), px(2));
+        dl->AddText(sf, sf->FontSize, ImVec2(x + iw - pw, y), col(C::muted), pc.c_str());
+    } else {
+        float tx = x;
+        if (t.show_dot) {
+            dl->AddCircleFilled(ImVec2(x + px(3), y + sf->FontSize * 0.5f), px(3), col(t.dot));
+            tx += px(12);
+        }
+        text_ellipsis(dl, sf, ImVec2(tx, y), x + iw - tx, t.sub.c_str(), col(t.show_dot ? t.dot : C::muted));
+    }
+    if (hov && cut) tooltip(t.value.c_str());
+}
+
+void home_tiles(float w) {
+    std::vector<Tile> ts;
+    Tile m{IC_CUBE, tr(S::TileModels), std::to_string(A.model_count), A.model ? tr(S::TileActive) : tr(S::TileNoModel)};
+    m.dot = A.model ? C::good : C::subtle;
+    ts.push_back(m);
+    Tile d{IC_LAYERS, tr(S::TileDatasets), std::to_string(A.dataset_count), strf(tr(S::TileTotal), fmt_bytes(A.data_bytes).c_str())};
+    d.show_dot = false;
+    ts.push_back(d);
+    Tile r{IC_PLAY_O, tr(S::TileTrainings), std::to_string(A.train_runs), busy() ? tr(S::TileRunning) : tr(S::TileReady)};
+    r.dot = busy() ? C::violet : C::good;
+    ts.push_back(r);
+    Tile c{IC_CPU, "vCPU", std::to_string(A.sys.logical), ""};
+    c.bar = std::max(0.f, A.usage.cpu);
+    ts.push_back(c);
+    double rt = A.usage.ram_total_gb > 0 ? A.usage.ram_total_gb : A.sys.ram_total_gb;
+    Tile m2{IC_MEMORY, "RAM", strf("%.1f GB", rt), ""};
+    m2.bar = rt > 0 ? (float)(A.usage.ram_used_gb / rt) : 0.f;
+    ts.push_back(m2);
+    Tile g{IC_GPU, "GPU", A.sys.gpus.empty() ? std::string(tr(S::TileNoGpu)) : short_gpu(A.sys.gpus[0]),
+           A.sys.gpus.empty() ? "-" : tr(S::TileDetected)};
+    g.dot = A.sys.gpus.empty() ? C::subtle : C::good;
+    ts.push_back(g);
+
+    float gap_ = px(10);
+    int cols = std::clamp((int)((w + gap_) / (px(96) + gap_)), 1, 6);
+    if (cols == 4 || cols == 5) cols = 3;
+    float cw = std::floor((w - gap_ * (cols - 1)) / cols);
+    ImFont* vf = F.h2 ? F.h2 : ImGui::GetFont();
+    float h = px(12) * 2 + px(20) + px(8) + ImGui::GetFontSize() + px(4) + vf->FontSize + px(8) + (F.small ? F.small->FontSize : 13.f);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(gap_, gap_));
+    for (size_t i = 0; i < ts.size(); ++i) {
+        if (i % cols) ImGui::SameLine(0, gap_);
+        ImGui::PushID((int)i);
+        tile(ts[i], cw, h);
         ImGui::PopID();
     }
     ImGui::PopStyleVar();
 }
 
+void home_main(float w) {
+    hero(w);
+    if (A.resume_avail && !busy()) resume_card();
+    home_tiles(w);
+    gap(2);
+
+    static EqualRow row;
+    float g = px(12);
+    bool two = w > px(640);
+    float cw = two ? std::floor((w - g) * 0.5f) : 0;
+    recent_projects_card(two ? row.prev : 0, cw, row.track());
+    if (two) ImGui::SameLine(0, g);
+    else gap();
+    activity_card(two ? row.prev : 0, cw, row.track());
+    row.next();
+}
+
+void home_side() {
+    usage_card();
+    quick_actions_card();
+    shortcuts_card();
+}
+
 void page_home() {
-    ImDrawList* dl = ImGui::GetWindowDrawList();
+    refresh_home_numbers();
+    CardPadding cp(16, 14);
+    float w = ImGui::GetContentRegionAvail().x, side = px(272), g = px(12);
+    if (w < px(980)) {
+        home_main(w);
+        gap();
+        home_side();
+        return;
+    }
+    ImGuiWindowFlags cf = ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
+    ImGui::BeginChild("##main", ImVec2(w - side - g, 0), ImGuiChildFlags_AutoResizeY, cf);
+    home_main(w - side - g);
+    ImGui::EndChild();
+    ImGui::SameLine(0, g);
+    ImGui::BeginChild("##side", ImVec2(side, 0), ImGuiChildFlags_AutoResizeY, cf);
+    home_side();
+    ImGui::EndChild();
+}
+
+// --------------------------------------------------------------- projects
+
+void project_tile(size_t i, float w, float h) {
+    const State::ProjectInfo& pi = A.projects[i];
+    bool cur = pi.dir == A.project_dir;
     ImVec2 p = ImGui::GetCursorScreenPos();
-    float w = ImGui::GetContentRegionAvail().x;
-    float lz = px(68);
-    draw_logo(dl, p, lz);
-    ImGui::SetCursorScreenPos(ImVec2(p.x + lz + px(20), p.y + px(4)));
-    ImGui::BeginGroup();
-    {
-        FontScope f(F.h1);
-        ImGui::TextUnformatted("Kor Studio");
+    ImGui::SetNextItemAllowOverlap();
+    bool open = ImGui::InvisibleButton("##tile", ImVec2(w, h));
+    bool hov = ImGui::IsItemHovered();
+    float t = anim(ImGui::GetItemID(), hov || cur);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec4& tint = project_tint(i);
+    dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), col(mix(C::surface, C::surface2, t)), px(12));
+    dl->AddRect(p, ImVec2(p.x + w, p.y + h), col(cur ? C::accent : mix(C::border, C::border_hi, t), cur ? 0.8f : 1.f), px(12));
+    float pad = px(16), s = px(36);
+    ImVec2 ib(p.x + pad, p.y + pad);
+    dl->AddRectFilled(ib, ImVec2(ib.x + s, ib.y + s), col(tint, 0.15f), px(9));
+    icon(dl, IC_FOLDER, ImVec2(ib.x + s * 0.5f, ib.y + s * 0.5f), px(18), col(tint));
+    ImFont* bf = F.bold ? F.bold : ImGui::GetFont();
+    ImFont* sf = F.small ? F.small : ImGui::GetFont();
+    float tx = ib.x + s + px(12), tw = p.x + w - pad - tx - px(30);
+    text_ellipsis(dl, bf, ImVec2(tx, ib.y), tw, pi.name.c_str(), col(C::text));
+    std::string when = ago(pi.updated);
+    if (cur) when += "  \xC2\xB7  " + std::string(tr(S::ProjectCurrent));
+    text_ellipsis(dl, sf, ImVec2(tx, ib.y + bf->FontSize + px(3)), tw, when.c_str(), col(cur ? C::good : C::muted));
+    float y = ib.y + s + px(14);
+    icon(dl, IC_DATA, ImVec2(p.x + pad + px(7), y + sf->FontSize * 0.5f), px(13), col(C::subtle));
+    text_ellipsis(dl, sf, ImVec2(p.x + pad + px(20), y), w - pad * 2 - px(20), pi.data.empty() ? "-" : pi.data.c_str(), col(C::muted));
+    y += sf->FontSize + px(6);
+    std::string m = pi.model.empty() ? tr(S::ProjectNoModel) : strf(tr(S::ProjectModelFmt), fmt_count(pi.params).c_str());
+    icon(dl, IC_MODEL, ImVec2(p.x + pad + px(7), y + sf->FontSize * 0.5f), px(13), col(C::subtle));
+    text_ellipsis(dl, sf, ImVec2(p.x + pad + px(20), y), w - pad * 2 - px(20), m.c_str(), col(C::muted));
+    if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    // folder button in the top right corner
+    float fb = px(28);
+    ImGui::SetCursorScreenPos(ImVec2(p.x + w - pad - fb + px(6), p.y + pad - px(4)));
+    bool folder = ImGui::InvisibleButton("##folder", ImVec2(fb, fb));
+    bool fh = ImGui::IsItemHovered();
+    if (fh) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        tooltip(tr(S::ProjectsFolder));
     }
-    {
-        FontScope f(F.bold);
-        text(tr(S::Tagline), C::accent_hi);
-    }
-    ImGui::EndGroup();
-    ImGui::SetCursorScreenPos(ImVec2(p.x, std::max(p.y + lz, ImGui::GetItemRectMax().y) + px(16)));
-    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::min(w, px(800)));
-    text(tr(S::HomeIntro), C::muted);
-    ImGui::PopTextWrapPos();
-    gap(6);
-    if (button(tr(S::Start), BTN_PRIMARY, IC_PLAY, 0, px(40))) A.page = PAGE_DATA;
+    ImVec2 fc(p.x + w - pad - fb * 0.5f + px(6), p.y + pad - px(4) + fb * 0.5f);
+    if (fh) dl->AddRectFilled(ImVec2(fc.x - fb * 0.5f, fc.y - fb * 0.5f), ImVec2(fc.x + fb * 0.5f, fc.y + fb * 0.5f), col(C::surface3), px(7));
+    icon(dl, IC_FOLDER, fc, px(14), col(fh ? C::text : C::subtle));
+    ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + h));
+    ImGui::Dummy(ImVec2(0, 0));
+    if (folder) open_folder(pi.dir);
+    else if (open) project_open_from_list(pi.dir);
+}
+
+void page_projects() {
+    if (!A.projects_scanned) scan_projects();
+    float bw = button_width(tr(S::OpenProject), IC_FOLDER) + px(10) + button_width(tr(S::NewProject), IC_PLUS);
+    header(tr(S::NavProjects), tr(S::ProjectsHelp), bw);
+    if (button(tr(S::OpenProject), BTN_SECONDARY, IC_FOLDER)) ask_open_project();
     ImGui::SameLine(0, px(10));
-    ImGui::BeginDisabled(busy());
-    if (button(tr(S::ExampleText), BTN_SECONDARY, IC_DOC, 0, px(40))) {
-        load_example(0);
-        A.page = PAGE_DATA;
+    if (button(tr(S::NewProject), BTN_PRIMARY, IC_PLUS)) ask_new_project();
+    header_end();
+
+    if (!A.project_msg.empty()) {
+        if (A.project_ok) banner(A.project_msg.c_str(), C::good, IC_CHECK);
+        else banner(strf(tr(S::ProjectFailed), A.project_msg.c_str()).c_str(), C::bad, IC_WARN);
+        gap();
     }
-    ImGui::EndDisabled();
 
-    gap(22);
-    section_title(tr(S::YourSystem));
-    text_wrapped(tr(S::GpuNote), C::muted, F.small);
-    gap(2);
-    std::vector<Stat> sys;
-    sys.push_back({tr(S::Cpu), A.sys.cpu, "", C::text, IC_CPU});
-    sys.push_back({tr(S::Threads), std::to_string(A.sys.logical), strf(tr(S::ThreadsFmt), A.sys.logical, recommended_threads(A.sys)), C::text, IC_THREADS});
-    sys.push_back({tr(S::Ram), strf("%.1f GB", A.sys.ram_total_gb), strf(tr(S::RamFmt), A.sys.ram_total_gb, A.sys.ram_free_gb), C::text, IC_MEMORY});
-    sys.push_back({tr(S::Simd), K().name, "", C::good, IC_BOLT});
-    if (!A.sys.gpus.empty())
-        sys.push_back({tr(S::Gpu), A.sys.gpus[0], A.sys.gpus.size() > 1 ? A.sys.gpus[1] : "", C::text, IC_GPU});
-    stat_grid(sys, px(180), false);
-
-    gap(22);
-    section_title(tr(S::Workflow));
-    gap(2);
-    step_cards();
-
-    gap(22);
-    begin_card("light", tr(S::LightTitle));
-    static const S feats[] = {S::Light1, S::Light2, S::Light3, S::Light4, S::Light5};
-    static const Icon ficons[] = {IC_SPARK, IC_LAYERS, IC_TARGET, IC_SAVE, IC_BOLT};
-    int cols = ImGui::GetContentRegionAvail().x > px(640) ? 2 : 1;
-    ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(px(10), px(8)));
-    if (ImGui::BeginTable("##feats", cols, ImGuiTableFlags_SizingStretchSame)) {
-        for (int i = 0; i < 5; ++i) {
-            ImGui::TableNextColumn();
-            ImVec2 q = ImGui::GetCursorScreenPos();
-            float s = px(30);
-            ImDrawList* d = ImGui::GetWindowDrawList();
-            d->AddRectFilled(q, ImVec2(q.x + s, q.y + s), col(C::accent, 0.12f), px(8));
-            icon(d, ficons[i], ImVec2(q.x + s * 0.5f, q.y + s * 0.5f), px(16), col(C::accent));
-            ImGui::Dummy(ImVec2(s, s));
-            ImGui::SameLine(0, px(12));
-            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (s - ImGui::GetFontSize()) * 0.5f);
-            ImGui::PushTextWrapPos(0.f);
-            ImGui::TextUnformatted(tr(feats[i]));
-            ImGui::PopTextWrapPos();
+    if (!A.project_dir.empty()) {
+        begin_card("current");
+        {
+            FontScope f(F.h2);
+            ImGui::TextUnformatted(A.project_name.c_str());
         }
-        ImGui::EndTable();
+        ImGui::SameLine(0, px(12));
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + px(3));
+        badge(tr(S::ProjectCurrent), C::good);
+        text(A.project_dir.c_str(), C::subtle);
+        gap(8);
+        std::string data = A.data.kind != DATA_NONE ? file_name(A.data.path) : "-";
+        std::string m = A.model ? fmt_count((double)A.model->param_count(false)) + " " + tr(S::Params) : tr(S::ProjectNoModel);
+        std::vector<Stat> st;
+        st.push_back({tr(S::NavData), data, "", C::text, IC_DATA});
+        st.push_back({tr(S::NavModel), m, "", A.model ? C::text : C::muted, IC_MODEL});
+        st.push_back({tr(S::NavTest), std::to_string(std::count(A.tests, A.tests + std::strlen(A.tests), '\n') + (A.tests[0] ? 1 : 0)), "", C::text, IC_TARGET});
+        stat_grid(st, px(170), false);
+        gap(8);
+        ImGui::BeginDisabled(busy());
+        if (button(tr(S::ScSave), BTN_PRIMARY, IC_SAVE)) save_open_project();
+        ImGui::EndDisabled();
+        ImGui::SameLine(0, px(10));
+        if (button(tr(S::ProjectsFolder), BTN_SECONDARY, IC_FOLDER)) open_folder(A.project_dir);
+        gap(4);
+        text_wrapped(tr(S::ProjectAuto), C::muted, F.small);
+        end_card();
+        gap(14);
+    }
+
+    if (A.projects.empty()) {
+        int r = empty_state(IC_FOLDER, tr(S::NavProjects), tr(S::NoProjects), tr(S::NewProject), tr(S::OpenProject));
+        if (r == 1) ask_new_project();
+        if (r == 2) ask_open_project();
+    } else {
+        section_title(tr(S::RecentProjects));
+        gap(2);
+        float g = px(14), h = px(130);
+        int cols = fit_columns(px(260), 3, g);
+        float cw = column_width(cols, g);
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(g, g));
+        for (size_t i = 0; i < A.projects.size(); ++i) {
+            if (i % cols) ImGui::SameLine(0, g);
+            ImGui::PushID((int)i);
+            ImGui::BeginGroup();
+            project_tile(i, cw, h);
+            ImGui::EndGroup();
+            ImGui::PopID();
+        }
+        ImGui::PopStyleVar();
+    }
+    gap(14);
+    std::string root = projects_root();
+    text(strf("%s: %s", tr(S::ProjectsFolder), root.c_str()).c_str(), C::subtle);
+    ImGui::SameLine(0, px(10));
+    if (button(tr(S::Refresh), BTN_GHOST, IC_REFRESH)) A.projects_scanned = false;
+}
+
+void new_project_modal() {
+    if (A.want_new_project) {
+        A.want_new_project = false;
+        ImGui::OpenPopup("##newproject");
+    }
+    ImGui::SetNextWindowSize(ImVec2(px(460), 0));
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(px(24), px(22)));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, px(14));
+    bool open = ImGui::BeginPopupModal("##newproject", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
+    ImGui::PopStyleVar(2);
+    if (!open) return;
+    {
+        FontScope f(F.h2);
+        ImGui::TextUnformatted(tr(S::NewProject));
+    }
+    text_wrapped(tr(S::NewProjectHelp), C::muted, F.small);
+    gap(8);
+    text(tr(S::ProjectName), C::muted);
+    if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    bool enter = ImGui::InputText("##pname", A.new_project_name, sizeof A.new_project_name, ImGuiInputTextFlags_EnterReturnsTrue);
+    gap(4);
+    text(tr(S::ProjectDesc), C::muted);
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    enter = enter |ImGui::InputText("##pdesc", A.new_project_desc, sizeof A.new_project_desc, ImGuiInputTextFlags_EnterReturnsTrue);
+    if (!A.new_project_err.empty()) text_wrapped(A.new_project_err.c_str(), C::bad, F.small);
+    gap(10);
+    bool create = button(tr(S::CreateBtn), BTN_PRIMARY, IC_PLUS) || enter;
+    ImGui::SameLine(0, px(10));
+    bool cancel = button(tr(S::CancelBtn), BTN_GHOST) || ImGui::IsKeyPressed(ImGuiKey_Escape);
+    if (create) {
+        std::string err;
+        if (create_project(A.new_project_name, A.new_project_desc, err)) {
+            A.page = PAGE_PROJECTS;
+            ImGui::CloseCurrentPopup();
+        } else {
+            A.new_project_err = err;
+        }
+    } else if (cancel) {
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
+// Ctrl+K: jump to a page or run an action by typing part of its name.
+void command_palette() {
+    if (A.want_palette) {
+        A.want_palette = false;
+        A.palette_q[0] = 0;
+        A.palette_sel = 0;
+        ImGui::OpenPopup("##palette");
+    }
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f, vp->WorkPos.y + vp->WorkSize.y * 0.16f), ImGuiCond_Always, ImVec2(0.5f, 0));
+    ImGui::SetNextWindowSize(ImVec2(std::min(px(560), vp->WorkSize.x - px(40)), 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(px(12), px(12)));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, px(14));
+    ImGui::PushStyleColor(ImGuiCol_Border, C::border_hi);
+    bool open = ImGui::BeginPopupModal("##palette", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
+    if (!open) return;
+
+    struct Item { const char* label; Icon ic; int page; int action; };
+    static const S page_labels[PAGE_COUNT] = {S::NavHome, S::NavProjects, S::NavData, S::NavModel, S::NavTrain, S::NavTest, S::NavChat, S::NavFiles, S::NavPlugins};
+    static const Icon page_icons[PAGE_COUNT] = {IC_HOME, IC_FOLDER, IC_DATA, IC_MODEL, IC_TRAIN, IC_CHAT, IC_CHATS, IC_FILES, IC_PLUGIN};
+    std::vector<Item> all;
+    for (int i = 0; i < PAGE_COUNT; ++i) all.push_back({tr(page_labels[i]), page_icons[i], i, 0});
+    all.push_back({tr(S::OpenProject), IC_FOLDER, -1, 1});
+    all.push_back({tr(S::NewProject), IC_PLUS, -1, 2});
+    if (!A.project_dir.empty()) all.push_back({tr(S::ScSave), IC_SAVE, -1, 3});
+    all.push_back({tr(S::QaImport), IC_UPLOAD, PAGE_DATA, 0});
+    all.push_back({tr(S::ChatWithModel), IC_CHATS, PAGE_CHAT, 0});
+    all.push_back({tr(S::Terminal), IC_TERMINAL, -1, 4});
+    all.push_back({tr(S::Settings), IC_GEAR, -1, 5});
+
+    auto lower = [](std::string s) {
+        for (char& ch : s) ch = (char)std::tolower((unsigned char)ch);
+        return s;
+    };
+    std::string q = lower(A.palette_q);
+    std::vector<const Item*> shown;
+    for (const Item& it : all)
+        if ((q.empty() || lower(it.label).find(q) != std::string::npos) && shown.size() < 9) shown.push_back(&it);
+
+    if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    if (ImGui::InputTextWithHint("##q", tr(S::PaletteHint), A.palette_q, sizeof A.palette_q)) A.palette_sel = 0;
+    if (ImGui::IsKeyPressed(ImGuiKey_DownArrow)) ++A.palette_sel;
+    if (ImGui::IsKeyPressed(ImGuiKey_UpArrow)) --A.palette_sel;
+    A.palette_sel = shown.empty() ? 0 : std::max(0, std::min((int)shown.size() - 1, A.palette_sel));
+    bool enter = ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter);
+    gap(4);
+    const Item* run = nullptr;
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(px(8), px(2)));
+    for (size_t i = 0; i < shown.size(); ++i) {
+        ImGui::PushID((int)i);
+        bool sel = (int)i == A.palette_sel;
+        if (sel) {
+            ImVec2 p = ImGui::GetCursorScreenPos();
+            ImGui::GetWindowDrawList()->AddRectFilled(p, ImVec2(p.x + ImGui::GetContentRegionAvail().x, p.y + px(40)), col(C::accent, 0.16f), px(8));
+        }
+        if (list_row("##it", shown[i]->ic, sel ? C::accent_hi : C::muted, shown[i]->label, nullptr, sel ? "Enter" : "")) run = shown[i];
+        ImGui::PopID();
     }
     ImGui::PopStyleVar();
-    end_card();
+    if (shown.empty()) text(tr(S::NoMatches), C::muted);
+    if (enter && !shown.empty()) run = shown[A.palette_sel];
+    if (run || ImGui::IsKeyPressed(ImGuiKey_Escape)) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+    if (!run) return;
+    if (run->page >= 0) A.page = run->page;
+    if (run->action == 1) ask_open_project();
+    if (run->action == 2) ask_new_project();
+    if (run->action == 3) save_open_project();
+    if (run->action == 4) open_terminal_here();
+    if (run->action == 5) A.want_settings = true;
+}
+
+void shortcuts() {
+    ImGuiIO& io = ImGui::GetIO();
+    if (!io.KeyCtrl || io.KeyShift || io.KeyAlt) return;
+    if (ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId)) return;
+    if (ImGui::IsKeyPressed(ImGuiKey_K, false)) A.want_palette = true;
+    if (ImGui::IsKeyPressed(ImGuiKey_S, false) && !busy()) save_or_create_project();
+    if (ImGui::IsKeyPressed(ImGuiKey_O, false)) ask_open_project();
+    if (ImGui::IsKeyPressed(ImGuiKey_GraveAccent, false)) open_terminal_here();
+    if (ImGui::IsKeyPressed(ImGuiKey_Comma, false)) A.want_settings = true;
+}
+
+void settings_modal() {
+    if (A.want_settings) {
+        A.want_settings = false;
+        ImGui::OpenPopup("##settings");
+    }
+    ImGui::SetNextWindowSize(ImVec2(px(480), 0));
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(px(24), px(22)));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, px(14));
+    bool open = ImGui::BeginPopupModal("##settings", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
+    ImGui::PopStyleVar(2);
+    if (!open) return;
+    {
+        FontScope f(F.h2);
+        ImGui::TextUnformatted(tr(S::Settings));
+    }
+    gap(8);
+    field_label(tr(S::Language), px(130));
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    if (begin_combo("##lang", language_name(get_language()))) {
+        for (int l = 0; l < LANG_COUNT; ++l)
+            if (ImGui::Selectable(language_name(l), l == get_language())) set_language(l);
+        ImGui::EndCombo();
+    }
+    gap(10);
+    float bw = ImGui::GetContentRegionAvail().x;
+    if (action_row(tr(S::OpenConfigDir), IC_GEAR)) open_folder(config_dir());
+    if (action_row(tr(S::OpenModelsDir), IC_CUBE)) {
+        std::error_code ec;
+        std::filesystem::create_directories(upath(models_dir()), ec);
+        open_folder(models_dir());
+    }
+    if (action_row(tr(S::ProjectsFolder), IC_FOLDER)) {
+        std::error_code ec;
+        std::filesystem::create_directories(upath(projects_root()), ec);
+        open_folder(projects_root());
+    }
+    if (action_row(tr(S::Terminal), IC_TERMINAL)) open_terminal_here();
+    gap(10);
+    text_wrapped(strf(tr(S::AboutLine), KOR_VERSION).c_str(), C::muted, F.small);
+    gap(10);
+    if (button("OK", BTN_PRIMARY, IC_CHECK, bw) || ImGui::IsKeyPressed(ImGuiKey_Escape)) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
 }
 
 // ------------------------------------------------------------------- data
@@ -1802,6 +3295,7 @@ void page_train() {
     if (A.data.kind == DATA_NONE) {
         header(tr(S::NavTrain), tr(S::TrainHelp));
         header_end();
+        resume_card();
         if (empty_state(IC_DATA, nullptr, tr(S::NoData), tr(S::GoData)) == 1) A.page = PAGE_DATA;
         return;
     }
@@ -1821,6 +3315,7 @@ void page_train() {
         if (button(tr(S::Stop), BTN_DANGER, IC_STOP)) A.trainer.stop();
     }
     header_end();
+    resume_card();
 
     // ---- status
     begin_card("status");
@@ -1841,6 +3336,12 @@ void page_train() {
     }
     if (st.state == TS_ERROR) text_wrapped(st.error.c_str(), C::bad);
     progress_bar(st.total > 0 ? (float)st.step / st.total : 0.f, px(8), st.state == TS_DONE ? C::good : C::accent);
+    if (!A.cfg.checkpoint.empty() && (run || st.state == TS_STOPPED)) {
+        gap(2);
+        if (!st.save_error.empty()) text_wrapped(strf(tr(S::AutosaveFailed), st.save_error.c_str()).c_str(), C::bad, F.small);
+        else text_wrapped(st.saved_step > 0 ? strf(tr(S::AutosaveLbl), st.saved_step).c_str() : tr(S::AutosaveWait), C::subtle, F.small);
+        tooltip(tr(S::AutosaveHelp));
+    }
     skills_strip(st, run);
     end_card();
     gap();
@@ -2252,6 +3753,7 @@ void page_files() {
         std::lock_guard<std::mutex> lk(A.trainer.model_mu);
         A.file_ok = A.model->save(A.model_path, A.half, &err);
         A.file_msg = A.file_ok ? tr(S::Saved) : err;
+        if (A.file_ok) add_activity(State::ACT_MODEL_SAVED, file_name(A.model_path));
     }
     ImGui::EndDisabled();
     end_card();
@@ -2280,6 +3782,409 @@ void page_files() {
         gap();
         if (A.file_ok) banner(A.file_msg.c_str(), C::good, IC_CHECK);
         else banner(strf(tr(S::Failed), A.file_msg.c_str()).c_str(), C::bad, IC_WARN);
+    }
+}
+
+// ------------------------------------------------------------------- chat
+
+bool chat_ready() { return A.chat.model && A.chat.model->spec.kind == MODEL_GPT && A.chat.model->spec.media == MEDIA_TEXT; }
+
+void chat_stop() {
+    A.chat.cancel = true;
+    if (A.chat.th.joinable()) A.chat.th.join();
+    A.chat.cancel = false;
+    A.chat.running = false;
+}
+
+// Moves a finished answer into the conversation; called every frame.
+void chat_collect() {
+    State::Chat& c = A.chat;
+    if (c.running || !c.th.joinable()) return;
+    c.th.join();
+    std::string answer;
+    {
+        std::lock_guard<std::mutex> lk(c.mu);
+        answer.swap(c.reply);
+    }
+    size_t a = answer.find_first_not_of(" \t"), b = answer.find_last_not_of(" \t\n");
+    answer = a == std::string::npos ? "" : answer.substr(a, b - a + 1);
+    c.msgs.push_back({false, answer.empty() ? "..." : answer});
+    c.scroll = true;
+}
+
+void remember_chat_model(const std::string& path) {
+    auto& r = A.chat.recent;
+    r.erase(std::remove(r.begin(), r.end(), path), r.end());
+    r.insert(r.begin(), path);
+    if (r.size() > 8) r.resize(8);
+}
+
+void scan_chat_models() {
+    namespace fs = std::filesystem;
+    State::Chat& c = A.chat;
+    c.files.clear();
+    c.scanned = true;
+    std::set<std::string> seen;
+    auto add = [&](const fs::path& p) {
+        std::error_code ec;
+        if (!fs::is_regular_file(p, ec)) return;
+        std::string key = fs::weakly_canonical(p, ec).u8string();
+        if (!seen.insert(key).second) return;
+        State::Chat::File f;
+        f.path = p.u8string();
+        f.name = p.filename().u8string();
+        f.mb = (double)fs::file_size(p, ec) / (1024.0 * 1024.0);
+        auto ft = fs::last_write_time(p, ec);
+        if (!ec) {
+            auto sys = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+                ft - fs::file_time_type::clock::now() + std::chrono::system_clock::now());
+            std::time_t t = std::chrono::system_clock::to_time_t(sys);
+            std::tm tm = *std::localtime(&t);
+            char b[32];
+            std::strftime(b, sizeof b, "%Y-%m-%d %H:%M", &tm);
+            f.when = b;
+        }
+        c.files.push_back(f);
+    };
+    std::error_code ec;
+    for (fs::directory_iterator it(upath(models_dir()), ec), end; !ec && it != end; it.increment(ec)) {
+        std::string ext = it->path().extension().u8string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char ch) { return (char)std::tolower(ch); });
+        if (ext == ".kor") add(it->path());
+    }
+    std::sort(c.files.begin(), c.files.end(), [](const State::Chat::File& x, const State::Chat::File& y) { return x.when > y.when; });
+    for (const std::string& r : c.recent) add(upath(r));
+}
+
+void chat_set_model(std::shared_ptr<Model> m, const std::string& path, const std::string& name) {
+    chat_stop();
+    State::Chat& c = A.chat;
+    c.model = m;
+    c.path = path;
+    c.name = name;
+    c.msgs.clear();
+    c.queue.clear();
+    c.reply.clear();
+    c.focus = true;
+    // Dialogue tags: stored in the model by this version, else those of the loaded data, else the usual ones.
+    std::string q = "Kullanıcı: ", a = "Asistan: ";
+    auto qi = m->meta.find("q_tag"), ai = m->meta.find("a_tag");
+    if (qi != m->meta.end() && ai != m->meta.end()) { q = qi->second; a = ai->second; }
+    else if (!A.q_tag.empty() && !A.a_tag.empty()) { q = A.q_tag; a = A.a_tag; }
+    std::snprintf(c.q_tag, sizeof c.q_tag, "%s", q.c_str());
+    std::snprintf(c.a_tag, sizeof c.a_tag, "%s", a.c_str());
+}
+
+bool chat_open(const std::string& path) {
+    std::string err;
+    auto m = Model::load(path, &err);
+    A.chat.ok = (bool)m;
+    A.chat.msg = m ? "" : err;
+    if (!m) return false;
+    chat_set_model(m, path, upath(path).filename().u8string());
+    if (path.find(models_dir()) != 0) remember_chat_model(path);
+    A.chat.scanned = false;
+    return true;
+}
+
+// A copy of the model being trained, so the chat never waits for training.
+void chat_use_current() {
+    if (!A.model) return;
+    std::string snap = (upath(config_dir()) / "chat-model.tmp").u8string(), err;
+    bool saved;
+    {
+        std::lock_guard<std::mutex> lk(A.trainer.model_mu);
+        saved = A.model->save(snap, false, &err);
+    }
+    auto m = saved ? Model::load(snap, &err) : nullptr;
+    std::error_code ec;
+    std::filesystem::remove(upath(snap), ec);
+    A.chat.ok = (bool)m;
+    A.chat.msg = m ? "" : err;
+    if (!m) return;
+    if (!A.q_tag.empty() && !A.a_tag.empty()) {
+        m->meta["q_tag"] = A.q_tag;
+        m->meta["a_tag"] = A.a_tag;
+    }
+    chat_set_model(m, "", tr(S::ChatUseCurrent));
+}
+
+// The prompt for the newest message: as much of the conversation as fits in
+// the model's context, newest last, in the format of the training text.
+std::vector<int> chat_prompt() {
+    State::Chat& c = A.chat;
+    const Model& m = *c.model;
+    std::string q = c.q_tag, a = c.a_tag;
+    bool tagged = !q.empty() || !a.empty();
+    const std::string& last = c.msgs.back().text;
+    std::vector<int> ids = tokenize(tagged ? q + last + "\n" + a : last, m.vocab);
+    if (!tagged || !c.memory || ids.empty()) return ids;
+    int budget = std::max(8, m.spec.ctx - std::min(c.max_len, m.spec.ctx / 2)) - (int)ids.size();
+    for (int i = (int)c.msgs.size() - 2; i >= 0 && budget > 0; --i) {
+        const State::Chat::Msg& msg = c.msgs[i];
+        std::vector<int> part = tokenize((msg.user ? q : a) + msg.text + "\n", m.vocab);
+        if ((int)part.size() > budget) break;
+        budget -= (int)part.size();
+        ids.insert(ids.begin(), part.begin(), part.end());
+    }
+    return ids;
+}
+
+void chat_send(const std::string& text) {
+    State::Chat& c = A.chat;
+    std::string t = text;
+    while (!t.empty() && (t.back() == ' ' || t.back() == '\n')) t.pop_back();
+    if (t.empty() || !chat_ready()) return;
+    if (c.running || c.th.joinable()) { c.queue.push_back(t); return; }
+    c.msgs.push_back({true, t});
+    c.scroll = true;
+    std::vector<int> ids = chat_prompt();
+    if (ids.empty()) {
+        c.msgs.push_back({false, tr(S::ChatUnknown)});
+        return;
+    }
+    int newline = -1;
+    for (size_t i = 0; i < c.model->vocab.size(); ++i)
+        if (c.model->vocab[i] == "\n") newline = (int)i;
+    bool tagged = c.q_tag[0] || c.a_tag[0];
+    {
+        std::lock_guard<std::mutex> lk(c.mu);
+        c.reply.clear();
+    }
+    c.running = true;
+    c.cancel = false;
+    std::shared_ptr<Model> m = c.model;
+    int n = std::max(1, c.max_len);
+    float temp = c.temperature;
+    uint64_t seed = c.rng.next();
+    c.th = std::thread([m, ids, n, temp, seed, newline, tagged] {
+        State::Chat& ch = A.chat;
+        Rng rng(seed);
+        // Dialogue models answer in one line; plain text just continues.
+        m->generate(ids, n, temp, rng, tagged ? newline : -1, [&](int t) {
+            if (t == newline && tagged) return false;
+            if (t >= 0 && t < (int)m->vocab.size()) {
+                std::lock_guard<std::mutex> lk(ch.mu);
+                ch.reply += m->vocab[t];
+            }
+            return !ch.cancel.load();
+        });
+        ch.running = false;
+    });
+}
+
+// One message as a bubble: the user's on the right, the model's on the left.
+void chat_bubble(const std::string& text, bool user, bool typing) {
+    float avail = ImGui::GetContentRegionAvail().x;
+    float wrap = std::min(avail * 0.78f, px(620));
+    ImFont* font = ImGui::GetFont();
+    float fs = ImGui::GetFontSize();
+    std::string shown = text;
+    if (typing) {
+        int dots = 1 + (int)(ImGui::GetTime() * 3.0) % 3;
+        shown += shown.empty() ? std::string(dots, '.') : std::string(" ") + std::string(dots, '.');
+    }
+    ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, wrap, shown.c_str());
+    float padx = px(14), pady = px(9);
+    ImVec2 size(std::max(ts.x, px(24)) + padx * 2, ts.y + pady * 2);
+    ImFont* lf = F.small ? F.small : font;
+    const char* who = tr(user ? S::ChatUser : S::ChatBot);
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    float x = user ? p.x + avail - size.x : p.x;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    float lw = text_size(lf, who).x;
+    dl->AddText(lf, lf->FontSize, ImVec2(user ? p.x + avail - lw - px(4) : p.x + px(4), p.y), col(C::subtle), who);
+    float y = p.y + lf->FontSize + px(3);
+    ImU32 bg = user ? col(C::accent, 0.22f) : col(C::surface2);
+    dl->AddRectFilled(ImVec2(x, y), ImVec2(x + size.x, y + size.y), bg, px(12));
+    dl->AddRect(ImVec2(x, y), ImVec2(x + size.x, y + size.y), user ? col(C::accent, 0.45f) : col(C::border), px(12));
+    dl->AddText(font, fs, ImVec2(x + padx, y + pady), col(typing && text.empty() ? C::muted : C::text), shown.c_str(), nullptr, wrap);
+    ImGui::SetCursorScreenPos(ImVec2(x, y));
+    ImGui::InvisibleButton("##bubble", size);
+    if (ImGui::IsItemClicked(ImGuiMouseButton_Right) && !text.empty()) ImGui::SetClipboardText(text.c_str());
+    ImGui::SetCursorScreenPos(ImVec2(p.x, y + size.y + px(10)));
+    ImGui::Dummy(ImVec2(0, 0));
+}
+
+void chat_model_list() {
+    State::Chat& c = A.chat;
+    if (!c.scanned) scan_chat_models();
+    begin_card("chatmodels", tr(S::ChatModels));
+    text_wrapped(tr(S::ChatModelsHelp), C::muted, F.small);
+    gap(2);
+    if (c.files.empty()) {
+        text_wrapped(tr(S::ChatNoModels), C::subtle);
+    } else {
+        float row_h = ImGui::GetFrameHeight();
+        float h = std::min((float)c.files.size(), 5.f) * (row_h + px(4)) + px(26);
+        if (begin_inset("##chatfiles", h)) {
+            for (size_t i = 0; i < c.files.size(); ++i) {
+                const State::Chat::File& f = c.files[i];
+                ImGui::PushID((int)i);
+                bool sel = !c.path.empty() && f.path == c.path;
+                ImVec2 p = ImGui::GetCursorScreenPos();
+                float w = ImGui::GetContentRegionAvail().x;
+                if (ImGui::Selectable("##f", sel, 0, ImVec2(w, row_h)) && !sel) chat_open(f.path);
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                float ty = p.y + (row_h - ImGui::GetFontSize()) * 0.5f;
+                icon(dl, IC_MODEL, ImVec2(p.x + px(10), p.y + row_h * 0.5f), px(15), col(sel ? C::accent : C::muted));
+                std::string info = f.when + "   " + strf("%.1f MB", f.mb);
+                ImFont* sf = F.small ? F.small : ImGui::GetFont();
+                float iw = text_size(sf, info.c_str()).x;
+                text_ellipsis(dl, ImGui::GetFont(), ImVec2(p.x + px(26), ty), w - iw - px(40), f.name.c_str(), col(sel ? C::accent_hi : C::text));
+                dl->AddText(sf, sf->FontSize, ImVec2(p.x + w - iw - px(4), p.y + (row_h - sf->FontSize) * 0.5f), col(C::subtle), info.c_str());
+                if (ImGui::IsItemHovered()) tooltip(f.path.c_str());
+                ImGui::PopID();
+            }
+        }
+        ImGui::EndChild();
+    }
+    gap(4);
+    if (has_native_dialogs()) {
+        if (button(tr(S::Browse), BTN_PRIMARY, IC_FOLDER)) {
+            std::string p = open_file_dialog(DLG_MODEL);
+            if (!p.empty()) chat_open(p);
+        }
+        ImGui::SameLine();
+    }
+    bool can_current = A.model && A.model->spec.kind == MODEL_GPT && A.model->spec.media == MEDIA_TEXT;
+    ImGui::BeginDisabled(!can_current);
+    if (button(tr(S::ChatUseCurrent), BTN_SECONDARY, IC_TRAIN)) chat_use_current();
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (button(tr(S::Refresh), BTN_GHOST, IC_REFRESH)) scan_chat_models();
+    ImGui::SameLine();
+    if (button(tr(S::OpenFolder), BTN_GHOST, IC_FOLDER)) {
+        std::error_code ec;
+        std::filesystem::create_directories(upath(models_dir()), ec);
+        open_folder(models_dir());
+    }
+    if (!c.ok && !c.msg.empty()) {
+        gap(2);
+        text_wrapped(strf(tr(S::Failed), c.msg.c_str()).c_str(), C::bad, F.small);
+    }
+    end_card();
+}
+
+// Collects finished answers and sends waiting messages; called every frame.
+void chat_pump() {
+    State::Chat& c = A.chat;
+    chat_collect();
+    if (!c.running && !c.th.joinable() && !c.queue.empty()) {
+        std::string next = c.queue.front();
+        c.queue.erase(c.queue.begin());
+        chat_send(next);
+    }
+}
+
+void page_chat() {
+    State::Chat& c = A.chat;
+    const char* clear_label = tr(S::ChatClear);
+    header(tr(S::NavChat), tr(S::ChatHelp), button_width(clear_label, IC_PLUS));
+    ImGui::BeginDisabled(c.msgs.empty() && !c.running);
+    if (button(clear_label, BTN_SECONDARY, IC_PLUS)) {
+        chat_stop();
+        c.msgs.clear();
+        c.queue.clear();
+        c.reply.clear();
+        c.focus = true;
+    }
+    ImGui::EndDisabled();
+    header_end();
+
+    chat_model_list();
+    gap();
+
+    if (!c.model) {
+        empty_state(IC_CHATS, nullptr, tr(S::ChatNoModel));
+        return;
+    }
+    if (!chat_ready()) {
+        banner(tr(S::ChatNotText), C::warn, IC_INFO);
+        return;
+    }
+
+    // ---- model line and settings
+    std::string sub = strf(tr(S::ChatModelFmt), fmt_count((double)c.model->param_count(false)).c_str(), c.model->spec.ctx);
+    std::string summary = c.name + "   \xC2\xB7   " + sub;
+    if (begin_collapsible_card("chatcfg", tr(S::Settings), &c.settings_open, summary.c_str())) {
+        float lw = std::min(px(220), ImGui::GetContentRegionAvail().x * 0.4f);
+        field_label(tr(S::Temperature), lw);
+        slider_float("##ctemp", &c.temperature, 0.f, 1.5f);
+        field_label(tr(S::ChatMaxLen), lw);
+        slider_int("##clen", &c.max_len, 10, 1000);
+        field_label(tr(S::ChatTags), lw, tr(S::ChatTagsHelp));
+        float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+        ImGui::SetNextItemWidth(half);
+        ImGui::InputText("##cq", c.q_tag, sizeof c.q_tag);
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        ImGui::InputText("##ca", c.a_tag, sizeof c.a_tag);
+        gap(2);
+        checkbox(tr(S::ChatMemory), &c.memory);
+        tooltip(tr(S::ChatMemoryHelp));
+    }
+    end_card();
+    gap();
+
+    // ---- conversation
+    float input_h = ImGui::GetFrameHeight() + px(8);
+    float h = std::max(px(260), ImGui::GetContentRegionAvail().y - input_h - px(6));
+    if (begin_inset("##chatlog", h)) {
+        if (c.msgs.empty() && !c.running) {
+            ImVec2 sz = text_size(ImGui::GetFont(), tr(S::ChatEmpty));
+            ImVec2 avail = ImGui::GetContentRegionAvail();
+            ImGui::SetCursorPos(ImVec2(ImGui::GetCursorPosX() + std::max(0.f, (avail.x - sz.x) * 0.5f),
+                                       ImGui::GetCursorPosY() + std::max(0.f, (avail.y - sz.y) * 0.5f)));
+            text(tr(S::ChatEmpty), C::subtle);
+        }
+        for (size_t i = 0; i < c.msgs.size(); ++i) {
+            ImGui::PushID((int)i);
+            chat_bubble(c.msgs[i].text, c.msgs[i].user, false);
+            ImGui::PopID();
+        }
+        if (c.running || c.th.joinable()) {
+            std::string partial;
+            {
+                std::lock_guard<std::mutex> lk(c.mu);
+                partial = c.reply;
+            }
+            ImGui::PushID("typing");
+            chat_bubble(partial, false, true);
+            ImGui::PopID();
+            c.scroll = true;
+        }
+        for (size_t i = 0; i < c.queue.size(); ++i) {
+            ImGui::PushID((int)(10000 + i));
+            chat_bubble(c.queue[i], true, false);
+            ImGui::PopID();
+        }
+        if (c.scroll) {
+            ImGui::SetScrollHereY(1.f);
+            c.scroll = false;
+        }
+    }
+    ImGui::EndChild();
+    gap(6);
+
+    // ---- input
+    bool generating = c.running || c.th.joinable();
+    const char* act = tr(generating ? S::Stop : S::ChatSend);
+    float bw = button_width(act, generating ? IC_STOP : IC_ARROW_UP);
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - bw - ImGui::GetStyle().ItemSpacing.x);
+    if (c.focus) {
+        ImGui::SetKeyboardFocusHere();
+        c.focus = false;
+    }
+    bool enter = ImGui::InputTextWithHint("##chatin", tr(S::ChatInputHint), c.input, sizeof c.input, ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::SameLine();
+    bool click = generating ? button(act, BTN_DANGER, IC_STOP) : button(act, BTN_PRIMARY, IC_ARROW_UP);
+    if (generating && click) {
+        c.cancel = true;  // the answer so far is kept
+    } else if ((enter || click) && c.input[0]) {
+        chat_send(c.input);
+        c.input[0] = 0;
+        c.focus = true;
     }
 }
 
@@ -2760,6 +4665,184 @@ void page_plugins() {
     end_card();
 }
 
+// -------------------------------------------------------------- title bar
+
+// Marks the last item as clickable, so the window is not dragged from it.
+void title_hot() {
+    ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+    A.title_hot.push_back(ImVec4(a.x, a.y, b.x, b.y));
+}
+
+bool bar_icon(const char* id, Icon ic, ImVec2 p, float s, const char* tip, const ImVec4* dot = nullptr) {
+    ImGui::SetCursorScreenPos(p);
+    bool c = ImGui::InvisibleButton(id, ImVec2(s, s));
+    title_hot();
+    bool hov = ImGui::IsItemHovered();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    if (hov) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        dl->AddRectFilled(p, ImVec2(p.x + s, p.y + s), col(C::surface2), px(8));
+        if (tip) tooltip(tip);
+    }
+    icon(dl, ic, ImVec2(p.x + s * 0.5f, p.y + s * 0.5f), px(17), col(hov ? C::text : mix(C::muted, C::text, 0.45f)));
+    if (dot) {
+        ImVec2 dc(p.x + s * 0.72f, p.y + s * 0.28f);
+        dl->AddCircleFilled(dc, px(4.5f), col(C::sidebar));
+        dl->AddCircleFilled(dc, px(3), col(*dot));
+    }
+    return c;
+}
+
+void notifications_popup() {
+    ImGui::SetNextWindowSize(ImVec2(px(360), 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(px(14), px(12)));
+    if (ImGui::BeginPopup("##notif")) {
+        {
+            FontScope f(F.bold);
+            ImGui::TextUnformatted(tr(S::Notifications));
+        }
+        gap(4);
+        ImFont* bf = ImGui::GetFont();
+        ImFont* sf = F.small ? F.small : bf;
+        int shown = 0;
+        for (auto it = A.activity.rbegin(); it != A.activity.rend() && shown < 8; ++it, ++shown) {
+            int k = std::max(0, std::min((int)State::ACT_COUNT - 1, it->kind));
+            const ImVec4& dot = k == State::ACT_TRAIN_STOP ? C::warn : k == State::ACT_TRAIN_DONE ? C::good : C::accent;
+            float w = ImGui::GetContentRegionAvail().x, h = px(40);
+            ImVec2 p = ImGui::GetCursorScreenPos();
+            ImGui::Dummy(ImVec2(w, h));
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            dl->AddCircleFilled(ImVec2(p.x + px(5), p.y + px(10)), px(4), col(dot));
+            text_ellipsis(dl, bf, ImVec2(p.x + px(18), p.y + px(2)), w - px(18), act_text(*it).c_str(), col(C::text));
+            dl->AddText(sf, sf->FontSize, ImVec2(p.x + px(18), p.y + px(4) + bf->FontSize), col(C::subtle), ago(it->t).c_str());
+        }
+        if (A.activity.empty()) text_wrapped(tr(S::NoNotifications), C::muted, F.small);
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleVar();
+}
+
+void title_bar(ImVec2 pos, float w, float h, float sbw) {
+    A.title_hot.clear();
+    A.title_h = h;
+    ImGuiWindowFlags wf = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                          ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoScrollWithMouse;
+    ImGui::SetNextWindowPos(pos);
+    ImGui::SetNextWindowSize(ImVec2(w, h));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, C::sidebar);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::Begin("##titlebar", nullptr, wf);
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddLine(ImVec2(pos.x, pos.y + h - 0.5f), ImVec2(pos.x + w, pos.y + h - 0.5f), col(C::border));
+    ImFont* bf = F.bold ? F.bold : ImGui::GetFont();
+    ImFont* sf = F.small ? F.small : ImGui::GetFont();
+    float cy = pos.y + h * 0.5f;
+
+    // brand
+    float lz = px(28), x = pos.x + px(16);
+    draw_logo(dl, ImVec2(x, cy - lz * 0.5f), lz);
+    x += lz + px(10);
+    {
+        FontScope f(F.h2 ? F.h2 : bf);
+        ImFont* hf = ImGui::GetFont();
+        dl->AddText(hf, hf->FontSize, ImVec2(x, cy - hf->FontSize * 0.5f), col(C::text), "KOR Studio");
+        x += text_size(hf, "KOR Studio").x + px(10);
+    }
+    {
+        const char* v = "v" KOR_VERSION;
+        ImVec2 ts = text_size(sf, v);
+        ImVec2 a(x, cy - ts.y * 0.5f - px(3)), b(x + ts.x + px(14), cy + ts.y * 0.5f + px(3));
+        dl->AddRectFilled(a, b, col(C::surface2), (b.y - a.y) * 0.5f);
+        dl->AddRect(a, b, col(C::border_hi), (b.y - a.y) * 0.5f);
+        dl->AddText(sf, sf->FontSize, ImVec2(a.x + px(7), a.y + px(3)), col(C::muted), v);
+        x = b.x;
+    }
+
+    // window buttons
+    float right = pos.x + w;
+    if (A.custom_frame) {
+        float bw = px(46);
+        right -= bw * 3;
+        static const int cmds[3] = {WIN_MINIMIZE, WIN_MAXIMIZE, WIN_CLOSE};
+        for (int i = 0; i < 3; ++i) {
+            ImVec2 p(right + bw * i, pos.y);
+            ImGui::SetCursorScreenPos(p);
+            ImGui::PushID(i);
+            bool c = ImGui::InvisibleButton("##winbtn", ImVec2(bw, h - 1));
+            ImGui::PopID();
+            title_hot();
+            bool hov = ImGui::IsItemHovered();
+            if (hov) dl->AddRectFilled(p, ImVec2(p.x + bw, p.y + h - 1), col(i == 2 ? ImVec4(0.82f, 0.20f, 0.24f, 1.f) : C::surface2));
+            Icon ic = i == 0 ? IC_MINUS : i == 1 ? (A.maximized ? IC_RESTORE : IC_MAXIMIZE) : IC_X;
+            icon(dl, ic, ImVec2(p.x + bw * 0.5f, cy), px(i == 2 ? 13 : 12), col(hov ? C::text : mix(C::muted, C::text, 0.5f)));
+            if (c) A.window_cmd = cmds[i];
+        }
+        right -= px(10);
+    }
+
+    // bell, cloud, settings
+    float s = px(34), sp = px(4);
+    float ix = right - s * 3 - sp * 2 - px(6);
+    bool unread = A.activity.size() > A.seen_activity;
+    ImVec2 bell_at(ix, cy - s * 0.5f);
+    if (bar_icon("##bell", IC_BELL, bell_at, s, tr(S::Notifications), unread ? &C::accent : nullptr)) {
+        A.seen_activity = A.activity.size();
+        ImGui::OpenPopup("##notif");
+    }
+    bool py = A.python.found();
+    if (bar_icon("##cloud", IC_CLOUD, ImVec2(ix + s + sp, cy - s * 0.5f), s, tr(py ? S::CloudOk : S::CloudOff), py ? &C::good : &C::subtle)) {
+        A.page = PAGE_PLUGINS;
+        if (py) A.want_community = true;
+    }
+    if (bar_icon("##gear", IC_GEAR, ImVec2(ix + (s + sp) * 2, cy - s * 0.5f), s, tr(S::Settings))) A.want_settings = true;
+    ImGui::SetNextWindowPos(ImVec2(bell_at.x + s, pos.y + h + px(4)), ImGuiCond_Always, ImVec2(1, 0));
+    notifications_popup();
+
+    // tabs, aligned with the content
+    struct Tab { int page; Icon ic; S label; };
+    static const Tab tabs[] = {{PAGE_HOME, IC_HOME, S::NavHome},   {PAGE_MODEL, IC_MODEL, S::NavModel},
+                               {PAGE_DATA, IC_DATA, S::NavData},   {PAGE_TRAIN, IC_TRAIN, S::NavTrain},
+                               {PAGE_PLUGINS, IC_PLUGIN, S::NavPlugins}, {PAGE_PROJECTS, IC_FOLDER, S::NavProjects}};
+    const int nt = (int)(sizeof tabs / sizeof tabs[0]);
+    ImFont* tf = ImGui::GetFont();
+    ImFont* mf = F.bold ? F.bold : tf;
+    float tx = std::max(x + px(24), pos.x + sbw + px(18)), th = px(36), pad = px(14), isz = px(16), tgap = px(4);
+    float full = 0;
+    for (int i = 0; i < nt; ++i) full += pad * 2 + isz + px(8) + text_size(mf, tr(tabs[i].label)).x + (i ? tgap : 0);
+    bool icons_only = full > ix - px(16) - tx;
+    for (int i = 0; i < nt; ++i) {
+        const Tab& t = tabs[i];
+        const char* label = tr(t.label);
+        float tw = icons_only ? px(40) : pad * 2 + isz + px(8) + text_size(mf, label).x;
+        if (tx + tw > ix - px(8)) break;
+        ImVec2 p(tx, cy - th * 0.5f);
+        ImGui::SetCursorScreenPos(p);
+        ImGui::PushID(i);
+        bool c = ImGui::InvisibleButton("##tab", ImVec2(tw, th));
+        ImGui::PopID();
+        title_hot();
+        bool hov = ImGui::IsItemHovered(), sel = A.page == t.page;
+        if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        if (icons_only && hov) tooltip(label);
+        float k = anim(ImGui::GetItemID(), hov);
+        if (sel) dl->AddRectFilled(p, ImVec2(p.x + tw, p.y + th), col(mix(C::surface3, C::accent, 0.30f)), px(9));
+        else if (k > 0.01f) dl->AddRectFilled(p, ImVec2(p.x + tw, p.y + th), col(C::surface2, k), px(9));
+        ImU32 fg = col(sel ? C::text : mix(C::muted, C::text, 0.4f * k + 0.5f));
+        if (icons_only) {
+            icon(dl, t.ic, ImVec2(p.x + tw * 0.5f, cy), isz, fg);
+        } else {
+            icon(dl, t.ic, ImVec2(p.x + pad + isz * 0.5f, cy), isz, fg);
+            ImFont* lf = sel && F.bold ? F.bold : tf;
+            dl->AddText(lf, lf->FontSize, ImVec2(p.x + pad + isz + px(8), cy - lf->FontSize * 0.5f), fg, label);
+        }
+        if (c) A.page = t.page;
+        tx += tw + tgap;
+    }
+    ImGui::End();
+}
+
 // ---------------------------------------------------------------- sidebar
 
 void sidebar(ImVec2 pos, float w, float h) {
@@ -2777,48 +4860,101 @@ void sidebar(ImVec2 pos, float w, float h) {
     dl->AddLine(ImVec2(pos.x + w - 0.5f, pos.y), ImVec2(pos.x + w - 0.5f, pos.y + h), col(C::border));
     dl->PopClipRect();
 
-    // brand
-    ImVec2 p = ImGui::GetCursorScreenPos();
-    float lz = px(36);
-    draw_logo(dl, ImVec2(p.x + px(4), p.y), lz);
     ImFont* bf = F.bold ? F.bold : ImGui::GetFont();
     ImFont* sf = F.small ? F.small : ImGui::GetFont();
-    float tx = p.x + px(4) + lz + px(12);
-    float ty = p.y + (lz - bf->FontSize - sf->FontSize - px(1)) * 0.5f;
-    dl->AddText(bf, bf->FontSize, ImVec2(tx, ty), col(C::text), "Kor Studio");
-    dl->AddText(sf, sf->FontSize, ImVec2(tx, ty + bf->FontSize + px(1)), col(C::subtle), "v" KOR_VERSION);
-    ImGui::Dummy(ImVec2(0, lz));
-    gap(14);
+    bool folded = A.sidebar_folded;
 
+    // header: fold, "Workspace", new project
     {
-        ImFont* lf = F.small_bold ? F.small_bold : ImGui::GetFont();
+        float s = px(28);
         ImVec2 q = ImGui::GetCursorScreenPos();
-        dl->AddText(lf, lf->FontSize, ImVec2(q.x + px(10), q.y), col(C::subtle), tr(S::Workspace));
-        ImGui::Dummy(ImVec2(0, lf->FontSize));
+        float cw = ImGui::GetContentRegionAvail().x;
+        auto small_btn = [&](const char* id, Icon ic, ImVec2 at, const char* tip, bool framed) {
+            ImGui::SetCursorScreenPos(at);
+            bool c = ImGui::InvisibleButton(id, ImVec2(s, s));
+            bool hov = ImGui::IsItemHovered();
+            if (hov) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                tooltip(tip);
+            }
+            if (hov || framed) dl->AddRectFilled(at, ImVec2(at.x + s, at.y + s), col(hov ? C::surface3 : C::surface2), px(7));
+            if (framed) dl->AddRect(at, ImVec2(at.x + s, at.y + s), col(C::border_hi), px(7));
+            icon(dl, ic, ImVec2(at.x + s * 0.5f, at.y + s * 0.5f), px(14), col(hov ? C::text : mix(C::muted, C::text, 0.4f)));
+            return c;
+        };
+        if (folded) {
+            if (small_btn("##unfold", IC_SIDEBAR, ImVec2(q.x + (cw - s) * 0.5f, q.y), tr(S::UnfoldSidebar), false)) A.sidebar_folded = false;
+        } else {
+            if (small_btn("##fold", IC_X, q, tr(S::FoldSidebar), false)) A.sidebar_folded = true;
+            dl->AddText(bf, bf->FontSize, ImVec2(q.x + s + px(6), q.y + (s - bf->FontSize) * 0.5f), col(C::text), tr(S::WorkspaceTitle));
+            if (small_btn("##newp", IC_PLUS, ImVec2(q.x + cw - s, q.y), tr(S::NewProject), true)) ask_new_project();
+        }
+        ImGui::SetCursorScreenPos(ImVec2(q.x, q.y + s));
+        ImGui::Dummy(ImVec2(0, 0));
+        gap(10);
     }
 
     TrainStats st = A.trainer.stats();
-    static const S nav[] = {S::NavHome, S::NavData, S::NavModel, S::NavTrain, S::NavTest, S::NavFiles, S::NavPlugins};
-    static const Icon icons[] = {IC_HOME, IC_DATA, IC_MODEL, IC_TRAIN, IC_CHAT, IC_FILES, IC_PLUGIN};
+    static const S nav[] = {S::NavHome, S::NavProjects, S::NavData, S::NavModel, S::NavTrain, S::NavTest, S::NavChat, S::NavFiles, S::NavPlugins};
+    static const Icon icons[] = {IC_HOME, IC_FOLDER, IC_DATA, IC_MODEL, IC_TRAIN, IC_CHAT, IC_CHATS, IC_FILES, IC_PLUGIN};
     static_assert(sizeof(nav) / sizeof(nav[0]) == PAGE_COUNT, "one label per page");
+    static const int order[] = {PAGE_HOME, PAGE_PROJECTS, PAGE_MODEL, PAGE_DATA, PAGE_TRAIN, PAGE_TEST, PAGE_CHAT, PAGE_FILES, PAGE_PLUGINS};
+    static_assert(sizeof(order) / sizeof(order[0]) == PAGE_COUNT, "every page in the menu");
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(px(8), px(3)));
-    for (int i = 0; i < PAGE_COUNT; ++i) {
+    for (int i : order) {
         int status = 0;
-        if (i == PAGE_DATA && A.data.kind != DATA_NONE) status = 1;
-        if (i == PAGE_MODEL && A.model) status = 1;
-        if (i == PAGE_TRAIN) status = busy() ? 2 : st.state == TS_DONE ? 1 : 0;
+        if (i == PAGE_TRAIN && busy()) status = 2;
         if (i == PAGE_PLUGINS && A.runner.running()) status = 2;
+        if (i == PAGE_CHAT && A.chat.running) status = 2;
         ImGui::PushID(i);
         if (nav_item(tr(nav[i]), icons[i], A.page == i, status)) A.page = i;
         ImGui::PopID();
     }
     ImGui::PopStyleVar();
 
-    // ---- bottom: training card and language
-    float fh = ImGui::GetFrameHeight();
-    bool show_train = st.total > 0 && st.state != TS_IDLE;
-    float card_h = px(12) * 2 + (F.small_bold ? F.small_bold->FontSize : 13.f) + px(8) + px(4) + px(8) + sf->FontSize;
-    float block = fh + px(14) + px(16) + (show_train ? card_h + px(14) : 0);
+    // ---- projects
+    ImFont* lf = F.small_bold ? F.small_bold : ImGui::GetFont();
+    bool show_train = !folded && st.total > 0 && st.state != TS_IDLE;
+    float card_h = px(12) * 2 + lf->FontSize + px(8) + px(4) + px(8) + sf->FontSize;
+    float user_h = px(52), disk_h = folded ? 0.f : lf->FontSize + px(8) + px(5) + px(16);
+    float block = user_h + px(10) + disk_h + (show_train ? card_h + px(12) : 0);
+    if (!folded) {
+        if (!A.projects_scanned) scan_projects();
+        float room = ImGui::GetWindowHeight() - px(18) - block - ImGui::GetCursorPosY() - px(24);
+        float rh = px(48);
+        int fit = std::clamp((int)(room / rh), 0, 3);
+        int n = std::min(fit, (int)A.projects.size());
+        if (n > 0) {
+            gap(6);
+            ImVec2 q = ImGui::GetCursorScreenPos();
+            float lw = ImGui::GetContentRegionAvail().x;
+            dl->AddLine(ImVec2(q.x, q.y), ImVec2(q.x + lw, q.y), col(C::border));
+            gap(10);
+            for (int i = 0; i < n; ++i) {
+                const State::ProjectInfo& pi = A.projects[i];
+                ImGui::PushID(i);
+                ImVec2 c = ImGui::GetCursorScreenPos();
+                if (ImGui::InvisibleButton("##sproj", ImVec2(lw, rh))) project_open_from_list(pi.dir);
+                bool hov = ImGui::IsItemHovered();
+                if (hov) {
+                    ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                    tooltip(pi.dir.c_str());
+                }
+                bool open = !A.project_dir.empty() && pi.dir == A.project_dir;
+                float t = anim(ImGui::GetItemID(), hov);
+                if (open || t > 0.01f)
+                    dl->AddRectFilled(c, ImVec2(c.x + lw, c.y + rh), col(open ? mix(C::surface2, C::accent, 0.16f) : C::surface2, open ? 1.f : t), px(9));
+                icon(dl, project_icon(pi.kind), ImVec2(c.x + px(18), c.y + rh * 0.5f), px(16), col(open ? C::accent_hi : C::muted));
+                float x = c.x + px(38), tw = lw - px(38) - px(8);
+                float y0 = c.y + (rh - bf->FontSize - sf->FontSize - px(2)) * 0.5f;
+                text_ellipsis(dl, ImGui::GetFont(), ImVec2(x, y0), tw, pi.name.c_str(), col(C::text));
+                text_ellipsis(dl, sf, ImVec2(x, y0 + bf->FontSize + px(2)), tw, project_desc(pi).c_str(), col(C::subtle));
+                ImGui::PopID();
+            }
+        }
+    }
+
+    // ---- bottom: training card, disk usage, user
     float y = std::max(ImGui::GetCursorPosY() + px(10), ImGui::GetWindowHeight() - px(18) - block);
     ImGui::SetCursorPosY(y);
     if (show_train) {
@@ -2852,23 +4988,77 @@ void sidebar(ImVec2 pos, float w, float h) {
         text_ellipsis(dl, sf, ImVec2(x, yy), bw, info.c_str(), col(C::muted));
         gap(4);
     }
-    {
+    if (!folded) {
+        refresh_disk();
         ImVec2 q = ImGui::GetCursorScreenPos();
         float lw = ImGui::GetContentRegionAvail().x;
-        dl->AddLine(ImVec2(q.x - px(14), q.y), ImVec2(q.x + lw + px(14), q.y), col(C::border));
-        ImGui::Dummy(ImVec2(0, px(4)));
+        dl->AddText(lf, lf->FontSize, q, col(C::muted), tr(S::DiskUsage));
+        std::string v = A.disk_total_gb > 0 ? strf("%.0f GB / %.0f GB", A.disk_used_gb, A.disk_total_gb) : std::string("-");
+        float vw = text_size(sf, v.c_str()).x;
+        dl->AddText(sf, sf->FontSize, ImVec2(q.x + lw - vw, q.y + (lf->FontSize - sf->FontSize) * 0.5f), col(C::subtle), v.c_str());
+        float by = q.y + lf->FontSize + px(8);
+        float frac = A.disk_total_gb > 0 ? (float)std::clamp(A.disk_used_gb / A.disk_total_gb, 0.0, 1.0) : 0.f;
+        dl->AddRectFilled(ImVec2(q.x, by), ImVec2(q.x + lw, by + px(5)), col(C::surface3), px(3));
+        if (frac > 0) {
+            ImVec2 a(q.x, by), b(q.x + std::max(px(5), lw * frac), by + px(5));
+            int v0 = dl->VtxBuffer.Size;
+            dl->AddRectFilled(a, b, col(C::accent), px(3));
+            for (int k = v0; k < dl->VtxBuffer.Size; ++k) {
+                float tt = (dl->VtxBuffer[k].pos.x - a.x) / std::max(1.f, b.x - a.x);
+                dl->VtxBuffer[k].col = col(mix(C::accent, C::accent_hi, tt));
+            }
+        }
+        ImGui::Dummy(ImVec2(lw, disk_h));
     }
     {
         ImVec2 q = ImGui::GetCursorScreenPos();
-        icon(dl, IC_GLOBE, ImVec2(q.x + px(10), q.y + fh * 0.5f), px(16), col(C::muted));
-        ImGui::Dummy(ImVec2(px(24), fh));
-        ImGui::SameLine(0, px(6));
-        ImGui::SetNextItemWidth(-FLT_MIN);
-        if (begin_combo("##lang", language_name(get_language()))) {
+        float lw = ImGui::GetContentRegionAvail().x;
+        float sidepad = ImGui::GetStyle().WindowPadding.x;
+        dl->AddLine(ImVec2(q.x - sidepad, q.y), ImVec2(q.x + lw + sidepad, q.y), col(C::border));
+        ImGui::Dummy(ImVec2(0, px(10)));
+        q = ImGui::GetCursorScreenPos();
+        if (ImGui::InvisibleButton("##user", ImVec2(lw, user_h - px(10)))) ImGui::OpenPopup("##usermenu");
+        bool hov = ImGui::IsItemHovered();
+        if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        float rh = user_h - px(10);
+        if (hov) dl->AddRectFilled(q, ImVec2(q.x + lw, q.y + rh), col(C::surface2), px(9));
+        float av = px(32);
+        ImVec2 ac(folded ? q.x + lw * 0.5f : q.x + px(4) + av * 0.5f, q.y + rh * 0.5f);
+        dl->AddCircleFilled(ac, av * 0.5f, col(mix(C::surface3, C::accent, 0.45f)), 32);
+        std::string initial = "?";
+        if (!A.user.empty()) {
+            unsigned char c0 = (unsigned char)A.user[0];
+            size_t n = c0 < 0x80 ? 1 : c0 < 0xE0 ? 2 : c0 < 0xF0 ? 3 : 4;
+            initial = A.user.substr(0, n);
+            if (n == 1) initial[0] = (char)std::toupper(c0);
+        }
+        ImVec2 isz = text_size(bf, initial.c_str());
+        dl->AddText(bf, bf->FontSize, ImVec2(ac.x - isz.x * 0.5f, ac.y - isz.y * 0.5f), col(C::text), initial.c_str());
+        if (folded) {
+            if (hov) tooltip(A.user.c_str());
+        } else {
+            float x = q.x + px(4) + av + px(10), tw = lw - (x - q.x) - px(22);
+            float y0 = q.y + (rh - bf->FontSize - sf->FontSize - px(2)) * 0.5f;
+            text_ellipsis(dl, bf, ImVec2(x, y0), tw, A.user.empty() ? "-" : A.user.c_str(), col(C::text));
+            dl->AddText(sf, sf->FontSize, ImVec2(x, y0 + bf->FontSize + px(2)), col(C::subtle), tr(S::LocalAccount));
+            icon(dl, IC_CHEVRON_DOWN, ImVec2(q.x + lw - px(10), q.y + rh * 0.5f), px(12), col(C::muted));
+        }
+        ImGui::SetNextWindowPos(ImVec2(q.x, q.y - px(6)), ImGuiCond_Always, ImVec2(0, 1));
+        ImGui::SetNextWindowSizeConstraints(ImVec2(px(210), 0), ImVec2(px(320), FLT_MAX));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(px(10), px(10)));
+        if (ImGui::BeginPopup("##usermenu")) {
+            {
+                FontScope fs(F.small_bold);
+                text(tr(S::Language), C::subtle);
+            }
             for (int l = 0; l < LANG_COUNT; ++l)
                 if (ImGui::Selectable(language_name(l), l == get_language())) set_language(l);
-            ImGui::EndCombo();
+            ImGui::Separator();
+            if (ImGui::Selectable(tr(S::Settings))) A.want_settings = true;
+            if (ImGui::Selectable(tr(S::Terminal))) open_terminal_here();
+            ImGui::EndPopup();
         }
+        ImGui::PopStyleVar();
     }
     ImGui::End();
 }
@@ -2895,23 +5085,39 @@ void init(float ui_scale) {
             size_t tab = value.find('\t');
             if (tab != std::string::npos) A.saved_args[value.substr(0, tab)] = value.substr(tab + 1);
         }
+        else if (key == "chat" && !value.empty()) A.chat.recent.push_back(value);
+        else if (key == "project" && !value.empty()) A.recent_projects.push_back(value);
+        else if (key == "dataset" && !value.empty()) A.recent_data.push_back(value);
+        else if (key == "fold") A.sidebar_folded = value == "1";
     }
     set_language(lang);
+    const char* shown_user = std::getenv("KOR_USER");
+    A.user = shown_user && *shown_user ? shown_user : user_name();
+    load_hero();
     scan_all_plugins();
     A.python.start();
+    refresh_resume();
+    load_activity();
+    A.seen_activity = A.activity.size();
 }
 
 void shutdown() {
     A.runner.cancel();
-    A.trainer.stop();
+    A.trainer.stop();  // an unfinished run saves itself here
+    chat_stop();
     stop_media_gen();
     stop_sound();
     if (!A.save_settings) return;
+    save_open_project();
     for (size_t i = 0; i < A.plugins.size() && i < A.plugin_args.size(); ++i)
         A.saved_args[A.plugins[i].file] = A.plugin_args[i].data();
     std::ofstream out(upath(settings_file()), std::ios::binary);
     out << "lang " << get_language() << "\n";
     for (auto& s : A.skills_on) out << "skill " << s << "\n";
+    for (auto& r : A.chat.recent) out << "chat " << r << "\n";
+    for (auto& r : A.recent_projects) out << "project " << r << "\n";
+    for (auto& r : A.recent_data) out << "dataset " << r << "\n";
+    out << "fold " << (A.sidebar_folded ? 1 : 0) << "\n";
     for (auto& kv : A.saved_args) {
         auto p = std::find_if(A.plugins.begin(), A.plugins.end(), [&](const Plugin& x) { return x.file == kv.first; });
         if (p != A.plugins.end() && p->args == kv.second) continue;  // still the default
@@ -2942,6 +5148,32 @@ bool load_data(const char* path) {
 
 bool load_model(const char* path) { return load_model_file(path); }
 
+bool chat_load(const char* path) { return chat_open(path); }
+
+bool open_project(const char* path) {
+    std::string err;
+    bool ok = open_project_dir(path, err);
+    A.project_ok = ok && err.empty();
+    A.project_msg = err;
+    return ok;
+}
+
+bool save_project_to(const char* dir) {
+    std::string err, name = upath(dir).filename().u8string();
+    if (!save_project(dir, name, A.project_desc, err)) {
+        A.project_ok = false;
+        A.project_msg = err;
+        return false;
+    }
+    A.project_dir = upath(dir).u8string();
+    A.project_name = name;
+    remember_project(A.project_dir);
+    A.projects_scanned = false;
+    return true;
+}
+
+void chat_say(const char* text) { chat_send(text); }
+
 void generate_media() {
     if (A.model && A.model->spec.kind == MODEL_GPT && A.model->spec.media != MEDIA_TEXT) start_media_gen();
 }
@@ -2961,33 +5193,59 @@ void scroll_to_end() { A.scroll_end = true; }
 
 void load_community_list() { A.want_community = true; }
 
+void set_custom_frame(bool on, bool maximized) {
+    A.custom_frame = on;
+    A.maximized = maximized;
+}
+
+bool title_bar_drag_at(float x, float y) {
+    if (!A.custom_frame || y < 0 || y >= A.title_h) return false;
+    for (const ImVec4& r : A.title_hot)
+        if (x >= r.x && x < r.z && y >= r.y && y < r.w) return false;
+    return true;
+}
+
+int take_window_command() {
+    int c = A.window_cmd;
+    A.window_cmd = WIN_NONE;
+    return c;
+}
+
 void frame() {
     pump_events();
     poll_plugin();
+    chat_pump();
     const ImGuiViewport* vp = ImGui::GetMainViewport();
-    float sbw = px(236);
-    sidebar(vp->WorkPos, sbw, vp->WorkSize.y);
+    float tbh = px(52), sbw = A.sidebar_folded ? px(68) : px(232);
+    title_bar(vp->WorkPos, vp->WorkSize.x, tbh, sbw);
+    sidebar(ImVec2(vp->WorkPos.x, vp->WorkPos.y + tbh), sbw, vp->WorkSize.y - tbh);
 
     ImGuiWindowFlags wf = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
                           ImGuiWindowFlags_NoBringToFrontOnFocus;
     wf &= ~ImGuiWindowFlags_NoScrollbar;
-    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + sbw, vp->WorkPos.y));
-    ImGui::SetNextWindowSize(ImVec2(vp->WorkSize.x - sbw, vp->WorkSize.y));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(px(32), px(28)));
+    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + sbw, vp->WorkPos.y + tbh));
+    ImGui::SetNextWindowSize(ImVec2(vp->WorkSize.x - sbw, vp->WorkSize.y - tbh));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(px(18), px(16)));
     ImGui::Begin("##content", nullptr, wf);
     ImGui::PopStyleVar();
     ImGui::PushID(A.page);
     switch (A.page) {
         case PAGE_HOME: page_home(); break;
+        case PAGE_PROJECTS: page_projects(); break;
         case PAGE_DATA: page_data(); break;
         case PAGE_MODEL: page_model(); break;
         case PAGE_TRAIN: page_train(); break;
         case PAGE_TEST: page_test(); break;
+        case PAGE_CHAT: page_chat(); break;
         case PAGE_FILES: page_files(); break;
         case PAGE_PLUGINS: page_plugins(); break;
     }
     ImGui::PopID();
     gap(4);
+    shortcuts();
+    new_project_modal();
+    settings_modal();
+    command_palette();
     if (A.page != PAGE_TEST) pump_generation();
     if (A.want_community && A.python.found() && !A.runner.running()) {
         A.want_community = false;

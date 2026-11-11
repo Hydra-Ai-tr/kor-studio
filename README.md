@@ -58,6 +58,18 @@ code a readable reference for how training actually works.
   training, keeps the checkpoint that answered the most questions, and can stop as soon as every
   answer is correct.
 - **Training log.** Every event is shown in the app and saved to a timestamped log file.
+- **Crash-safe training.** A run saves itself every minute, when paused and when stopped
+  (weights, optimizer state, best weights, curves). After a power cut or a closed app the next
+  start offers *Continue training*, which picks up at the exact step. Saves go to a temporary
+  file first and the previous one is kept as a backup, so a half-written file never breaks a run.
+- **Chat page.** Finished models are saved automatically; pick any `.kor` model and talk to it,
+  with temperature, answer length and conversation memory settings.
+- **Projects.** A project folder keeps the dataset, its model, the training settings and the
+  question tests together; it saves itself when a training finishes and when the app closes.
+  The home page shows recent projects, recent activity, model and dataset counts and the live
+  CPU, memory and GPU memory load. `Ctrl+K` searches pages and actions, `Ctrl+S` saves the
+  project, `Ctrl+O` opens one, `Ctrl+,` opens the settings and ``Ctrl+` `` opens a terminal with
+  `kor-cli` ready in the project folder.
 - **Training skills in Python.** Skills run next to the trainer and steer it live: they change
   the learning rate, add training examples where the model is weak, restore the best weights,
   stop early and chart their own metrics. Write one in a few lines with the `kor` library.
@@ -68,7 +80,7 @@ code a readable reference for how training actually works.
 - **Open model format.** Models are saved as [`.kor` files](docs/kor-format.md), optionally in
   half precision.
 - **Command-line tool.** `kor-cli` trains, tests and samples models for scripting and CI.
-- **Modern desktop interface.** A sidebar workspace with cards, live status and a dark theme,
+- **Modern desktop interface.** A sidebar workspace with cards, live status and a dark purple theme,
   rendered with Dear ImGui and scaled for high-DPI screens.
 - **Three interface languages.** English, Turkish and Russian, switchable at runtime.
 
@@ -205,6 +217,7 @@ kor-cli test chat.kor tests.txt --data examples/diyalog_tr.txt
 kor-cli generate chat.kor "Kullanıcı: Merhaba" --len 200
 kor-cli train big.txt --subword 2000 --out llm.kor          # subword language model
 kor-cli train chat.txt --from llm.kor --lora 8 --out chat.kor  # fine-tune a saved model
+kor-cli train big.txt --out llm.kor --resume                # continue a cut-off run (Ctrl+C saves and stops)
 kor-cli demo-images pictures && kor-cli train pictures --out img.kor
 kor-cli generate img.kor --count 16 --out new.png           # a sheet of new pictures
 kor-cli demo-sounds melodies && kor-cli train melodies --out snd.kor
@@ -217,6 +230,8 @@ Training options: `--steps N`, `--patience N` (early stopping), `--tests file`,
 `--no-mirror` (images), `--rate N` (sound), `--from model.kor [--lora R]` (fine-tuning),
 `--dim/--layers/--heads/--ctx` (model size), `--lr`, `--batch`, `--threads`, `--seed`, `--wd`,
 `--align 0..1`, `--prompt-weight 0..1`, `--dropout X`, `--ema 0.999`,
+`--resume` / `--fresh` / `--checkpoint file` / `--checkpoint-every 60` / `--no-checkpoint`
+(autosave, by default to `<out>.autosave`),
 `--skill "file.py [args]"` (repeatable), `--python <command>`, `--lang en|tr|ru`.
 
 ### How images and sound are learned
