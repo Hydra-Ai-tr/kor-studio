@@ -298,7 +298,10 @@ llama.cpp. Supported are the `llama` and `qwen2` architectures (Llama 2/3, Mistr
 Qwen2/2.5) with F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0 and Q2_K–Q6_K weights. The weights
 stay quantized and the file is memory-mapped; the tokenizer (byte-level BPE or SentencePiece)
 and the chat format (ChatML, Llama 3, Mistral, Phi-3, Zephyr, Gemma) come from the file.
-SmolLM2-135M-Instruct (Q4_K_M) writes about 55–60 tokens per second on an i5-12500H.
+On an i5-12500H (CPU only), SmolLM2-135M-Instruct writes about 55 tokens per second,
+Qwen2.5-0.5B-Instruct about 15 and Llama-3.2-1B-Instruct about 6 (all Q4_K_M).
+`kor-cli gguf tokenize` shows the token ids of a text and `kor-cli gguf ppl` measures the
+perplexity of a model on a text file.
 
 `kor-cli gguf lora model.gguf data.txt` trains a LoRA adapter (`--rank 8`, `--mlp` for the
 feed-forward layers too) while the base stays frozen; with dialogue data only the answers are

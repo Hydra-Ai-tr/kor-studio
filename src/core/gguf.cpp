@@ -1953,8 +1953,8 @@ bool lora_train(GgufModel& m, const LoraData& data, const LoraConfig& cfg,
         pr.step = step;
         pr.loss = loss;
         pr.tok_s = (float)(B * T / std::max(1e-6, sec));
-        if (vb && (step % std::max(1, c.eval_every) == 0 || step == c.steps))
-            pr.val = m.lora_loss(vids.data(), vtg.data(), vw.data(), vb, T, false);
+        pr.evaluated = vb && (step % std::max(1, c.eval_every) == 0 || step == c.steps);
+        if (pr.evaluated) pr.val = m.lora_loss(vids.data(), vtg.data(), vw.data(), vb, T, false);
         if (on_step && !on_step(pr)) break;
     }
     return true;

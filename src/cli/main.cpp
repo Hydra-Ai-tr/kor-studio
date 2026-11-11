@@ -1624,7 +1624,7 @@ static Sampling sampling_flags(const std::vector<std::string>& a, const char* te
     return s;
 }
 
-// kor-cli gguf info|chat|generate|lora <model.gguf> ...
+// kor-cli gguf info|chat|generate|tokenize|ppl|lora <model.gguf> ...
 static int gguf_cmd(const std::vector<std::string>& a) {
     std::string sub = a[2], path = a[3], err;
     int threads = std::atoi(flag(a, "--threads", "0").c_str());
@@ -1651,6 +1651,54 @@ static int gguf_cmd(const std::vector<std::string>& a) {
         std::printf("LoRA adapter %s (rank %d)\n", lp.c_str(), m->lora_cfg.rank);
     }
     if (sub == "info") return 0;
+    if (sub == "tokenize") {
+        std::string text = a.size() > 4 && a[4].compare(0, 2, "--") != 0 ? a[4] : "", file = flag(a, "--file");
+        if (!file.empty()) {
+            std::ifstream in(upath(file), std::ios::binary);
+            if (!in) {
+                std::printf("error: cannot read %s\n", file.c_str());
+                return 1;
+            }
+            text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
+        std::vector<int> ids = m->encode(text, false, has_flag(a, "--special"));
+        std::printf("%zu tokens:", ids.size());
+        for (int id : ids) std::printf(" %d", id);
+        std::printf("\n");
+        return 0;
+    }
+    if (sub == "ppl") {
+        std::string file = a.size() > 4 && a[4].compare(0, 2, "--") != 0 ? a[4] : flag(a, "--file");
+        std::ifstream in(upath(file), std::ios::binary);
+        if (!in) {
+            std::printf("error: cannot read %s\n", file.c_str());
+            return 1;
+        }
+        std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        int T = std::max(8, std::min(m->ctx, std::atoi(flag(a, "--seq", "512").c_str())));
+        int max_chunks = std::atoi(flag(a, "--chunks", "0").c_str());
+        std::vector<int> ids = m->encode(text, true, false);
+        std::vector<int> x(T), y(T);
+        std::vector<float> w(T, 1.f);
+        double sum = 0;
+        int n = 0;
+        auto t = std::chrono::steady_clock::now();
+        for (size_t s = 0; s + T + 1 <= ids.size() && (max_chunks <= 0 || n < max_chunks); s += T) {
+            for (int i = 0; i < T; ++i) { x[i] = ids[s + i]; y[i] = ids[s + i + 1]; }
+            float loss = m->lora_loss(x.data(), y.data(), w.data(), 1, T, false);
+            sum += loss;
+            ++n;
+            std::printf("chunk %d  loss %.4f  perplexity %.2f\n", n, loss, std::exp(loss));
+        }
+        if (!n) {
+            std::printf("error: the text has %zu tokens, fewer than --seq %d + 1\n", ids.size(), T);
+            return 1;
+        }
+        double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count();
+        std::printf("%d chunks of %d tokens: loss %.4f, perplexity %.2f (%.0f tokens/s)\n", n, T, sum / n,
+                    std::exp(sum / n), n * (double)T / std::max(1e-6, sec));
+        return 0;
+    }
     std::string seed = flag(a, "--seed");
     Rng rng(seed.empty() ? (uint64_t)std::chrono::steady_clock::now().time_since_epoch().count() : std::strtoull(seed.c_str(), nullptr, 10));
     int len = std::max(1, std::atoi(flag(a, "--len", "512").c_str()));
@@ -1727,7 +1775,7 @@ static int gguf_cmd(const std::vector<std::string>& a) {
         std::signal(SIGINT, [](int) { stop = true; });
         bool ok = lora_train(*m, d, lc, [&](const LoraProgress& p) {
             char val[48] = "";
-            if (p.val >= 0) std::snprintf(val, sizeof val, "  validation %.4f", p.val);
+            if (p.evaluated) std::snprintf(val, sizeof val, "  validation %.4f", p.val);
             std::printf("step %d/%d  loss %.4f%s  %.0f tokens/s\n", p.step, p.steps, p.loss, val, p.tok_s);
             std::fflush(stdout);
             return !stop.load();
@@ -1813,6 +1861,8 @@ int main(int argc, char** argv) {
                 "  kor-cli gguf info|chat|generate <model.gguf> [prompt]   ready-made Llama / Mistral / Qwen2 models\n"
                 "                [--prompt \"...\"] [--system \"...\"] [--lora adapter.gguf] [--ctx 4096] [--len N]\n"
                 "                [--temp T] [--top-p P] [--top-k K] [--repeat R] [--threads N] [--seed N]\n"
+                "  kor-cli gguf tokenize <model.gguf> [text] [--file f] [--special]   token ids of a text\n"
+                "  kor-cli gguf ppl <model.gguf> <text file> [--seq 512] [--chunks N]   perplexity on a text\n"
                 "  kor-cli gguf lora <model.gguf> <data.txt> [--out adapter.gguf] [--rank 8] [--alpha 16] [--mlp]\n"
                 "                [--steps 200] [--batch 4] [--seq 256] [--lr 2e-4] [--q-tag ...] [--a-tag ...]\n"
                 "                      LoRA fine-tuning on the frozen model; dialogue data trains the answers only\n"

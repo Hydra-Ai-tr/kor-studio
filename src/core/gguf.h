@@ -154,7 +154,8 @@ LoraData lora_data(const GgufModel& m, const std::string& text, const std::strin
 
 struct LoraProgress {
     int step = 0, steps = 0;
-    float loss = 0, val = -1, tok_s = 0;
+    float loss = 0, val = -1, tok_s = 0;  // val: the latest validation loss
+    bool evaluated = false;                // val was computed at this step
 };
 // Trains the model's LoRA adapter on `data` (10% held out when it is long enough).
 // on_step returns false to stop. Returns false with *err on failure.
